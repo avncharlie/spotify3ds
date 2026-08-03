@@ -17,3 +17,7 @@ log.txt
 
 # macOS
 .DS_Store
+
+# hardware loop
+.hwip
+.hwrun.log

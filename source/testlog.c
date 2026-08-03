@@ -24,6 +24,16 @@ static void emit(FILE *f, const char *line)
 	fflush(f);
 }
 
+/* Mirror to stdout as well. Under `3dslink -s` this streams over the network to
+ * the host terminal, which is the only practical way to see what is happening
+ * on real hardware: 3dslink cannot read files back off the SD card. */
+static void emit_stdout(const char *line)
+{
+	fputs(line, stdout);
+	fputc('\n', stdout);
+	fflush(stdout);
+}
+
 void tl_init(int phase)
 {
 	s_phase = phase;
@@ -46,6 +56,22 @@ void tl_log(const char *fmt, ...)
 	va_end(ap);
 
 	emit(s_log, buf);
+	emit_stdout(buf);
+}
+
+void tl_banner(const char *fmt, ...)
+{
+	char    buf[512];
+	char    line[544];
+	va_list ap;
+
+	va_start(ap, fmt);
+	vsnprintf(buf, sizeof buf, fmt, ap);
+	va_end(ap);
+
+	snprintf(line, sizeof line, "BANNER %s", buf);
+	emit(s_log, line);
+	emit_stdout(line);
 }
 
 void tl_step(const char *step, int pass, const char *fmt, ...)
@@ -67,6 +93,7 @@ void tl_step(const char *step, int pass, const char *fmt, ...)
 
 	emit(s_result, line);
 	emit(s_log, line);
+	emit_stdout(line);
 }
 
 void tl_done(void)

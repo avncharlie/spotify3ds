@@ -1,4 +1,5 @@
 #include <3ds.h>
+#include <3ds/3dslink.h>
 #include <citro2d.h>
 #include <stdio.h>
 #include <string.h>
@@ -26,6 +27,9 @@
 #define CLR_BTN    C2D_Color32(0x28, 0x28, 0x28, 0xFF)
 #define CLR_BTN_ON C2D_Color32(0x3A, 0x3A, 0x3A, 0xFF)
 #define CLR_BOT_BG C2D_Color32(0x0E, 0x0E, 0x0E, 0xFF)
+/* Setup failures render in red so they cannot be mistaken for the idle state. */
+#define CLR_ERROR     C2D_Color32(0xFF, 0x6B, 0x5B, 0xFF)
+#define CLR_ERROR_DIM C2D_Color32(0xC0, 0x55, 0x4A, 0xFF)
 
 /* Cover art placement */
 #define ART_X 16.0f
@@ -76,6 +80,62 @@ static long g_base_progress;
 static u64  g_base_time;
 
 static album_art g_art;
+
+/* True when running under the headless harness, which needs the app to quit by
+ * itself. On a real console the app must stay up until the user exits. */
+static bool g_smoketest;
+
+/* One machine-readable block describing what this run is executing on, so a
+ * transcript alone explains itself. rtc= in particular turns TLS certificate
+ * validity from a hypothesis into an observation, and build= stops us chasing
+ * bugs in a stale .3dsx. */
+static void emit_banner(int link_fd)
+{
+	bool is_new3ds = false;
+	APT_CheckNew3DS(&is_new3ds);
+
+	tl_banner("build=%s %s new3ds=%d", __DATE__, __TIME__, (int)is_new3ds);
+
+	char sysver[32] = "";
+	if (R_SUCCEEDED(
+	        osGetSystemVersionDataString(NULL, NULL, sysver, sizeof sysver)) &&
+	    sysver[0])
+		tl_banner("firmware=%s", sysver);
+
+	/* Local time as the console sees it. mbedTLS validates notBefore/notAfter
+	 * against this, so a wrong clock shows up here rather than as an opaque
+	 * certificate error later. */
+	time_t     now = time(NULL);
+	struct tm *tm  = gmtime(&now);
+	if (tm)
+		tl_banner("rtc=%04d-%02d-%02dT%02d:%02d:%02d epoch=%lld",
+		          tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday, tm->tm_hour,
+		          tm->tm_min, tm->tm_sec, (long long)now);
+
+	/* art.c needs a 256KB linear texture plus a malloc for the decoded JPEG,
+	 * and Azahar is far more permissive about both than a real console. */
+	tl_banner("linear_free=%u", (unsigned)linearSpaceFree());
+
+	tl_banner("netload=%d link_fd=%d smoketest=%d", link_fd >= 0 ? 1 : 0,
+	          link_fd, (int)g_smoketest);
+
+	FILE *f = fopen("sdmc:/spotify/creds.cfg", "r");
+	if (!f) {
+		tl_banner("creds=MISSING path=sdmc:/spotify/creds.cfg");
+	} else {
+		char line[256];
+		int  id = 0, rt = 0;
+		while (fgets(line, sizeof line, f)) {
+			line[strcspn(line, "\r\n")] = '\0';
+			if (strncmp(line, "client_id=", 10) == 0)
+				id = (int)strlen(line) - 10;
+			else if (strncmp(line, "refresh_token=", 14) == 0)
+				rt = (int)strlen(line) - 14;
+		}
+		fclose(f);
+		tl_banner("creds=found id_len=%d rt_len=%d", id, rt);
+	}
+}
 
 static void fmt_time(long ms, char *out, int outlen)
 {
@@ -200,9 +260,6 @@ static void draw_text_fit(C2D_TextBuf buf, const char *s, float x, float y,
 
 int main(int argc, char **argv)
 {
-	(void)argc;
-	(void)argv;
-
 	gfxInitDefault();
 	C3D_Init(C3D_DEFAULT_CMDBUF_SIZE);
 	C2D_Init(C2D_DEFAULT_MAX_OBJECTS);
@@ -210,18 +267,48 @@ int main(int argc, char **argv)
 
 	tl_init(PHASE);
 
+	/* Auto-exit is opt-in, so a real console runs until the user quits.
+	 *   emulator: dev.sh touches sdmc:/spotify/.smoketest
+	 *   hardware: dev.sh passes `3dslink -0 <target>-smoketest`, since
+	 *             3dslink 0.6.3 can set argv[0] but no other argument. */
+	{
+		FILE *f = fopen("sdmc:/spotify/.smoketest", "r");
+		if (f) {
+			g_smoketest = true;
+			fclose(f);
+		}
+	}
+	if (argc > 0 && argv[0] && strstr(argv[0], "smoketest"))
+		g_smoketest = true;
+
 	C3D_RenderTarget *top    = C2D_CreateScreenTarget(GFX_TOP, GFX_LEFT);
 	C3D_RenderTarget *bottom = C2D_CreateScreenTarget(GFX_BOTTOM, GFX_LEFT);
 
 	C2D_TextBuf textbuf = C2D_TextBufNew(4096);
 
 	char err[256];
-	if (!net_init(err, sizeof err))
+	bool net_up = net_init(err, sizeof err);
+
+	/* With `3dslink -s`, redirect stdout/stderr over the network to the host
+	 * terminal. This is the only way to see diagnostics from real hardware,
+	 * since 3dslink cannot read files back off the SD card. Requires sockets,
+	 * so it must follow net_init(). Harmless when not netloaded. */
+	if (net_up) {
+		int lfd = link3dsStdio();
+		emit_banner(lfd);
+	}
+
+	if (!net_up) {
 		tl_step("net_init", 0, "%s", err);
-	else if (!worker_start(err, sizeof err))
+		worker_set_fatal("No network", "Check the console's WiFi connection");
+	} else if (!worker_start(err, sizeof err)) {
 		tl_step("worker_start", 0, "%s", err);
-	else
-		tl_step("worker_start", 1, "network thread on core 1");
+		/* Without this the UI would render a dead worker as the ordinary
+		 * "Nothing playing" state, which is what made this fail silently. */
+		worker_set_fatal("Internal error", err);
+	} else {
+		tl_step("worker_start", 1, "network thread started");
+	}
 
 	touch_state     touch = {.press_id = -1, .clicked = -1};
 	worker_snapshot snap  = {0};
@@ -369,12 +456,27 @@ int main(int argc, char **argv)
 			draw_text_fit(textbuf, snap.state.album, tx, 104.0f, 0.40f, tw,
 			              CLR_FAINT);
 		} else {
-			draw_text_fit(textbuf,
-			              snap.status[0] ? snap.status : "Nothing playing", tx,
-			              54.0f, 0.50f, tw, CLR_DIM);
-			if (snap.last_result == PLAYER_NO_DEVICE)
-				draw_text_fit(textbuf, "Start Spotify on a device", tx, 84.0f,
-				              0.36f, tw, CLR_FAINT);
+			/* A setup failure must never look like the ordinary idle state.
+			 * Showing "Nothing playing" for a dead worker is exactly what made
+			 * the core-1 threadCreate failure invisible. */
+			const char *primary =
+			    snap.fatal ? snap.status
+			               : (snap.status[0] ? snap.status : "Nothing playing");
+
+			draw_text_fit(textbuf, primary, tx, 54.0f, 0.50f, tw,
+			              snap.fatal ? CLR_ERROR : CLR_DIM);
+
+			/* Say what to actually do about it. Diagnosing this on hardware
+			 * without a console is otherwise painful. */
+			const char *hint = NULL;
+			if (snap.fatal)
+				hint = snap.status_hint;
+			else if (snap.last_result == PLAYER_NO_DEVICE)
+				hint = "Start Spotify on a device";
+
+			if (hint)
+				draw_text_fit(textbuf, hint, tx, 84.0f, 0.34f, tw,
+				              snap.fatal ? CLR_ERROR_DIM : CLR_FAINT);
 		}
 
 		/* --- bottom screen --------------------------------------------- */
@@ -428,9 +530,10 @@ int main(int argc, char **argv)
 
 		C3D_FrameEnd(0);
 
-		/* Headless smoke run: exit after ~7s having exercised the UI loop,
-		 * worker and art path. Hold SELECT to keep it open. */
-		if (++frames == 420 && !(hidKeysHeld() & KEY_SELECT)) {
+		/* The headless harness needs the app to exit on its own; a real console
+		 * must not. So auto-exit is opt-in, enabled only by the presence of
+		 * sdmc:/spotify/.smoketest (which dev.sh creates). */
+		if (++frames == 420 && g_smoketest) {
 			tl_step("ui_loop", 1, "%d frames, art=%d", frames,
 			        (int)g_art.valid);
 			tl_done();

@@ -26,12 +26,20 @@ typedef struct {
 	player_state  state;
 	bool          have_state;
 	player_result last_result;
-	char          status[128]; /* human-readable status for the UI */
-	bool          busy;        /* a command or poll is in flight */
+	char          status[128];      /* human-readable status for the UI */
+	char          status_hint[128]; /* what the user should do about it */
+	bool          fatal;            /* setup problem, not a transient state */
+	bool          busy;             /* a command or poll is in flight */
 } worker_snapshot;
 
 bool worker_start(char *err, int errlen);
 void worker_stop(void);
+
+/* Put the UI into the fatal state from the caller's side. Needed because
+ * worker_start can fail before the thread ever runs, and the in-thread
+ * set_fatal path would then never be reached - which is how a dead worker came
+ * to render as the ordinary "Nothing playing" state. */
+void worker_set_fatal(const char *what, const char *hint);
 
 /* Queue a command. arg is position_ms for CMD_SEEK, 0/1 for CMD_SHUFFLE. */
 void worker_post(worker_cmd cmd, long arg);

@@ -5,7 +5,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "../testlog.h"
+#include "httppool.h"
 #include "tls.h"
+
+static bool http_exchange(const char *host, const char *method,
+                          const char *path, const char *bearer,
+                          const char *ctype, const char *body,
+                          http_response *out, bool *out_reused,
+                          bool *retryable, char *err, int errlen);
 
 /* Spotify JSON responses are a few KB; album art is ~41KB. */
 #define MAX_RESPONSE (256 * 1024)
@@ -132,7 +140,39 @@ bool http_request(const char *host, const char *method, const char *path,
 {
 	memset(out, 0, sizeof *out);
 
-	tls_conn *c = tls_connect(host, 443, err, errlen);
+	/* One retry: a pooled connection can be closed by the peer between us
+	 * taking it and writing to it, which is indistinguishable from a transport
+	 * error until we try. Retrying once on a *reused* connection turns that
+	 * into a reconnect instead of a spurious failure. */
+	for (int attempt = 0; attempt < 2; attempt++) {
+		bool reused = false;
+		bool retryable;
+
+		if (http_exchange(host, method, path, bearer, ctype, body, out, &reused,
+		                  &retryable, err, errlen))
+			return true;
+
+		if (!(reused && retryable))
+			return false;
+
+		tl_log("pooled connection to %s was stale, redialling", host);
+	}
+
+	return false;
+}
+
+/* One request/response over a single connection, taken from the pool.
+ * *out_reused says whether the connection came from the pool; *retryable says
+ * whether the failure is the kind a fresh connection would fix. */
+static bool http_exchange(const char *host, const char *method,
+                          const char *path, const char *bearer,
+                          const char *ctype, const char *body,
+                          http_response *out, bool *out_reused,
+                          bool *retryable, char *err, int errlen)
+{
+	*retryable = false;
+
+	tls_conn *c = pool_take(host, 443, out_reused, err, errlen);
 	if (!c)
 		return false;
 
@@ -140,12 +180,14 @@ bool http_request(const char *host, const char *method, const char *path,
 	growbuf req = {0};
 	char    line[512];
 
+	/* Keep-alive is the whole point: a fresh TLS handshake to Spotify costs
+	 * 700-1500ms and used to be paid on every request. */
 	snprintf(line, sizeof line,
 	         "%s %s HTTP/1.1\r\n"
 	         "Host: %s\r\n"
 	         "User-Agent: spotify3ds/0.1\r\n"
 	         "Accept: */*\r\n"
-	         "Connection: close\r\n",
+	         "Connection: keep-alive\r\n",
 	         method, path, host);
 	gb_append(&req, line, strlen(line));
 
@@ -172,7 +214,8 @@ bool http_request(const char *host, const char *method, const char *path,
 
 	if (!sent) {
 		snprintf(err, errlen, "send failed");
-		tls_close(c);
+		pool_give(host, 443, c, false);
+		*retryable = true; /* a dead pooled connection looks exactly like this */
 		return false;
 	}
 
@@ -188,11 +231,15 @@ bool http_request(const char *host, const char *method, const char *path,
 		size_t before = raw.len;
 		if (!fill_to(c, &raw, raw.len + 1, &eof)) {
 			snprintf(err, errlen, "read failed");
+			*retryable = (raw.len == 0); /* nothing at all came back */
 			goto fail;
 		}
 		if (eof && raw.len == before) {
 			snprintf(err, errlen, "no headers (got %u bytes)",
 			         (unsigned)raw.len);
+			/* A pooled connection the peer had already closed yields a clean
+			 * EOF with no data - retry on a fresh one. */
+			*retryable = (raw.len == 0);
 			goto fail;
 		}
 	}
@@ -206,8 +253,14 @@ bool http_request(const char *host, const char *method, const char *path,
 	size_t body_start = (size_t)(hdr_end - raw.buf) + 4;
 
 	/* --- body -------------------------------------------------------- */
-	const char *te = find_header(raw.buf, "Transfer-Encoding");
-	const char *cl = find_header(raw.buf, "Content-Length");
+	const char *te   = find_header(raw.buf, "Transfer-Encoding");
+	const char *cl   = find_header(raw.buf, "Content-Length");
+	const char *conn = find_header(raw.buf, "Connection");
+
+	/* Only keep the connection if we can find the end of this body without
+	 * relying on the close itself. Anything else and we would have no way to
+	 * know where the next response starts. */
+	bool keep = !(conn && strncasecmp(conn, "close", 5) == 0);
 
 	growbuf out_body = {0};
 
@@ -227,12 +280,21 @@ bool http_request(const char *host, const char *method, const char *path,
 				break;
 		}
 		size_t have = raw.len > body_start ? raw.len - body_start : 0;
+		if (have < want)
+			keep = false; /* truncated: stream position is unknown */
 		if (have > want)
 			have = want;
 		if (have)
 			gb_append(&out_body, raw.buf + body_start, have);
+	} else if (out->status == 204 || out->status == 304 ||
+	           strcmp(method, "HEAD") == 0) {
+		/* Defined to have no body, so the response ends at the headers. This
+		 * matters for keep-alive: 204 is the normal reply to every playback
+		 * command, and reading to EOF here would block until the server gave
+		 * up on an otherwise healthy connection. */
 	} else {
-		/* No length signalled (e.g. 204): read to EOF. */
+		/* No length signalled at all: the body ends when the connection does,
+		 * so this one cannot be reused. */
 		while (!eof) {
 			size_t before = raw.len;
 			if (!fill_to(c, &raw, raw.len + 1, &eof))
@@ -242,18 +304,19 @@ bool http_request(const char *host, const char *method, const char *path,
 		}
 		if (raw.len > body_start)
 			gb_append(&out_body, raw.buf + body_start, raw.len - body_start);
+		keep = false;
 	}
 
 	out->body     = out_body.buf;
 	out->body_len = out_body.len;
 
 	free(raw.buf);
-	tls_close(c);
+	pool_give(host, 443, c, keep);
 	return true;
 
 fail:
 	free(raw.buf);
-	tls_close(c);
+	pool_give(host, 443, c, false);
 	return false;
 }
 

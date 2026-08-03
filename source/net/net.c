@@ -12,6 +12,7 @@
 #include <unistd.h>
 
 #include "../testlog.h"
+#include "httppool.h"
 
 /* soc requires a page-aligned buffer it uses for its own bookkeeping. */
 #define SOC_ALIGN      0x1000
@@ -71,6 +72,11 @@ void net_exit(void)
 {
 	if (!s_ready)
 		return;
+
+	/* Cached keep-alive connections own sockets, so they must go before
+	 * socExit tears the service down under them. */
+	pool_clear();
+
 	if (s_sslc_up) {
 		sslcExit();
 		s_sslc_up = false;

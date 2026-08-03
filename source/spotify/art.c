@@ -72,6 +72,57 @@ static void tile_rgba(const u8 *src, int src_w, int src_h, u8 *dst, int dim)
 	}
 }
 
+/* --- accent colour -------------------------------------------------------
+ * A flat mean over all pixels trends to muddy grey, because opposing hues
+ * cancel. Weighting each pixel by its saturation instead lets the colours a
+ * person would actually name dominate, while near-grey pixels contribute
+ * little. Very dark and blown-out pixels are skipped so black borders and
+ * white backgrounds do not wash the result out.
+ */
+static void extract_accent(const u8 *rgba, int w, int h, album_art *a)
+{
+	u64 acc_r = 0, acc_g = 0, acc_b = 0, acc_w = 0;
+
+	/* Every 4th pixel in both axes: 1/16th the work, same answer. */
+	for (int y = 0; y < h; y += 4) {
+		for (int x = 0; x < w; x += 4) {
+			const u8 *p = rgba + ((size_t)y * w + x) * 4;
+			const int r = p[0], g = p[1], b = p[2];
+
+			const int mx = r > g ? (r > b ? r : b) : (g > b ? g : b);
+			const int mn = r < g ? (r < b ? r : b) : (g < b ? g : b);
+			if (mx < 32 || mn > 232)
+				continue; /* near-black or near-white */
+
+			const u32 weight = (u32)(mx - mn) + 1; /* saturation */
+			acc_r += (u64)r * weight;
+			acc_g += (u64)g * weight;
+			acc_b += (u64)b * weight;
+			acc_w += weight;
+		}
+	}
+
+	if (!acc_w) {
+		/* Monochrome or empty cover: fall back to a neutral slate. */
+		a->accent_r = a->accent_g = a->accent_b = 40;
+		return;
+	}
+
+	int r = (int)(acc_r / acc_w);
+	int g = (int)(acc_g / acc_w);
+	int b = (int)(acc_b / acc_w);
+
+	/* Darken so white text stays readable over it: the wash should read as
+	 * atmosphere, not as a block of colour competing with the text. */
+	r = r * 45 / 100;
+	g = g * 45 / 100;
+	b = b * 45 / 100;
+
+	a->accent_r = (u8)r;
+	a->accent_g = (u8)g;
+	a->accent_b = (u8)b;
+}
+
 /* Split "https://i.scdn.co/image/<id>" into host and path. */
 static bool split_url(const char *url, char *host, int hostlen, char *path,
                       int pathlen)
@@ -192,6 +243,9 @@ bool art_load(album_art *a, const char *url, char *err, int errlen)
 	http_free(&r);
 
 	/* --- upload -------------------------------------------------------- */
+	album_art staged = {0};
+	extract_accent(linear, w, h, &staged);
+
 	u8 *tiled = linearAlloc((size_t)ART_TEX_SIZE * ART_TEX_SIZE * 4);
 	if (!tiled) {
 		free(linear);
@@ -214,18 +268,25 @@ bool art_load(album_art *a, const char *url, char *err, int errlen)
 	C3D_TexSetFilter(&a->tex, GPU_LINEAR, GPU_LINEAR);
 	linearFree(tiled);
 
-	/* Only the top-left w*h of the texture holds image data. */
+	/* The image occupies the first w*h texels, which - because the PICA200
+	 * addresses textures bottom-up in V - is the TOP-LEFT of the texture as
+	 * uploaded. citro2d's convention is top=1.0 at that edge, decreasing
+	 * downwards, so the populated region runs from v=1.0 down to
+	 * 1 - h/size. */
 	a->sub.width  = (u16)w;
 	a->sub.height = (u16)h;
 	a->sub.left   = 0.0f;
-	a->sub.top    = 1.0f;
 	a->sub.right  = (float)w / ART_TEX_SIZE;
+	a->sub.top    = 1.0f;
 	a->sub.bottom = 1.0f - (float)h / ART_TEX_SIZE;
 
 	a->image.tex    = &a->tex;
 	a->image.subtex = &a->sub;
 	a->src_w        = w;
 	a->src_h        = h;
+	a->accent_r     = staged.accent_r;
+	a->accent_g     = staged.accent_g;
+	a->accent_b     = staged.accent_b;
 	a->decode_ms    = (unsigned)(osGetTime() - t0);
 	a->valid        = true;
 	snprintf(a->url, sizeof a->url, "%s", url);

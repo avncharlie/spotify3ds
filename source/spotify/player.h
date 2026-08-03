@@ -19,6 +19,7 @@ typedef struct {
 	long progress_ms;
 	long duration_ms;
 	bool is_playing;
+	bool shuffle;
 } player_state;
 
 /* GET /v1/me/player/currently-playing */
@@ -30,5 +31,6 @@ player_result player_pause(char *err, int errlen);
 player_result player_next(char *err, int errlen);
 player_result player_prev(char *err, int errlen);
 player_result player_seek(long position_ms, char *err, int errlen);
+player_result player_shuffle(bool on, char *err, int errlen);
 
 const char *player_result_str(player_result r);

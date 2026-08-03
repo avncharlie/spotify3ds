@@ -19,6 +19,10 @@ typedef struct {
 	char               url[256]; /* what is currently loaded */
 	int                src_w, src_h;
 	unsigned           decode_ms;
+
+	/* Dominant colour of the cover, darkened for use as a background wash.
+	 * Extracted from the already-decoded pixels, so it costs nothing extra. */
+	u8 accent_r, accent_g, accent_b;
 } album_art;
 
 /* Fetch and decode the art at `url` into `a`, replacing whatever it held.

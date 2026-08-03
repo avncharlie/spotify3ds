@@ -73,9 +73,11 @@ player_result player_poll(player_state *out, char *err, int errlen)
 {
 	memset(out, 0, sizeof *out);
 
+	/* /me/player rather than /me/player/currently-playing: it is a superset
+	 * that also carries shuffle_state, which the UI needs. */
 	http_response  r;
-	player_result  pr = api_call("GET", "/v1/me/player/currently-playing",
-	                             NULL, NULL, &r, err, errlen);
+	player_result  pr = api_call("GET", "/v1/me/player", NULL, NULL, &r, err,
+	                             errlen);
 	if (pr != PLAYER_OK) {
 		if (pr == PLAYER_ERROR)
 			snprintf(err, errlen, "poll failed");
@@ -101,6 +103,7 @@ player_result player_poll(player_state *out, char *err, int errlen)
 	json_get_int(j, n, "progress_ms", &out->progress_ms);
 	json_get_int(j, n, "item.duration_ms", &out->duration_ms);
 	json_get_bool(j, n, "is_playing", &out->is_playing);
+	json_get_bool(j, n, "shuffle_state", &out->shuffle);
 
 	http_free(&r);
 
@@ -152,5 +155,13 @@ player_result player_seek(long position_ms, char *err, int errlen)
 	char path[96];
 	snprintf(path, sizeof path, "/v1/me/player/seek?position_ms=%ld",
 	         position_ms);
+	return simple_cmd("PUT", path, err, errlen);
+}
+
+player_result player_shuffle(bool on, char *err, int errlen)
+{
+	char path[64];
+	snprintf(path, sizeof path, "/v1/me/player/shuffle?state=%s",
+	         on ? "true" : "false");
 	return simple_cmd("PUT", path, err, errlen);
 }

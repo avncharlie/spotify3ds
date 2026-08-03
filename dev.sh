@@ -2,12 +2,18 @@
 #
 # Build and verify, against either the emulator or a real console.
 #
-#   ./dev.sh                    emulator (Azahar)
-#   ./dev.sh --hw               real hardware over 3dslink
+#   ./dev.sh                    emulator, interactive - runs until you quit it
+#   ./dev.sh --test             emulator, automated - app self-exits, verdict
+#   ./dev.sh --hw               hardware, interactive
+#   ./dev.sh --hw --test        hardware, automated
 #   ./dev.sh --hw --ip A.B.C.D  override the device address
 #   ./dev.sh --build            build only
 #   ./dev.sh --log              also dump the guest debug log
-#   ./dev.sh --timeout N        seconds to wait for DONE
+#   ./dev.sh --timeout N        override the automated-run deadline
+#
+# Interactive runs have no timeout: the app stays up until you close it, which
+# is what you want when actually using or eyeballing it. Only --test arms the
+# auto-exit and the deadline.
 #
 # Both targets share one verdict parser, so a pass means the same thing on
 # each. Exit codes are distinct so the loop is scriptable:
@@ -37,6 +43,7 @@ export DEVKITARM="${DEVKITARM:-/opt/devkitpro/devkitARM}"
 MODE=emu
 BUILD_ONLY=0
 SHOW_LOG=0
+TEST_RUN=0
 TIMEOUT=""
 IP_ARG=""
 # 3dslink retries its connect; this bounds how long we wait for the console to
@@ -46,9 +53,10 @@ CONNECT_DEADLINE=25
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 		--hw)      MODE=hw; shift ;;
+		--test)    TEST_RUN=1; shift ;;
 		--build)   BUILD_ONLY=1; shift ;;
 		--log)     SHOW_LOG=1; shift ;;
-		--timeout) TIMEOUT="$2"; shift 2 ;;
+		--timeout) TIMEOUT="$2"; TEST_RUN=1; shift 2 ;;
 		--ip)      IP_ARG="$2"; shift 2 ;;
 		*) echo "unknown arg: $1" >&2; exit 64 ;;
 	esac
@@ -130,12 +138,24 @@ run_emu() {
 	stop_azahar
 	rm -f "$RESULT_FILE" "$GUEST_LOG"
 	mkdir -p "$SDMC/spotify"
-	# Opt the app into auto-exit. Hardware uses an argv[0] sentinel instead.
-	touch "$SDMC/spotify/.smoketest"
 
-	echo "==> launching Azahar (timeout ${TIMEOUT}s)"
+	# The marker is what arms the app's 420-frame auto-exit. Leaving it in place
+	# for an interactive run would quit the app after ~7s, so clear it.
+	if [[ $TEST_RUN -eq 1 ]]; then
+		touch "$SDMC/spotify/.smoketest"
+	else
+		rm -f "$SDMC/spotify/.smoketest"
+	fi
+
 	# Must go through `open -a`: invoking Contents/MacOS/azahar directly pops a
 	# modal and hangs, and disables camera emulation.
+	if [[ $TEST_RUN -eq 0 ]]; then
+		echo "==> launching Azahar (interactive - close it when done)"
+		open -a "$AZAHAR_APP" --args -w "$THREEDSX"
+		return 0
+	fi
+
+	echo "==> launching Azahar (timeout ${TIMEOUT}s)"
 	open -a "$AZAHAR_APP" --args -w "$THREEDSX"
 
 	local deadline=$((SECONDS + TIMEOUT))
@@ -187,9 +207,12 @@ run_hw() {
 
 	# -s serves the app's stdout back to us after upload; it never returns on
 	# its own, so we own the clock. argv[0] carries the smoketest sentinel,
-	# because 3dslink 0.6.3 cannot pass any other argument.
-	3dslink -s -r 20 -0 "$TARGET-smoketest" -a "$ip" "$THREEDSX" \
-		> "$HW_LOG" 2>&1 &
+	# because 3dslink 0.6.3 cannot pass any other argument - and only for a
+	# --test run, so an interactive one stays up on the console.
+	local arg0="$TARGET"
+	[[ $TEST_RUN -eq 1 ]] && arg0="$TARGET-smoketest"
+
+	3dslink -s -r 20 -0 "$arg0" -a "$ip" "$THREEDSX" > "$HW_LOG" 2>&1 &
 	local pid=$!
 
 	# Phase 1: did we even reach the console?
@@ -211,6 +234,19 @@ run_hw() {
 		dim "main menu, then rerun. (netloading is only accepted there.)"
 		[[ -s "$HW_LOG" ]] && { echo; dim "3dslink said:"; sed 's/^/    /' "$HW_LOG"; }
 		return 2
+	fi
+
+	# Interactive: stream the console's output until the user stops us. This is
+	# the live view of what the app is doing on real hardware.
+	if [[ $TEST_RUN -eq 0 ]]; then
+		green "connected - streaming console output (ctrl-c to stop)"
+		echo
+		trap 'kill "$pid" 2>/dev/null' INT TERM
+		tail -f -n +1 "$HW_LOG" &
+		local tailpid=$!
+		wait "$pid" 2>/dev/null
+		kill "$tailpid" 2>/dev/null
+		return 0
 	fi
 
 	# Phase 2: wait for the app to finish talking.

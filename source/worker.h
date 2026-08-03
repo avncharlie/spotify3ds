@@ -49,3 +49,24 @@ void worker_get(worker_snapshot *out);
 
 /* Ask for a poll on the next worker tick (e.g. after a command). */
 void worker_request_poll(void);
+
+/* --- album art -------------------------------------------------------
+ * Fetching and decoding art costs ~1.5s, almost all of it network. Doing that
+ * inline in the render loop froze the UI for that whole time, so the worker
+ * owns the download and hands back a decoded RGBA buffer; only the (cheap) GPU
+ * upload happens on the main thread, which is where it has to happen. */
+
+typedef struct {
+	unsigned char *rgba;   /* malloc'd, caller takes ownership */
+	int            w, h;
+	unsigned       fetch_ms;
+	unsigned       decode_ms;
+	char           url[256];
+} art_payload;
+
+/* Queue a fetch. Ignored if that URL is already loaded or in flight. */
+void worker_request_art(const char *url);
+
+/* Claim a completed download, if any. Returns false when nothing is ready.
+ * On true, the caller owns payload->rgba and must free() it. */
+bool worker_take_art(art_payload *out);

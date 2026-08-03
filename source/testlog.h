@@ -25,6 +25,13 @@ void tl_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
  * .3dsx. */
 void tl_banner(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 
+/* Enable TIMING output. Off by default so normal runs stay quiet; dev.sh turns
+ * it on for automated runs so latency regressions stay measurable. */
+void tl_set_timing(int on);
+
+/* Latency probe -> "TIMING ...". No-op unless tl_set_timing(1) was called. */
+void tl_timing(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+
 /* Machine-readable verdict -> BOTH testresult.txt and log.txt.
  * Emits: PHASE=<n> STEP=<step> RESULT=PASS|FAIL detail=<...> */
 void tl_step(const char *step, int pass, const char *fmt, ...)

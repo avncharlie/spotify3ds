@@ -2,8 +2,10 @@
 
 #include <3ds.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
+#include "spotify/art.h"
 #include "spotify/auth.h"
 #include "testlog.h"
 
@@ -16,6 +18,12 @@
 #define POLL_PLAYING_MS 3000
 #define POLL_PAUSED_MS  10000
 #define POLL_IDLE_MS    30000
+
+/* After a command, how many extra quick polls to spend waiting for the change
+ * to show up before dropping back to the normal cadence. Each poll is itself a
+ * ~750ms round trip, so this is a short window, not a busy loop. */
+#define SETTLE_RETRIES  3
+#define SETTLE_RETRY_MS 250
 
 static Thread    s_thread;
 static LightLock s_lock;
@@ -49,6 +57,13 @@ static struct {
 static int  s_qhead, s_qtail;
 static bool s_poll_requested;
 
+/* Album art in flight. s_art_want is what the UI asked for; s_art_ready holds a
+ * finished download waiting to be claimed. Guarded by s_lock. */
+static char        s_art_want[256];
+static char        s_art_inflight[256];
+static art_payload s_art_ready;
+static bool        s_art_have;
+
 static void set_status(const char *s)
 {
 	LightLock_Lock(&s_lock);
@@ -67,6 +82,8 @@ static void set_fatal(const char *what, const char *hint)
 	LightLock_Unlock(&s_lock);
 }
 
+static void do_art(void);
+
 static bool pop_cmd(worker_cmd *cmd, long *arg)
 {
 	LightLock_Lock(&s_lock);
@@ -84,7 +101,10 @@ static void do_poll(void)
 {
 	char          err[256];
 	player_state  st;
+	const u64     t0 = osGetTime();
 	player_result pr = player_poll(&st, err, sizeof err);
+
+	tl_timing("poll http took %lldms", (long long)(osGetTime() - t0));
 
 	LightLock_Lock(&s_lock);
 	s_last_result = pr;
@@ -114,6 +134,8 @@ static void do_cmd(worker_cmd cmd, long arg)
 	char          err[256];
 	player_result pr = PLAYER_OK;
 
+	const u64 t0 = osGetTime();
+
 	switch (cmd) {
 		case CMD_PLAY:    pr = player_play(err, sizeof err); break;
 		case CMD_PAUSE:   pr = player_pause(err, sizeof err); break;
@@ -123,6 +145,9 @@ static void do_cmd(worker_cmd cmd, long arg)
 		case CMD_SHUFFLE: pr = player_shuffle(arg != 0, err, sizeof err); break;
 		default: return;
 	}
+
+	tl_timing("cmd %d http took %lldms", (int)cmd,
+	       (long long)(osGetTime() - t0));
 
 	if (pr != PLAYER_OK) {
 		tl_log("cmd %d: %s (%s)", (int)cmd, player_result_str(pr), err);
@@ -157,7 +182,8 @@ static void worker_main(void *arg)
 	tl_log("worker: token ok");
 
 	do_poll();
-	u64 next_poll = osGetTime() + POLL_PLAYING_MS;
+	u64 next_poll   = osGetTime() + POLL_PLAYING_MS;
+	int settle_left = 0;
 
 	while (!s_quit) {
 		worker_cmd cmd;
@@ -173,10 +199,21 @@ static void worker_main(void *arg)
 			did_work = true;
 		}
 
-		/* After a command, poll shortly after so the optimistic UI reconciles
-		 * with reality. Spotify needs a moment to apply it. */
-		if (did_work)
-			next_poll = osGetTime() + 1200;
+		/* After a command, reconcile as fast as Spotify will let us.
+		 *
+		 * This used to wait a flat 1200ms on the theory that Spotify needs a
+		 * moment to apply the change. Measured, that guess was most of the
+		 * cover-art latency: ~1000ms of pure idling on the critical path
+		 * between tapping next and the new artwork appearing.
+		 *
+		 * A skip is usually reflected by the time the command's own HTTP
+		 * response lands (that round trip is already ~870ms), so poll straight
+		 * away. If the track has not changed yet, track_settle_retries below
+		 * re-polls a couple of times rather than waiting out a fixed delay. */
+		if (did_work) {
+			next_poll  = 0; /* poll on this iteration */
+			settle_left = SETTLE_RETRIES;
+		}
 
 		LightLock_Lock(&s_lock);
 		const bool want_poll = s_poll_requested;
@@ -188,15 +225,43 @@ static void worker_main(void *arg)
 			s_busy = true;
 			const bool playing = s_have_state && s_state.is_playing;
 			const bool have    = s_have_state;
+			char prev_track[sizeof s_state.track];
+			snprintf(prev_track, sizeof prev_track, "%s", s_state.track);
 			LightLock_Unlock(&s_lock);
 
 			do_poll();
 
-			u32 interval = playing ? POLL_PLAYING_MS
-			               : have  ? POLL_PAUSED_MS
-			                       : POLL_IDLE_MS;
-			next_poll = osGetTime() + interval;
+			/* If we polled to confirm a command but the track has not turned
+			 * over yet, try again shortly instead of falling back to the full
+			 * 3s cadence - that gap is what made the artwork lag the audio. */
+			bool settling = false;
+			if (settle_left > 0) {
+				LightLock_Lock(&s_lock);
+				const bool changed =
+				    strcmp(prev_track, s_state.track) != 0;
+				LightLock_Unlock(&s_lock);
+
+				if (changed) {
+					settle_left = 0;
+				} else {
+					settle_left--;
+					settling = true;
+				}
+			}
+
+			if (settling) {
+				next_poll = osGetTime() + SETTLE_RETRY_MS;
+			} else {
+				u32 interval = playing ? POLL_PLAYING_MS
+				               : have  ? POLL_PAUSED_MS
+				                       : POLL_IDLE_MS;
+				next_poll = osGetTime() + interval;
+			}
 		}
+
+		/* Download art after polling, so a fresh URL from the poll above is
+		 * picked up in the same iteration rather than 100ms later. */
+		do_art();
 
 		LightLock_Lock(&s_lock);
 		s_busy = false;
@@ -272,6 +337,85 @@ void worker_post(worker_cmd cmd, long arg)
 		s_queue[s_qtail].arg = arg;
 		s_qtail              = next;
 	}
+	LightLock_Unlock(&s_lock);
+}
+
+void worker_request_art(const char *url)
+{
+	if (!url || !url[0])
+		return;
+
+	ensure_lock();
+	LightLock_Lock(&s_lock);
+	/* Newest request wins; an older in-flight download for a track we have
+	 * already skipped past is not worth waiting for. */
+	if (strcmp(s_art_want, url) != 0)
+		snprintf(s_art_want, sizeof s_art_want, "%s", url);
+	LightLock_Unlock(&s_lock);
+}
+
+bool worker_take_art(art_payload *out)
+{
+	ensure_lock();
+	LightLock_Lock(&s_lock);
+	const bool have = s_art_have;
+	if (have) {
+		*out       = s_art_ready;
+		s_art_have = false;
+		memset(&s_art_ready, 0, sizeof s_art_ready);
+	}
+	LightLock_Unlock(&s_lock);
+	return have;
+}
+
+/* Runs on the worker thread: does the ~1.5s of network and JPEG work that used
+ * to block the render loop. */
+static void do_art(void)
+{
+	char want[256];
+
+	LightLock_Lock(&s_lock);
+	snprintf(want, sizeof want, "%s", s_art_want);
+	const bool already = (want[0] && strcmp(want, s_art_inflight) == 0);
+	LightLock_Unlock(&s_lock);
+
+	if (!want[0] || already)
+		return;
+
+	LightLock_Lock(&s_lock);
+	snprintf(s_art_inflight, sizeof s_art_inflight, "%s", want);
+	LightLock_Unlock(&s_lock);
+
+	unsigned char *rgba = NULL;
+	int            w = 0, h = 0;
+	unsigned       fetch_ms = 0, decode_ms = 0;
+	char           err[128];
+
+	const u64 t0 = osGetTime();
+	if (!art_fetch_decode(want, &rgba, &w, &h, &fetch_ms, &decode_ms, err,
+	                      sizeof err)) {
+		tl_log("art failed: %s", err);
+		return;
+	}
+
+	tl_timing("art fetch=%ums decode=%ums total=%lldms", fetch_ms, decode_ms,
+	          (long long)(osGetTime() - t0));
+
+	LightLock_Lock(&s_lock);
+	/* If the user skipped again while this was downloading, drop it. */
+	if (strcmp(want, s_art_want) != 0) {
+		LightLock_Unlock(&s_lock);
+		free(rgba);
+		return;
+	}
+	free(s_art_ready.rgba); /* discard an unclaimed older payload */
+	s_art_ready.rgba      = rgba;
+	s_art_ready.w         = w;
+	s_art_ready.h         = h;
+	s_art_ready.fetch_ms  = fetch_ms;
+	s_art_ready.decode_ms = decode_ms;
+	snprintf(s_art_ready.url, sizeof s_art_ready.url, "%s", want);
+	s_art_have = true;
 	LightLock_Unlock(&s_lock);
 }
 

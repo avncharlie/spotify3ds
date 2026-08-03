@@ -59,6 +59,31 @@ void tl_log(const char *fmt, ...)
 	emit_stdout(buf);
 }
 
+static int s_timing;
+
+void tl_set_timing(int on)
+{
+	s_timing = on;
+}
+
+void tl_timing(const char *fmt, ...)
+{
+	if (!s_timing)
+		return;
+
+	char    buf[384];
+	char    line[416];
+	va_list ap;
+
+	va_start(ap, fmt);
+	vsnprintf(buf, sizeof buf, fmt, ap);
+	va_end(ap);
+
+	snprintf(line, sizeof line, "TIMING %s", buf);
+	emit(s_log, line);
+	emit_stdout(line);
+}
+
 void tl_banner(const char *fmt, ...)
 {
 	char    buf[512];

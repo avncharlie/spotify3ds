@@ -155,22 +155,24 @@ void art_free(album_art *a)
 	a->url[0] = '\0';
 }
 
-bool art_load(album_art *a, const char *url, char *err, int errlen)
+bool art_fetch_decode(const char *url, unsigned char **out_rgba, int *out_w,
+                      int *out_h, unsigned *fetch_ms, unsigned *decode_ms,
+                      char *err, int errlen)
 {
+	*out_rgba = NULL;
+
 	if (!url || !url[0]) {
 		snprintf(err, errlen, "empty url");
 		return false;
 	}
-
-	/* Art only changes on track change; skip the fetch otherwise. */
-	if (a->valid && strcmp(a->url, url) == 0)
-		return true;
 
 	char host[128], path[256];
 	if (!split_url(url, host, sizeof host, path, sizeof path)) {
 		snprintf(err, errlen, "bad url");
 		return false;
 	}
+
+	const u64 t_fetch = osGetTime();
 
 	http_response r;
 	if (!http_request(host, "GET", path, NULL, NULL, NULL, &r, err, errlen))
@@ -181,6 +183,9 @@ bool art_load(album_art *a, const char *url, char *err, int errlen)
 		http_free(&r);
 		return false;
 	}
+
+	if (fetch_ms)
+		*fetch_ms = (unsigned)(osGetTime() - t_fetch);
 
 	const u64 t0 = osGetTime();
 
@@ -242,19 +247,40 @@ bool art_load(album_art *a, const char *url, char *err, int errlen)
 	jpeg_destroy_decompress(&cinfo);
 	http_free(&r);
 
-	/* --- upload -------------------------------------------------------- */
+	if (decode_ms)
+		*decode_ms = (unsigned)(osGetTime() - t0);
+
+	*out_rgba = linear; /* caller owns it now */
+	*out_w    = w;
+	*out_h    = h;
+	return true;
+}
+
+/* GPU work only: tiling and the texture upload. Must run on the thread that
+ * owns the graphics context, but it is cheap - the expensive part already
+ * happened in art_fetch_decode, off the render thread. */
+bool art_upload(album_art *a, const unsigned char *rgba, int w, int h,
+                const char *url, char *err, int errlen)
+{
+	if (!rgba || w <= 0 || h <= 0) {
+		snprintf(err, errlen, "no pixels");
+		return false;
+	}
+	if (w > ART_TEX_SIZE || h > ART_TEX_SIZE) {
+		snprintf(err, errlen, "%dx%d exceeds %d", w, h, ART_TEX_SIZE);
+		return false;
+	}
+
 	album_art staged = {0};
-	extract_accent(linear, w, h, &staged);
+	extract_accent(rgba, w, h, &staged);
 
 	u8 *tiled = linearAlloc((size_t)ART_TEX_SIZE * ART_TEX_SIZE * 4);
 	if (!tiled) {
-		free(linear);
 		snprintf(err, errlen, "linearAlloc failed");
 		return false;
 	}
 
-	tile_rgba(linear, w, h, tiled, ART_TEX_SIZE);
-	free(linear);
+	tile_rgba(rgba, w, h, tiled, ART_TEX_SIZE);
 
 	art_free(a); /* release any previous texture before replacing it */
 
@@ -287,9 +313,32 @@ bool art_load(album_art *a, const char *url, char *err, int errlen)
 	a->accent_r     = staged.accent_r;
 	a->accent_g     = staged.accent_g;
 	a->accent_b     = staged.accent_b;
-	a->decode_ms    = (unsigned)(osGetTime() - t0);
 	a->valid        = true;
 	snprintf(a->url, sizeof a->url, "%s", url);
 
 	return true;
+}
+
+/* Blocking convenience wrapper: fetch, decode and upload in one call. Only
+ * safe off the render thread, since the fetch dominates. */
+bool art_load(album_art *a, const char *url, char *err, int errlen)
+{
+	/* Art only changes on track change; skip the fetch otherwise. */
+	if (a->valid && url && strcmp(a->url, url) == 0)
+		return true;
+
+	unsigned char *rgba = NULL;
+	int            w = 0, h = 0;
+	unsigned       fetch_ms = 0, decode_ms = 0;
+
+	if (!art_fetch_decode(url, &rgba, &w, &h, &fetch_ms, &decode_ms, err,
+	                      errlen))
+		return false;
+
+	const bool ok = art_upload(a, rgba, w, h, url, err, errlen);
+	free(rgba);
+
+	if (ok)
+		a->decode_ms = decode_ms;
+	return ok;
 }

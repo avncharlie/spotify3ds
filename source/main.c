@@ -2,6 +2,7 @@
 #include <3ds/3dslink.h>
 #include <citro2d.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "net/net.h"
@@ -84,6 +85,10 @@ static album_art g_art;
 /* True when running under the headless harness, which needs the app to quit by
  * itself. On a real console the app must stay up until the user exits. */
 static bool g_smoketest;
+
+/* When the user last pressed next/prev, for measuring how long the cover takes
+ * to catch up with the audio. */
+static u64 g_cmd_sent;
 
 /* One machine-readable block describing what this run is executing on, so a
  * transcript alone explains itself. rtc= in particular turns TLS certificate
@@ -281,6 +286,10 @@ int main(int argc, char **argv)
 	if (argc > 0 && argv[0] && strstr(argv[0], "smoketest"))
 		g_smoketest = true;
 
+	/* Latency probes only during automated runs, so normal use stays quiet but
+	 * regressions remain measurable. */
+	tl_set_timing(g_smoketest);
+
 	C3D_RenderTarget *top    = C2D_CreateScreenTarget(GFX_TOP, GFX_LEFT);
 	C3D_RenderTarget *bottom = C2D_CreateScreenTarget(GFX_BOTTOM, GFX_LEFT);
 
@@ -377,9 +386,15 @@ int main(int argc, char **argv)
 					worker_post(playing ? CMD_PAUSE : CMD_PLAY, 0);
 					break;
 				case BTN_NEXT:
+					g_cmd_sent = osGetTime();
+					tl_timing("cmd NEXT at %llu",
+					       (unsigned long long)g_cmd_sent);
 					worker_post(CMD_NEXT, 0);
 					break;
 				case BTN_PREV:
+					g_cmd_sent = osGetTime();
+					tl_timing("cmd PREV at %llu",
+					       (unsigned long long)g_cmd_sent);
 					worker_post(CMD_PREV, 0);
 					break;
 				case BTN_SHUFFLE:
@@ -393,17 +408,37 @@ int main(int argc, char **argv)
 		}
 
 		/* --- album art ------------------------------------------------ */
+		/* Only ask; the worker does the ~1.5s of network and JPEG work. Doing
+		 * it here used to freeze the render loop for that entire time. */
 		if (snap.have_state && snap.state.art_url[0] &&
 		    strcmp(snap.state.art_url, last_art) != 0) {
-			char aerr[128];
-			if (art_load(&g_art, snap.state.art_url, aerr, sizeof aerr))
-				tl_log("art %dx%d in %ums", g_art.src_w, g_art.src_h,
-				       g_art.decode_ms);
-			else
-				tl_log("art failed: %s", aerr);
-			/* Record the attempt either way so a broken URL is not retried
-			 * every frame. */
+			tl_timing("art url changed (cmd->url %lldms)",
+			          g_cmd_sent ? (long long)(osGetTime() - g_cmd_sent) : -1);
+			worker_request_art(snap.state.art_url);
 			snprintf(last_art, sizeof last_art, "%s", snap.state.art_url);
+		}
+
+		/* Claim a finished download. Only the GPU upload happens here, which is
+		 * cheap enough to sit in the frame. */
+		{
+			art_payload art;
+			if (worker_take_art(&art)) {
+				char aerr[128];
+				if (art_upload(&g_art, art.rgba, art.w, art.h, art.url, aerr,
+				               sizeof aerr)) {
+					g_art.decode_ms = art.decode_ms;
+					tl_timing("art visible: fetch=%ums decode=%ums "
+					          "cmd->visible=%lldms",
+					          art.fetch_ms, art.decode_ms,
+					          g_cmd_sent
+					              ? (long long)(osGetTime() - g_cmd_sent)
+					              : -1);
+					g_cmd_sent = 0;
+				} else {
+					tl_log("art upload failed: %s", aerr);
+				}
+				free(art.rgba);
+			}
 		}
 
 		if (!logged_first && snap.have_state) {

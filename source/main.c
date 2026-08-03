@@ -5,10 +5,11 @@
 
 #include "net/net.h"
 #include "spotify/auth.h"
+#include "spotify/art.h"
 #include "spotify/player.h"
 #include "testlog.h"
 
-#define PHASE 4
+#define PHASE 5
 
 /* Headless runs must not wait for input. Hold SELECT at boot to keep the
  * window open for screenshots instead. */
@@ -22,31 +23,7 @@
 static player_state g_state;
 static bool         g_have_state;
 
-/* Spotify acknowledges a command before the device reflects it, so a poll
- * issued immediately after still reports the old state. Give it a moment. */
-static void settle(void)
-{
-	svcSleepThread(1500ull * 1000 * 1000); /* 1.5s */
-}
-
-/* Poll and report is_playing, or -1 when nothing is playing. */
-static int observe(const char *label, player_state *out)
-{
-	char          err[256];
-	player_state  st;
-	player_result pr = player_poll(&st, err, sizeof err);
-
-	if (pr == PLAYER_OK) {
-		if (out)
-			*out = st;
-		tl_log("%s: playing=%d pos=%ldms track=%s", label, (int)st.is_playing,
-		       st.progress_ms, st.track);
-		return st.is_playing ? 1 : 0;
-	}
-
-	tl_log("%s: %s", label, player_result_str(pr));
-	return -1;
-}
+static album_art g_art;
 
 static void run_spike(void)
 {
@@ -56,99 +33,52 @@ static void run_spike(void)
 		tl_step("net_init", 0, "%s", err);
 		return;
 	}
-	if (!auth_load(err, sizeof err)) {
-		tl_step("creds_load", 0, "%s", err);
-		return;
-	}
-	if (!auth_token(err, sizeof err)) {
-		tl_step("token", 0, "%s", err);
+	if (!auth_load(err, sizeof err) || !auth_token(err, sizeof err)) {
+		tl_step("auth", 0, "%s", err);
 		return;
 	}
 	tl_step("auth", 1, "token acquired");
 
-	/* --- baseline ---------------------------------------------------- */
-	player_state before;
-	int          was_playing = observe("baseline", &before);
-	if (was_playing < 0) {
-		tl_step("baseline", 0,
-		        "nothing playing - start Spotify on a device first");
+	player_state  st;
+	player_result pr = player_poll(&st, err, sizeof err);
+	if (pr != PLAYER_OK) {
+		tl_step("poll", 0, "%s", player_result_str(pr));
 		return;
 	}
-	g_state      = before;
+	g_state      = st;
 	g_have_state = true;
-	tl_step("baseline", 1, "playing=%d track=%s", was_playing, before.track);
+	tl_step("poll", 1, "%s - %s", st.track, st.artist);
 
-	/* --- pause -------------------------------------------------------- */
-	player_result pr = player_pause(err, sizeof err);
-	if (pr != PLAYER_OK) {
-		tl_step("pause", 0, "%s: %s", player_result_str(pr), err);
+	if (!st.art_url[0]) {
+		tl_step("art_url", 0, "no art url in response");
 		return;
 	}
-	settle();
-	int after_pause = observe("after_pause", NULL);
-	tl_step("pause", after_pause == 0, "204 accepted, observed playing=%d",
-	        after_pause);
+	tl_step("art_url", 1, "%.64s", st.art_url);
 
-	/* --- play --------------------------------------------------------- */
-	pr = player_play(err, sizeof err);
-	if (pr != PLAYER_OK) {
-		tl_step("play", 0, "%s: %s", player_result_str(pr), err);
+	/* --- fetch + decode + upload -------------------------------------- */
+	if (!art_load(&g_art, st.art_url, err, sizeof err)) {
+		tl_step("art_load", 0, "%s", err);
 		return;
 	}
-	settle();
-	int after_play = observe("after_play", NULL);
-	tl_step("play", after_play == 1, "204 accepted, observed playing=%d",
-	        after_play);
+	tl_step("art_load", g_art.valid, "decoded %dx%d in %ums", g_art.src_w,
+	        g_art.src_h, g_art.decode_ms);
 
-	/* --- next --------------------------------------------------------- */
-	pr = player_next(err, sizeof err);
-	if (pr != PLAYER_OK) {
-		tl_step("next", 0, "%s: %s", player_result_str(pr), err);
-		return;
-	}
-	settle();
-	player_state after_next;
-	memset(&after_next, 0, sizeof after_next);
-	observe("after_next", &after_next);
-	/* Track name changing is the real proof the skip took effect. */
-	tl_step("next", strcmp(after_next.track, before.track) != 0,
-	        "\"%s\" -> \"%s\"", before.track, after_next.track);
+	/* Expect 640x640 at 1/4 scale. */
+	tl_step("art_size", g_art.src_w == 160 && g_art.src_h == 160,
+	        "%dx%d (expected 160x160)", g_art.src_w, g_art.src_h);
 
-	/* --- previous: return to where we started ------------------------- */
-	pr = player_prev(err, sizeof err);
-	if (pr != PLAYER_OK) {
-		tl_step("prev", 0, "%s: %s", player_result_str(pr), err);
-		return;
-	}
-	settle();
-	player_state after_prev;
-	memset(&after_prev, 0, sizeof after_prev);
-	observe("after_prev", &after_prev);
-	tl_step("prev", 1, "now \"%s\"", after_prev.track);
+	/* UVs must address exactly the populated corner of the 256x256 texture. */
+	const float want = 160.0f / 256.0f;
+	const bool  uv_ok = g_art.sub.right > want - 0.01f &&
+	                   g_art.sub.right < want + 0.01f;
+	tl_step("art_uv", uv_ok, "right=%.4f bottom=%.4f (expect %.4f / %.4f)",
+	        g_art.sub.right, g_art.sub.bottom, want, 1.0f - want);
 
-	/* --- seek ---------------------------------------------------------- */
-	const long target = 30000; /* 30s in */
-	pr = player_seek(target, err, sizeof err);
-	if (pr != PLAYER_OK) {
-		tl_step("seek", 0, "%s: %s", player_result_str(pr), err);
-		return;
-	}
-	settle();
-	player_state after_seek;
-	memset(&after_seek, 0, sizeof after_seek);
-	observe("after_seek", &after_seek);
-	/* Playback keeps advancing, so accept a window rather than an exact ms. */
-	const long delta = after_seek.progress_ms - target;
-	tl_step("seek", delta >= -2000 && delta <= 8000,
-	        "requested %ldms, observed %ldms (delta %ldms)", target,
-	        after_seek.progress_ms, delta);
-
-	/* Leave playback as we found it. */
-	if (was_playing == 0)
-		player_pause(err, sizeof err);
-
-	g_state      = after_seek;
-	g_have_state = true;
+	/* Second call with the same URL must not refetch. */
+	const unsigned before = g_art.decode_ms;
+	art_load(&g_art, st.art_url, err, sizeof err);
+	tl_step("art_cache", g_art.decode_ms == before,
+	        "same url reused (decode_ms unchanged=%u)", g_art.decode_ms);
 }
 
 int main(int argc, char **argv)
@@ -194,7 +124,11 @@ int main(int argc, char **argv)
 
 		C2D_TargetClear(top, CLR_BG_TOP);
 		C2D_SceneBegin(top);
-		C2D_DrawRectSolid(16.0f, 20.0f, 0.0f, 200.0f, 200.0f, CLR_ACCENT);
+		if (g_art.valid)
+			C2D_DrawImageAt(g_art.image, 16.0f, 20.0f, 0.0f, NULL, 1.25f,
+			                1.25f);
+		else
+			C2D_DrawRectSolid(16.0f, 20.0f, 0.0f, 200.0f, 200.0f, CLR_ACCENT);
 		C2D_DrawText(&t_track, C2D_WithColor, 232.0f, 40.0f, 0.0f, 0.50f, 0.50f,
 		             CLR_TEXT);
 		C2D_DrawText(&t_artist, C2D_WithColor, 232.0f, 70.0f, 0.0f, 0.40f,

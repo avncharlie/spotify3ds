@@ -62,7 +62,10 @@ green "built $(basename "$THREEDSX")"
 
 # ---------------------------------------------------------------- run
 stop_azahar
-rm -f "$RESULT_FILE"
+# Clear both channels so output always reflects only this run. tl_init opens
+# log.txt in append mode (so a crash mid-run keeps its trail), which means
+# stale runs would otherwise pile up and make --log unreadable.
+rm -f "$RESULT_FILE" "$GUEST_LOG"
 mkdir -p "$SDMC"
 
 echo "==> launching Azahar (timeout ${TIMEOUT}s)"

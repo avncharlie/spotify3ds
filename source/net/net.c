@@ -19,6 +19,7 @@
 
 static u32 *s_soc_buf;
 static bool s_ready;
+static bool s_sslc_up;
 
 bool net_init(char *err, int errlen)
 {
@@ -51,6 +52,17 @@ bool net_init(char *err, int errlen)
 		return false;
 	}
 
+	/* We do TLS ourselves via mbedTLS (sslc caps at TLS 1.1), but the packaged
+	 * mbedcrypto's mbedtls_hardware_poll() still routes through
+	 * sslcGenerateRandomData(), so the service has to be up or seeding fails.
+	 * Non-fatal: tls.c also registers PS_GenerateRandomBytes as a strong
+	 * entropy source, which is sufficient on its own. */
+	rc = sslcInit(0);
+	if (R_FAILED(rc))
+		tl_log("sslcInit failed rc=0x%08lX (PS entropy still available)", rc);
+	else
+		s_sslc_up = true;
+
 	s_ready = true;
 	return true;
 }
@@ -59,6 +71,10 @@ void net_exit(void)
 {
 	if (!s_ready)
 		return;
+	if (s_sslc_up) {
+		sslcExit();
+		s_sslc_up = false;
+	}
 	socExit();
 	acExit();
 	/* The soc buffer is owned by the service until socExit returns; only then

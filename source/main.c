@@ -1,15 +1,13 @@
 #include <3ds.h>
 #include <citro2d.h>
-#include <mbedtls/version.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <unistd.h>
 
 #include "net/net.h"
+#include "net/tls.h"
 #include "testlog.h"
 
-#define PHASE 1
+#define PHASE 2
 
 /* Headless runs must not wait for input. Hold SELECT at boot to keep the
  * window open for screenshots instead. */
@@ -20,13 +18,13 @@
 #define CLR_ACCENT    C2D_Color32(0x1D, 0xB9, 0x54, 0xFF)
 #define CLR_TEXT      C2D_Color32(0xFF, 0xFF, 0xFF, 0xFF)
 
-/* Read until the peer closes or the buffer fills. Fine for a spike; the real
- * client (Phase 2+) parses Content-Length / chunked encoding properly. */
-static int read_all(int fd, char *buf, int cap)
+/* Drain the response until the peer closes. Enough for a spike; Phase 3
+ * parses Content-Length / chunked encoding properly. */
+static int tls_read_all(tls_conn *c, char *buf, int cap)
 {
 	int total = 0;
 	while (total < cap - 1) {
-		int n = recv(fd, buf + total, cap - 1 - total, 0);
+		int n = tls_read(c, buf + total, cap - 1 - total);
 		if (n <= 0)
 			break;
 		total += n;
@@ -35,72 +33,84 @@ static int read_all(int fd, char *buf, int cap)
 	return total;
 }
 
+/* Copy the HTTP status line ("HTTP/1.1 401 Unauthorized") out of a response. */
+static void status_line(const char *resp, char *out, int outlen)
+{
+	const char *nl  = strchr(resp, '\r');
+	int         len = nl ? (int)(nl - resp) : (int)strlen(resp);
+	if (len > outlen - 1)
+		len = outlen - 1;
+	memcpy(out, resp, len);
+	out[len] = '\0';
+}
+
+/* Handshake, issue one GET, and report the status line.
+ * step_tls / step_http name the two verdicts this emits. */
+static void probe(const char *host, const char *path, const char *step_tls,
+                  const char *step_http, int expect_status)
+{
+	char      err[256];
+	tls_conn *c = tls_connect(host, 443, err, sizeof err);
+	if (!c) {
+		tl_step(step_tls, 0, "%s: %s", host, err);
+		return;
+	}
+
+	tl_step(step_tls, 1, "%s %s %s", host, tls_version(c), tls_ciphersuite(c));
+
+	char req[512];
+	snprintf(req, sizeof req,
+	         "GET %s HTTP/1.1\r\n"
+	         "Host: %s\r\n"
+	         "Connection: close\r\n"
+	         "User-Agent: spotify3ds/0.1\r\n"
+	         "\r\n",
+	         path, host);
+
+	if (!tls_write(c, req, strlen(req))) {
+		tl_step(step_http, 0, "write failed");
+		tls_close(c);
+		return;
+	}
+
+	static char resp[2048];
+	int         n = tls_read_all(c, resp, sizeof resp);
+	tls_close(c);
+
+	if (n <= 0) {
+		tl_step(step_http, 0, "no response");
+		return;
+	}
+
+	char status[96];
+	status_line(resp, status, sizeof status);
+
+	/* An authenticated-endpoint 401 proves the full request/response path
+	 * works end to end; we have no token yet. */
+	char expect[8];
+	snprintf(expect, sizeof expect, " %d ", expect_status);
+	const bool ok = strstr(status, expect) != NULL;
+
+	tl_step(step_http, ok, "bytes=%d status=%s", n, status);
+}
+
 static void run_spike(void)
 {
 	char err[128];
 
-	/* --- sockets up ------------------------------------------------- */
 	if (!net_init(err, sizeof err)) {
 		tl_step("net_init", 0, "%s", err);
 		return;
 	}
 	tl_step("net_init", 1, "soc buffer 1MiB");
 
-	/* --- DNS -------------------------------------------------------- */
-	char ip[64];
-	if (net_resolve("api.spotify.com", ip, sizeof ip))
-		tl_step("dns", 1, "api.spotify.com=%s", ip);
-	else
-		tl_step("dns", 0, "gethostbyname failed");
+	/* RSA chain (DigiCert Global Root G2). Unauthenticated -> expect 401. */
+	probe("api.spotify.com", "/v1/me", "tls_api", "http_api", 401);
 
-	/* --- TCP to the real API port ----------------------------------- */
-	int fd = net_tcp_connect("api.spotify.com", 443, err, sizeof err);
-	if (fd >= 0) {
-		tl_step("tcp_connect", 1, "api.spotify.com:443 fd=%d", fd);
-		net_close(fd);
-	} else {
-		tl_step("tcp_connect", 0, "%s", err);
-	}
-
-	/* --- plain HTTP round trip, proving bidirectional data flow ------ */
-	fd = net_tcp_connect("example.com", 80, err, sizeof err);
-	if (fd < 0) {
-		tl_step("http_get", 0, "%s", err);
-		return;
-	}
-
-	static const char req[] = "GET / HTTP/1.1\r\n"
-	                          "Host: example.com\r\n"
-	                          "Connection: close\r\n"
-	                          "User-Agent: spotify3ds/0.1\r\n"
-	                          "\r\n";
-
-	if (send(fd, req, strlen(req), 0) < 0) {
-		tl_step("http_get", 0, "send failed");
-		net_close(fd);
-		return;
-	}
-
-	static char resp[4096];
-	int         n = read_all(fd, resp, sizeof resp);
-	net_close(fd);
-
-	if (n <= 0) {
-		tl_step("http_get", 0, "no response bytes");
-		return;
-	}
-
-	/* First line looks like "HTTP/1.1 200 OK" */
-	char        status[64] = {0};
-	const char *nl         = strchr(resp, '\r');
-	int         len        = nl ? (int)(nl - resp) : 0;
-	if (len > (int)sizeof status - 1)
-		len = sizeof status - 1;
-	if (len > 0)
-		memcpy(status, resp, len);
-
-	tl_step("http_get", strncmp(resp, "HTTP/1.", 7) == 0, "bytes=%d status=%s",
-	        n, status[0] ? status : "(none)");
+	/* ECC chain (DigiCert Global Root G3) - an entirely separate code path
+	 * in mbedTLS, so it must be proven independently. */
+	probe("i.scdn.co", "/image/ab67616d0000b273ff9ca10b55ce82ae553c8228",
+	      "tls_scdn", "http_scdn", 200);
 }
 
 int main(int argc, char **argv)
@@ -118,17 +128,13 @@ int main(int argc, char **argv)
 	C3D_RenderTarget *top    = C2D_CreateScreenTarget(GFX_TOP, GFX_LEFT);
 	C3D_RenderTarget *bottom = C2D_CreateScreenTarget(GFX_BOTTOM, GFX_LEFT);
 
-	char mbed_ver[32];
-	mbedtls_version_get_string(mbed_ver);
-	tl_log("mbedtls=%s", mbed_ver);
-
 	run_spike();
 	tl_done();
 
 	C2D_TextBuf textbuf = C2D_TextBufNew(256);
 	C2D_Text    title, subtitle;
 	C2D_TextParse(&title, textbuf, "Spotify Controller");
-	C2D_TextParse(&subtitle, textbuf, "Phase 1 - socket spike");
+	C2D_TextParse(&subtitle, textbuf, "Phase 2 - TLS 1.2");
 	C2D_TextOptimize(&title);
 	C2D_TextOptimize(&subtitle);
 

@@ -44,8 +44,11 @@ CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++11
 ASFLAGS	:=	-g $(ARCH)
 LDFLAGS	=	-specs=3dsx.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 
-# Link order matters: mbedtls -> mbedx509 -> mbedcrypto
-LIBS	:= -lcitro2d -lcitro3d -lctru -lmbedtls -lmbedx509 -lmbedcrypto -ljpeg -lz -lm
+# Link order matters: mbedtls -> mbedx509 -> mbedcrypto, and -lctru must come
+# AFTER mbedcrypto because the portlib's mbedtls_hardware_poll() calls libctru's
+# sslcGenerateRandomData(). (We still do TLS ourselves via mbedTLS; sslc is only
+# pulled in here as an RNG, and its TLS 1.1 ceiling is irrelevant to that.)
+LIBS	:= -lcitro2d -lcitro3d -lmbedtls -lmbedx509 -lmbedcrypto -lctru -ljpeg -lz -lm
 
 #---------------------------------------------------------------------------------
 # list of directories containing libraries, this must be the top level containing

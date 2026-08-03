@@ -24,7 +24,23 @@ links mbedTLS and speaks TLS in userspace over raw BSD sockets, bypassing
 Both DigiCert roots must be embedded: **G2 (RSA)** serves `api.spotify.com` and
 `accounts.spotify.com`, while **G3 (ECC)** serves the `i.scdn.co` album-art CDN.
 Omitting G3 produces a confusing failure where the API works perfectly but
-cover art silently never loads.
+cover art silently never loads. Verified: the two hosts negotiate
+`ECDHE-RSA-...` and `ECDHE-ECDSA-...` respectively, so the chains really are
+independent.
+
+### Entropy
+
+The packaged mbedTLS is built with `MBEDTLS_NO_PLATFORM_ENTROPY` and
+`MBEDTLS_ENTROPY_HARDWARE_ALT`, so its only built-in source is
+`mbedtls_hardware_poll()` → `sslcGenerateRandomData()`. That means **`sslcInit()`
+must be called** even though we do TLS ourselves — `sslc` is used purely as an
+RNG here, and its TLS 1.1 ceiling is irrelevant to that.
+
+`PS_GenerateRandomBytes` looks like the more natural choice but returns
+`0xD8E007F7` (unavailable) under Azahar, so it is registered only as an
+*optional* extra source with threshold 0. It must not report
+`ENTROPY_SOURCE_FAILED` when absent, or it poisons the accumulator and seeding
+fails even though the sslc source is healthy.
 
 ## Setup
 

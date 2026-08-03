@@ -1,0 +1,19 @@
+# Secrets — NEVER commit
+creds.cfg
+*.token
+.env
+
+# Build output
+build/
+*.3dsx
+*.elf
+*.smdh
+*.map
+*.cia
+
+# Local test artifacts
+testresult.txt
+log.txt
+
+# macOS
+.DS_Store

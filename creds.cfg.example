@@ -1,0 +1,15 @@
+# spotify3ds credentials
+#
+# Generate the real file with:
+#   python3 tools/bootstrap_auth.py --client-id <YOUR_CLIENT_ID>
+#
+# Then copy it to the SD card as /spotify/creds.cfg
+#   emulator: ~/Library/Application Support/Azahar/sdmc/spotify/creds.cfg
+#   hardware: <SD card>/spotify/creds.cfg
+#
+# The refresh token is a bearer credential stored in plaintext: homebrew has no
+# secure storage, since any encryption key would have to sit beside it.
+# Revoke anytime at https://spotify.com/account/apps
+
+client_id=0000000000000000000000000000000
+refresh_token=REPLACE_ME

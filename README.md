@@ -51,9 +51,24 @@ sudo dkp-pacman -S 3ds-zlib 3ds-mbedtls 3ds-libjpeg-turbo
 ./dev.sh --log    # also dump the guest debug log
 ```
 
-Auth uses a one-time PKCE bootstrap run on your computer; the 3DS never sees
-your password and no `client_secret` is ever needed. The resulting refresh
-token goes in `sdmc:/spotify/creds.cfg` (see `creds.cfg.example`).
+### Auth (one time)
+
+1. Create an app at <https://developer.spotify.com/dashboard>
+2. Add this redirect URI **exactly**: `http://127.0.0.1:8888/callback`
+3. Run the bootstrap with your Client ID:
+
+```sh
+python3 tools/bootstrap_auth.py --client-id <YOUR_CLIENT_ID>
+```
+
+It opens Spotify's own login page in your browser, catches the redirect on a
+throwaway local listener, and writes `creds.cfg`. Copy that to the SD card as
+`/spotify/creds.cfg` (for Azahar:
+`~/Library/Application Support/Azahar/sdmc/spotify/creds.cfg`).
+
+PKCE means **no `client_secret` exists**, so no secret ever reaches the console
+or the repo, and the script never sees your password. The 3DS thereafter only
+performs `grant_type=refresh_token`.
 
 > **Note:** that refresh token is a plaintext bearer credential on the SD card.
 > Homebrew has no secure storage — any encryption key would have to sit beside

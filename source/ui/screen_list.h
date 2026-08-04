@@ -41,3 +41,17 @@ void screen_list_draw(const screen_list_args *a);
 /* How far the combined document can scroll. */
 float screen_list_max_scroll(int recent_count, int playlist_count,
                              int album_count, int armed_id);
+
+/* Adjust scroll just enough to keep a target row visible, using armed_id for
+ * the document's expanded-row geometry. */
+float screen_list_reveal_row(int recent_count, int playlist_count,
+                             int album_count, int target_id, int armed_id,
+                             float scroll);
+
+/* Jump to the previous (-1) or next (+1) section caption. */
+float screen_list_jump_section(int recent_count, int playlist_count,
+                               int album_count, float scroll, int direction);
+
+/* First row for a section caption currently aligned under the fixed header. */
+int screen_list_section_first_id(int recent_count, int playlist_count,
+                                 int album_count, float scroll);

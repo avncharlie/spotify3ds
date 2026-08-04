@@ -196,6 +196,47 @@ static recent_list   g_recents_buf;
 static playlist_list g_playlists_buf;
 static album_list    g_albums_buf;
 
+static int list_id_at(int pos, int recent_count, int playlist_count,
+                      int album_count)
+{
+	if (pos < 0 || pos >= recent_count + playlist_count + album_count)
+		return -1;
+	if (pos < recent_count)
+		return LIST_RECENT0 + pos;
+	pos -= recent_count;
+	if (pos < playlist_count)
+		return LIST_PLAYLIST0 + pos;
+	return LIST_ALBUM0 + pos - playlist_count;
+}
+
+static int list_move_id(int current, int direction, int recent_count,
+                        int playlist_count, int album_count)
+{
+	const int total = recent_count + playlist_count + album_count;
+	if (total <= 0)
+		return -1;
+
+	int pos = -1;
+	if (current >= LIST_RECENT0 && current < LIST_RECENT0 + recent_count)
+		pos = current - LIST_RECENT0;
+	else if (current >= LIST_PLAYLIST0 &&
+	         current < LIST_PLAYLIST0 + playlist_count)
+		pos = recent_count + current - LIST_PLAYLIST0;
+	else if (current >= LIST_ALBUM0 && current < LIST_ALBUM0 + album_count)
+		pos = recent_count + playlist_count + current - LIST_ALBUM0;
+
+	/* Either direction starts at the first row when nothing is selected. */
+	if (pos < 0)
+		return list_id_at(0, recent_count, playlist_count, album_count);
+
+	pos += direction;
+	if (pos < 0)
+		pos = 0;
+	if (pos >= total)
+		pos = total - 1;
+	return list_id_at(pos, recent_count, playlist_count, album_count);
+}
+
 static void opt_set(opt_field *o, long v)
 {
 	o->value = v;
@@ -233,6 +274,7 @@ int main(int argc, char **argv)
 	C2D_Init(C2D_DEFAULT_MAX_OBJECTS);
 	C2D_Prepare();
 	ui_init(); /* derives the type scale from the system font; needs C2D up */
+	hidSetRepeatParameters(18, 5); /* 300ms delay, then about 12 rows/second */
 
 	tl_init(PHASE);
 
@@ -307,12 +349,13 @@ int main(int argc, char **argv)
 
 	while (aptMainLoop()) {
 		hidScanInput();
-		if (hidKeysDown() & KEY_START)
+		const u32 keys_down   = hidKeysDown();
+		const u32 keys_repeat = hidKeysDownRepeat();
+		if (keys_down & KEY_START)
 			break;
 		/* Y hides the cover. The top screen has no touch digitizer, so the
-		 * art-off layout needs a physical button; every key but START was
-		 * free. */
-		if (hidKeysDown() & KEY_Y)
+		 * art-off layout needs a physical button. */
+		if (keys_down & KEY_Y)
 			g_art_hidden = !g_art_hidden;
 
 		/* Exercise the art-hidden layout headlessly too, so 2A cannot rot
@@ -367,6 +410,25 @@ int main(int argc, char **argv)
 		const long duration = snap.have_state ? snap.state.duration_ms : 0;
 
 		/* --- input ---------------------------------------------------- */
+		if (g_view == VIEW_PLAYER) {
+			if (keys_down & KEY_A) {
+				opt_set(&g_opt_play, !playing);
+				worker_post(playing ? CMD_PAUSE : CMD_PLAY, 0);
+			}
+			if (keys_down & KEY_DRIGHT) {
+				g_cmd_sent = osGetTime();
+				tl_timing("button NEXT at %llu",
+				          (unsigned long long)g_cmd_sent);
+				worker_post(CMD_NEXT, 0);
+			}
+			if (keys_down & KEY_DLEFT) {
+				g_cmd_sent = osGetTime();
+				tl_timing("button PREV at %llu",
+				          (unsigned long long)g_cmd_sent);
+				worker_post(CMD_PREV, 0);
+			}
+		}
+
 		if (g_view == VIEW_PLAYER && touch.pressed &&
 		    touch.press_id == BTN_SCRUB && duration > 0)
 			g_scrub = SCRUB_DRAGGING;
@@ -397,6 +459,34 @@ int main(int argc, char **argv)
 
 			if (g_list_armed >= 0 && osGetTime() >= g_list_arm_until)
 				g_list_armed = -1;
+
+			const u32 nav = keys_repeat & (KEY_UP | KEY_DOWN);
+			if (nav) {
+				const int direction = (nav & KEY_UP) ? -1 : 1;
+				int next = -1;
+				if (g_list_armed < 0)
+					next = screen_list_section_first_id(
+					    n, pn, an, g_list_scroll);
+				if (next < 0)
+					next = list_move_id(g_list_armed, direction, n, pn, an);
+				g_list_armed = next;
+				if (g_list_armed >= 0) {
+					g_list_arm_until = osGetTime() + LIST_ARM_MS;
+					g_list_velocity = 0.0f;
+					const int buffer_id = list_move_id(
+					    g_list_armed, direction, n, pn, an);
+					g_list_scroll = screen_list_reveal_row(
+					    n, pn, an, buffer_id, g_list_armed, g_list_scroll);
+				}
+			}
+
+			if (keys_down & (KEY_L | KEY_R)) {
+				const int direction = (keys_down & KEY_L) ? -1 : 1;
+				g_list_armed = -1;
+				g_list_velocity = 0.0f;
+				g_list_scroll = screen_list_jump_section(
+				    n, pn, an, g_list_scroll, direction);
+			}
 
 			/* Drag 1:1 while held, then retain a filtered portion of the final
 			 * motion and decay it after release. A fresh touch always catches the
@@ -434,10 +524,10 @@ int main(int argc, char **argv)
 				g_list_velocity = 0.0f;
 			}
 
-			if (touch.clicked == LIST_BTN_BACK) {
+			if (touch.clicked == LIST_BTN_BACK || (keys_down & KEY_B)) {
 				g_view = VIEW_PLAYER;
 				g_list_armed = -1;
-			} else if (touch.clicked == LIST_ARM_PLAY) {
+			} else if (touch.clicked == LIST_ARM_PLAY || (keys_down & KEY_A)) {
 				const collection_item *item = NULL;
 				if (g_list_armed >= LIST_RECENT0 &&
 				    g_list_armed < LIST_RECENT0 + n)

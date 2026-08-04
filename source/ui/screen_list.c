@@ -89,6 +89,147 @@ float screen_list_max_scroll(int recent_count, int playlist_count,
 	return max > 0.0f ? max : 0.0f;
 }
 
+static bool row_bounds(int recent_count, int playlist_count, int album_count,
+                       int target_id, int armed_id, float *top, float *bottom)
+{
+	float y = LIST_HEADER_H;
+
+	if (recent_count > 0) {
+		y += CAPTION_H;
+		for (int i = 0; i < recent_count; i++) {
+			const int id = LIST_RECENT0 + i;
+			const float h = row_h(id, armed_id);
+			if (id == target_id) {
+				*top = y;
+				*bottom = y + h;
+				return true;
+			}
+			y += h;
+		}
+		y += DIVIDER_H + SECTION_GAP;
+	}
+
+	y += CAPTION_H;
+	for (int i = 0; i < playlist_count; i++) {
+		const int id = LIST_PLAYLIST0 + i;
+		const float h = row_h(id, armed_id);
+		if (id == target_id) {
+			*top = y;
+			*bottom = y + h;
+			return true;
+		}
+		y += h;
+	}
+
+	y += DIVIDER_H + SECTION_GAP + CAPTION_H;
+	for (int i = 0; i < album_count; i++) {
+		const int id = LIST_ALBUM0 + i;
+		const float h = row_h(id, armed_id);
+		if (id == target_id) {
+			*top = y;
+			*bottom = y + h;
+			return true;
+		}
+		y += h;
+	}
+
+	return false;
+}
+
+float screen_list_reveal_row(int recent_count, int playlist_count,
+                             int album_count, int target_id, int armed_id,
+                             float scroll)
+{
+	float top, bottom;
+	if (!row_bounds(recent_count, playlist_count, album_count, target_id,
+	                armed_id, &top, &bottom))
+		return scroll;
+
+	if (top < scroll + LIST_HEADER_H)
+		scroll = top - LIST_HEADER_H;
+	else if (bottom > scroll + BOT_H)
+		scroll = bottom - BOT_H;
+
+	const float max =
+	    screen_list_max_scroll(recent_count, playlist_count, album_count,
+	                           armed_id);
+	if (scroll < 0.0f)
+		scroll = 0.0f;
+	if (scroll > max)
+		scroll = max;
+	return scroll;
+}
+
+float screen_list_jump_section(int recent_count, int playlist_count,
+                               int album_count, float scroll, int direction)
+{
+	float targets[3];
+	int n = 0;
+	float y = LIST_HEADER_H;
+
+	if (recent_count > 0) {
+		targets[n++] = 0.0f;
+		y += CAPTION_H + (float)recent_count * LIST_ROW_H + DIVIDER_H +
+		     SECTION_GAP;
+	}
+
+	targets[n++] = y - LIST_HEADER_H;
+	y += CAPTION_H + (float)playlist_count * LIST_ROW_H + DIVIDER_H +
+	     SECTION_GAP;
+	targets[n++] = y - LIST_HEADER_H;
+
+	float target = direction > 0 ? targets[n - 1] : targets[0];
+	if (direction > 0) {
+		for (int i = 0; i < n; i++) {
+			if (targets[i] > scroll + 0.5f) {
+				target = targets[i];
+				break;
+			}
+		}
+	} else {
+		for (int i = n - 1; i >= 0; i--) {
+			if (targets[i] < scroll - 0.5f) {
+				target = targets[i];
+				break;
+			}
+		}
+	}
+
+	const float max =
+	    screen_list_max_scroll(recent_count, playlist_count, album_count, -1);
+	return target > max ? max : target;
+}
+
+int screen_list_section_first_id(int recent_count, int playlist_count,
+                                 int album_count, float scroll)
+{
+	float y = LIST_HEADER_H;
+	if (recent_count > 0) {
+		if (scroll > -0.5f && scroll < 0.5f)
+			return LIST_RECENT0;
+		y += CAPTION_H + (float)recent_count * LIST_ROW_H + DIVIDER_H +
+		     SECTION_GAP;
+	}
+
+	const float playlist_scroll = y - LIST_HEADER_H;
+	if (playlist_count > 0 && scroll > playlist_scroll - 0.5f &&
+	    scroll < playlist_scroll + 0.5f)
+		return LIST_PLAYLIST0;
+
+	y += CAPTION_H + (float)playlist_count * LIST_ROW_H + DIVIDER_H +
+	     SECTION_GAP;
+	float album_scroll = y - LIST_HEADER_H;
+	const float max =
+	    screen_list_max_scroll(recent_count, playlist_count, album_count, -1);
+	if (album_scroll > max)
+		album_scroll = max;
+	if (album_count > 0 && scroll > album_scroll - 0.5f &&
+	    scroll < album_scroll + 0.5f)
+		return LIST_ALBUM0;
+
+	return -1;
+}
+
 static void rounded_rect(float x, float y, float w, float h, float r, u32 clr)
 {
 	C2D_DrawRectSolid(x + r, y, 0.0f, w - 2.0f * r, h, clr);

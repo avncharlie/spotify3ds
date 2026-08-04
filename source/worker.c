@@ -65,13 +65,15 @@ static char        s_play_uri[128]; /* pending CMD_PLAY_CONTEXT target */
 
 static recent_list s_recents;
 static bool        s_recents_wanted = true; /* fetch once at startup */
-static u64         s_recents_at;            /* when last fetched */
+static u64         s_recents_at;            /* last successful fetch */
+static u64         s_recents_attempt_at;    /* retry backoff after failures */
 
 static playlist_list s_playlists;
 static bool          s_playlists_wanted = true; /* fetch once at startup */
 static album_list    s_albums;
 static bool          s_albums_wanted = true; /* fetch once at startup */
 #define RECENTS_MIN_INTERVAL_MS 30000
+#define RECENTS_REFRESH_MS      (5 * 60 * 1000)
 
 static char        s_art_want[256];
 static char        s_art_inflight[256];
@@ -803,18 +805,22 @@ void worker_request_recents(void)
 	LightLock_Unlock(&s_lock);
 }
 
-/* Runs on the worker thread. Debounced: a track change asks for a refresh, and
- * skipping through a queue would otherwise issue one request per skip. */
+/* Runs on the worker thread. Refreshes every five minutes while the app is
+ * active; osGetTime also advances while the console sleeps, so a long lid-close
+ * causes a refresh on the first worker pass after resume rather than any
+ * network activity during sleep. Explicit requests remain debounced. */
 static void do_recents(void)
 {
 	LightLock_Lock(&s_lock);
 	const bool want = s_recents_wanted;
 	const u64  last = s_recents_at;
+	const u64  attempt = s_recents_attempt_at;
 	LightLock_Unlock(&s_lock);
 
-	if (!want)
+	const u64 now = osGetTime();
+	if (attempt && now - attempt < RECENTS_MIN_INTERVAL_MS)
 		return;
-	if (last && osGetTime() - last < RECENTS_MIN_INTERVAL_MS)
+	if (!want && last && now - last < RECENTS_REFRESH_MS)
 		return;
 
 	/* Heap for the same reason as do_playlists: RECENTS_MAX grew from 8 to 16
@@ -828,10 +834,12 @@ static void do_recents(void)
 	const player_result pr = recents_fetch(fresh, err, sizeof err);
 
 	LightLock_Lock(&s_lock);
-	s_recents_wanted = false;
-	s_recents_at     = osGetTime();
-	if (pr == PLAYER_OK)
+	s_recents_wanted    = false;
+	s_recents_attempt_at = osGetTime();
+	if (pr == PLAYER_OK) {
 		s_recents = *fresh;
+		s_recents_at = s_recents_attempt_at;
+	}
 	LightLock_Unlock(&s_lock);
 
 	free(fresh);

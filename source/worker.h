@@ -55,8 +55,8 @@ void worker_get(worker_snapshot *out);
 void worker_request_poll(void);
 
 /* --- recently played ---------------------------------------------------
- * Fetched once at startup and refreshed when the track changes, debounced so
- * skipping through a queue does not issue a request per skip. */
+ * Fetched at startup and every five minutes while the app is running. Manual
+ * refresh requests are debounced so they cannot issue one request per skip. */
 
 /* Copy the current list out under lock. Returns the item count. */
 int worker_get_recents(recent_list *out);

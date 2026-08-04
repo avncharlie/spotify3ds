@@ -195,7 +195,7 @@ static void draw_repeat_glyph(float cx, float cy, u32 clr, bool one)
 	 * as the digit displacing the bar. */
 	if (one) {
 		const float dt  = 2.0f;
-		const float top = y - 3.0f;
+		const float top = y - 2.0f;
 		const float sx  = digit_cx - dt / 2.0f;
 
 		C2D_DrawRectSolid(sx, top, 0.0f, dt, 8.0f, clr);

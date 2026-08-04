@@ -11,8 +11,15 @@
  *
  * Entries hold *pre-tiled* texture data, so a hit skips the network fetch, the
  * JPEG decode, the Morton tiling and the accent extraction: what remains is one
- * read plus a handful of memcpys. Measured on a New 2DS XL, a hit costs ~23ms
- * against ~1650ms to fetch and decode over WiFi.
+ * read plus a handful of memcpys.
+ *
+ * Measured on a New 2DS XL:
+ *   cold   fetch 1241ms + decode 87ms = 1328ms
+ *   warm   read 52ms
+ *   store  111ms (12ms tiling + CRC, 75ms file IO)
+ * so a repeat cover appears inside a frame rather than after a second and a
+ * third. Stores still cost twice a read, which is why artcache_store runs only
+ * after the art has already been handed to the UI.
  *
  * Threading invariant: only the worker thread writes. The render thread may
  * read. A future prefetcher must not break this.

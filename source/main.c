@@ -462,9 +462,9 @@ int main(int argc, char **argv)
 					 * the accent extraction as well as network and decode.
 					 * art_upload_tiled takes ownership of the buffer. */
 					ok = art_upload_tiled(&g_art, art.tiled, art.w, art.h,
-					                      art.accent_r, art.accent_g,
-					                      art.accent_b, art.url, aerr,
-					                      sizeof aerr);
+					                      art.tex_dim, art.accent_r,
+					                      art.accent_g, art.accent_b, art.url,
+					                      aerr, sizeof aerr);
 					if (ok)
 						art.tiled = NULL; /* consumed */
 				} else {

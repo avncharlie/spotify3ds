@@ -154,11 +154,14 @@ void art_free(album_art *a)
 	a->url[0] = '\0';
 }
 
-bool art_fetch_decode(const char *url, unsigned char **out_rgba, int *out_w,
-                      int *out_h, unsigned *fetch_ms, unsigned *decode_ms,
-                      char *err, int errlen)
+bool art_fetch_decode(const char *url, int target, unsigned char **out_rgba,
+                      int *out_w, int *out_h, unsigned *fetch_ms,
+                      unsigned *decode_ms, char *err, int errlen)
 {
 	*out_rgba = NULL;
+
+	if (target <= 0)
+		target = ART_HERO_PX;
 
 	if (!url || !url[0]) {
 		snprintf(err, errlen, "empty url");
@@ -209,10 +212,22 @@ bool art_fetch_decode(const char *url, unsigned char **out_rgba, int *out_w,
 	jpeg_mem_src(&cinfo, (const unsigned char *)r.body, r.body_len);
 	jpeg_read_header(&cinfo, TRUE);
 
-	/* Scale during decode: 640x640 -> 160x160 in the DCT domain, far cheaper
-	 * than decoding full size and resampling afterwards. */
-	cinfo.scale_num       = 1;
-	cinfo.scale_denom     = 4;
+	/* Scale during decode, in the DCT domain - far cheaper than decoding full
+	 * size and resampling afterwards.
+	 *
+	 * The denominator is derived from the actual source size rather than fixed,
+	 * because the shelf asks for Spotify's 64px variant: a hardcoded /4 turned
+	 * those into unusable 16x16. Shrink only while the result still covers
+	 * `target`, so the 640px hero still lands on 160x160 as before. */
+	cinfo.scale_num   = 1;
+	cinfo.scale_denom = 1;
+	for (unsigned d = 8; d >= 2; d /= 2) {
+		if (cinfo.image_width / d >= (unsigned)target &&
+		    cinfo.image_height / d >= (unsigned)target) {
+			cinfo.scale_denom = d;
+			break;
+		}
+	}
 	cinfo.out_color_space = JCS_EXT_RGBA;
 
 	jpeg_start_decompress(&cinfo);
@@ -220,11 +235,16 @@ bool art_fetch_decode(const char *url, unsigned char **out_rgba, int *out_w,
 	const int w = (int)cinfo.output_width;
 	const int h = (int)cinfo.output_height;
 
-	if (w > ART_TEX_SIZE || h > ART_TEX_SIZE) {
+	/* Bound against the texture these pixels will be tiled into, which follows
+	 * `target`, not the hero texture - a thumb decode legitimately produces
+	 * something far smaller than ART_TEX_SIZE. */
+	const int cap = art_tex_dim_for(target);
+
+	if (w > cap || h > cap) {
 		jpeg_abort_decompress(&cinfo);
 		jpeg_destroy_decompress(&cinfo);
 		http_free(&r);
-		snprintf(err, errlen, "decoded %dx%d exceeds %d", w, h, ART_TEX_SIZE);
+		snprintf(err, errlen, "decoded %dx%d exceeds %d", w, h, cap);
 		return false;
 	}
 
@@ -265,38 +285,40 @@ bool art_upload(album_art *a, const unsigned char *rgba, int w, int h,
 		snprintf(err, errlen, "no pixels");
 		return false;
 	}
-	if (w > ART_TEX_SIZE || h > ART_TEX_SIZE) {
-		snprintf(err, errlen, "%dx%d exceeds %d", w, h, ART_TEX_SIZE);
-		return false;
-	}
+	const int dim = art_tex_dim_for(w > h ? w : h);
 
 	album_art staged = {0};
 	art_accent_of(rgba, w, h, &staged);
 
-	u8 *tiled = linearAlloc((size_t)ART_TEX_SIZE * ART_TEX_SIZE * 4);
+	u8 *tiled = linearAlloc((size_t)dim * dim * 4);
 	if (!tiled) {
 		snprintf(err, errlen, "linearAlloc failed");
 		return false;
 	}
 
-	art_tile_rgba(rgba, w, h, tiled, ART_TEX_SIZE);
+	art_tile_rgba(rgba, w, h, tiled, dim);
 
-	return art_upload_tiled(a, tiled, w, h, staged.accent_r, staged.accent_g,
-	                        staged.accent_b, url, err, errlen);
+	return art_upload_tiled(a, tiled, w, h, dim, staged.accent_r,
+	                        staged.accent_g, staged.accent_b, url, err, errlen);
 }
 
-bool art_upload_tiled(album_art *a, u8 *tiled, int w, int h, u8 accent_r,
-                      u8 accent_g, u8 accent_b, const char *url, char *err,
-                      int errlen)
+bool art_upload_tiled(album_art *a, u8 *tiled, int w, int h, int dim,
+                      u8 accent_r, u8 accent_g, u8 accent_b, const char *url,
+                      char *err, int errlen)
 {
 	if (!tiled) {
 		snprintf(err, errlen, "no texture data");
 		return false;
 	}
 
+	/* The buffer's dimension cannot be inferred from w/h - a cached hero is
+	 * 160px of image inside a 256px texture - so the caller states it. */
+	if (dim <= 0)
+		dim = ART_TEX_SIZE;
+
 	art_free(a); /* release any previous texture before replacing it */
 
-	if (!C3D_TexInit(&a->tex, ART_TEX_SIZE, ART_TEX_SIZE, GPU_RGBA8)) {
+	if (!C3D_TexInit(&a->tex, (u16)dim, (u16)dim, GPU_RGBA8)) {
 		linearFree(tiled);
 		snprintf(err, errlen, "C3D_TexInit failed");
 		return false;
@@ -314,14 +336,15 @@ bool art_upload_tiled(album_art *a, u8 *tiled, int w, int h, u8 accent_r,
 	a->sub.width  = (u16)w;
 	a->sub.height = (u16)h;
 	a->sub.left   = 0.0f;
-	a->sub.right  = (float)w / ART_TEX_SIZE;
+	a->sub.right  = (float)w / dim;
 	a->sub.top    = 1.0f;
-	a->sub.bottom = 1.0f - (float)h / ART_TEX_SIZE;
+	a->sub.bottom = 1.0f - (float)h / dim;
 
 	a->image.tex    = &a->tex;
 	a->image.subtex = &a->sub;
 	a->src_w        = w;
 	a->src_h        = h;
+	a->tex_dim      = dim;
 	a->accent_r     = accent_r;
 	a->accent_g     = accent_g;
 	a->accent_b     = accent_b;
@@ -343,8 +366,8 @@ bool art_load(album_art *a, const char *url, char *err, int errlen)
 	int            w = 0, h = 0;
 	unsigned       fetch_ms = 0, decode_ms = 0;
 
-	if (!art_fetch_decode(url, &rgba, &w, &h, &fetch_ms, &decode_ms, err,
-	                      errlen))
+	if (!art_fetch_decode(url, ART_HERO_PX, &rgba, &w, &h, &fetch_ms,
+	                      &decode_ms, err, errlen))
 		return false;
 
 	const bool ok = art_upload(a, rgba, w, h, url, err, errlen);

@@ -191,10 +191,16 @@ json_doc *json_doc_parse(const char *json, size_t len, int *needed)
 		return NULL;
 
 	/* One token per ~11 bytes is generous for Spotify's payloads; cap it so a
-	 * surprising body cannot ask for an unbounded allocation. */
+	 * surprising body cannot ask for an unbounded allocation.
+	 *
+	 * The ceiling is sized for the largest response we ask for: recently-played
+	 * at limit=50 is ~147KB and 6830 tokens (measured), and that endpoint
+	 * ignores `fields=`, so it cannot be trimmed server-side. 32768 tokens is
+	 * 512KB transient on a device with 32MB - cheap next to the headroom it
+	 * buys for a heavier listening history than the one it was measured on. */
 	int cap = (int)(len / 8) + 64;
-	if (cap > 8192)
-		cap = 8192;
+	if (cap > 32768)
+		cap = 32768;
 
 	jsmntok_t *toks = malloc((size_t)cap * sizeof *toks);
 	if (!toks)

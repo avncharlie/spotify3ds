@@ -25,7 +25,6 @@
  * Storing just those runs costs 100KB instead of the 256KB the whole texture
  * would take, for 20 memcpys on load. */
 #define TILE_BYTES     (64 * 4) /* 8x8 texels, 4 bytes each */
-#define TILES_PER_ROW  (ART_TEX_SIZE / 8)
 
 /* Packed: this struct is written verbatim to disk, so the on-disk layout must
  * be exactly what is written here rather than whatever padding the compiler
@@ -264,7 +263,8 @@ void artcache_init(void)
 }
 
 bool artcache_load(const char *url, u8 **out_tiled, int *out_w, int *out_h,
-                   u8 *accent_r, u8 *accent_g, u8 *accent_b, unsigned *read_ms)
+                   int *out_dim, u8 *accent_r, u8 *accent_g, u8 *accent_b,
+                   unsigned *read_ms)
 {
 	*out_tiled = NULL;
 
@@ -292,9 +292,14 @@ bool artcache_load(const char *url, u8 **out_tiled, int *out_w, int *out_h,
 	const u32 cols      = (u32)h.src_w ? (((u32)h.src_w + 7) / 8) : 0;
 	const u32 want_len  = rows * cols * TILE_BYTES;
 
+	/* The entry states its own texture size - thumbs are 64, heroes 256 - so
+	 * validate against that rather than against the hero constant. */
+	const u32 dim = h.tex_dim;
+
 	if (h.magic != ARTCACHE_MAGIC || h.version != ARTCACHE_VERSION ||
-	    h.tex_dim != ART_TEX_SIZE || h.payload_len != want_len ||
-	    h.src_w > ART_TEX_SIZE || h.src_h > ART_TEX_SIZE || want_len == 0) {
+	    dim == 0 || (dim & (dim - 1)) != 0 || dim > ART_TEX_SIZE ||
+	    h.payload_len != want_len || h.src_w > dim || h.src_h > dim ||
+	    want_len == 0) {
 		/* Stale format or nonsense: drop it and refetch. */
 		fclose(f);
 		unlink(file);
@@ -320,15 +325,15 @@ bool artcache_load(const char *url, u8 **out_tiled, int *out_w, int *out_h,
 	}
 
 	/* Scatter the stored tile-rows back into a full texture. */
-	u8 *tiled = linearAlloc((size_t)ART_TEX_SIZE * ART_TEX_SIZE * 4);
+	u8 *tiled = linearAlloc((size_t)dim * dim * 4);
 	if (!tiled) {
 		free(rowbuf);
 		return false;
 	}
-	memset(tiled, 0, (size_t)ART_TEX_SIZE * ART_TEX_SIZE * 4);
+	memset(tiled, 0, (size_t)dim * dim * 4);
 
 	for (u32 r = 0; r < rows; r++)
-		memcpy(tiled + (size_t)r * TILES_PER_ROW * TILE_BYTES,
+		memcpy(tiled + (size_t)r * (dim / 8) * TILE_BYTES,
 		       rowbuf + (size_t)r * cols * TILE_BYTES,
 		       (size_t)cols * TILE_BYTES);
 
@@ -349,6 +354,8 @@ bool artcache_load(const char *url, u8 **out_tiled, int *out_w, int *out_h,
 	*out_tiled = tiled;
 	*out_w     = h.src_w;
 	*out_h     = h.src_h;
+	if (out_dim)
+		*out_dim = (int)dim;
 	*accent_r  = h.accent_r;
 	*accent_g  = h.accent_g;
 	*accent_b  = h.accent_b;
@@ -372,11 +379,15 @@ void artcache_store(const char *url, const u8 *rgba, int w, int h, u8 accent_r,
 	char dir[160], file[256], tmp[256];
 	artcache_paths(key, dir, sizeof dir, file, sizeof file, tmp, sizeof tmp);
 
-	/* Tile into a full texture, then keep only the populated rows. */
-	u8 *tiled = linearAlloc((size_t)ART_TEX_SIZE * ART_TEX_SIZE * 4);
+	/* Tile into a full texture, then keep only the populated rows. The texture
+	 * is sized to this image, so a 64px thumb is stored as a 64px entry rather
+	 * than rattling around inside a hero-sized one. */
+	const int dim = art_tex_dim_for(w > h ? w : h);
+
+	u8 *tiled = linearAlloc((size_t)dim * dim * 4);
 	if (!tiled)
 		return;
-	art_tile_rgba(rgba, w, h, tiled, ART_TEX_SIZE);
+	art_tile_rgba(rgba, w, h, tiled, dim);
 
 	const u32 rows = ((u32)h + 7) / 8;
 	const u32 cols = ((u32)w + 7) / 8;
@@ -395,7 +406,7 @@ void artcache_store(const char *url, const u8 *rgba, int w, int h, u8 accent_r,
 	u8 *const rowbuf = hdr_and_rows + sizeof(artcache_hdr);
 	for (u32 r = 0; r < rows; r++)
 		memcpy(rowbuf + (size_t)r * cols * TILE_BYTES,
-		       tiled + (size_t)r * TILES_PER_ROW * TILE_BYTES,
+		       tiled + (size_t)r * (dim / 8) * TILE_BYTES,
 		       (size_t)cols * TILE_BYTES);
 	linearFree(tiled);
 
@@ -403,7 +414,7 @@ void artcache_store(const char *url, const u8 *rgba, int w, int h, u8 accent_r,
 	memset(&hdr, 0, sizeof hdr);
 	hdr.magic       = ARTCACHE_MAGIC;
 	hdr.version     = ARTCACHE_VERSION;
-	hdr.tex_dim     = ART_TEX_SIZE;
+	hdr.tex_dim     = (u16)dim;
 	hdr.src_w       = (u16)w;
 	hdr.src_h       = (u16)h;
 	hdr.accent_r    = accent_r;

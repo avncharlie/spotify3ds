@@ -431,10 +431,12 @@ static void do_art(void)
 	u8       ar = 0, ag = 0, ab = 0;
 	unsigned read_ms = 0;
 
-	if (artcache_load(want, &tiled, &cw, &ch, &ar, &ag, &ab, &read_ms)) {
+	int cdim = 0;
+	if (artcache_load(want, &tiled, &cw, &ch, &cdim, &ar, &ag, &ab, &read_ms)) {
 		p.tiled      = tiled;
 		p.w          = cw;
 		p.h          = ch;
+		p.tex_dim    = cdim;
 		p.accent_r   = ar;
 		p.accent_g   = ag;
 		p.accent_b   = ab;
@@ -447,8 +449,8 @@ static void do_art(void)
 		unsigned       fetch_ms = 0, decode_ms = 0;
 		char           err[128];
 
-		if (!art_fetch_decode(want, &rgba, &w, &h, &fetch_ms, &decode_ms, err,
-		                      sizeof err)) {
+		if (!art_fetch_decode(want, ART_HERO_PX, &rgba, &w, &h, &fetch_ms,
+		                      &decode_ms, err, sizeof err)) {
 			tl_log("art failed: %s", err);
 			return;
 		}

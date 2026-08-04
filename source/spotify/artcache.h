@@ -27,7 +27,7 @@
 
 /* Bump when the payload layout, ART_TEX_SIZE, the JPEG scale factor or the
  * pixel byte order changes: entries with a different version are discarded. */
-#define ARTCACHE_VERSION 2
+#define ARTCACHE_VERSION 3
 
 /* Create the cache root and drop any .tmp files orphaned by a power loss.
  * Cheap: does not scan entries. */
@@ -40,7 +40,7 @@ void artcache_init(void);
  * accent colour and source dimensions are restored. Returns false on a miss, a
  * corrupt entry (which is deleted), or any I/O error. */
 bool artcache_load(const char *url, u8 **out_tiled, int *out_w, int *out_h,
-                   u8 *accent_r, u8 *accent_g, u8 *accent_b,
+                   int *out_dim, u8 *accent_r, u8 *accent_g, u8 *accent_b,
                    unsigned *read_ms);
 
 /* Store decoded RGBA under `url`. Best-effort: failures are logged once and

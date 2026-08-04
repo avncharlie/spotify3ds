@@ -83,6 +83,8 @@ typedef struct {
 	unsigned char *tiled;
 
 	int      w, h;
+	int      tex_dim; /* texture side for `tiled`; 0 when carrying rgba, which
+	                   * is sized at upload time */
 	unsigned fetch_ms;
 	unsigned decode_ms;
 	unsigned cache_ms;

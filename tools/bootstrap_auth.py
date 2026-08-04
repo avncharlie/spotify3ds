@@ -42,12 +42,21 @@ REDIRECT_URI = f"http://{REDIRECT_HOST}:{REDIRECT_PORT}/callback"
 AUTH_URL = "https://accounts.spotify.com/authorize"
 TOKEN_URL = "https://accounts.spotify.com/api/token"
 
-# Minimum needed to read state and drive playback. Deliberately no playlist or
-# library write access.
+# Read state, drive playback, and read (never write) the library well enough to
+# populate the recently-played shelf.
+#
+# Everything here is read-only apart from user-modify-playback-state, which is
+# what the transport buttons need. Nothing can alter playlists or the library.
+# Note the refresh token this produces lives in plaintext on the SD card, so
+# these scopes are also what someone holding that card could read.
 SCOPES = (
     "user-read-playback-state "
     "user-modify-playback-state "
-    "user-read-currently-playing"
+    "user-read-currently-playing "
+    "user-read-recently-played "
+    "user-library-read "
+    "playlist-read-private "
+    "user-top-read"
 )
 
 

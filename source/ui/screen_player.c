@@ -117,7 +117,7 @@ static void draw_repeat_glyph(float cx, float cy, u32 clr, bool one)
 	 * direction the loop travels - with its flat base joined to the bottom run
 	 * and the gap after its tip, so the head terminates the stroke rather than
 	 * floating detached from it. */
-	const float gap    = 3.5f;
+	const float gap    = 2.0f;
 	const float head_w = 5.5f;
 
 	/* Straight runs, inset by the radius at both ends. In repeat-one the top run

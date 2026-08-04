@@ -69,10 +69,6 @@ static void register_player_rects(touch_builder *tb)
 /* Optimistic overlay. Spotify takes 300ms-1.5s to reflect a command, so the
  * UI applies it locally at once and ignores contradicting polls briefly.
  * Without this the buttons feel dead. */
-static bool g_opt_playing;
-static bool g_opt_shuffle;
-static u64  g_opt_play_until;
-static u64  g_opt_shuf_until;
 #define OPTIMISTIC_MS 2500
 
 /* Scrubber drag state machine. While dragging we must ignore poll-driven
@@ -177,18 +173,45 @@ static long effective_progress(const worker_snapshot *snap)
 	return p;
 }
 
+/* Optimistic overlay, one implementation for all three toggles.
+ *
+ * Spotify takes 300ms-1.5s to reflect a command, so a tap applies locally at
+ * once and the polled value is ignored until the hold expires. Without it the
+ * buttons feel dead. Three near-identical copies of this was fine; a fourth
+ * would not be. */
+typedef struct {
+	long value;
+	u64  until;
+} opt_field;
+
+static opt_field g_opt_play, g_opt_shuf, g_opt_rep;
+
+static void opt_set(opt_field *o, long v)
+{
+	o->value = v;
+	o->until = osGetTime() + OPTIMISTIC_MS;
+}
+
+static long opt_get(const opt_field *o, long polled)
+{
+	return osGetTime() < o->until ? o->value : polled;
+}
+
 static bool effective_playing(const worker_snapshot *snap)
 {
-	if (osGetTime() < g_opt_play_until)
-		return g_opt_playing;
-	return snap->have_state && snap->state.is_playing;
+	return opt_get(&g_opt_play,
+	               snap->have_state && snap->state.is_playing) != 0;
 }
 
 static bool effective_shuffle(const worker_snapshot *snap)
 {
-	if (osGetTime() < g_opt_shuf_until)
-		return g_opt_shuffle;
-	return snap->have_state && snap->state.shuffle;
+	return opt_get(&g_opt_shuf, snap->have_state && snap->state.shuffle) != 0;
+}
+
+static repeat_mode effective_repeat(const worker_snapshot *snap)
+{
+	const long polled = snap->have_state ? (long)snap->state.repeat : REPEAT_OFF;
+	return (repeat_mode)opt_get(&g_opt_rep, polled);
 }
 
 /* ---------------------------------------------------------------- drawing */
@@ -345,6 +368,8 @@ int main(int argc, char **argv)
 	long last_seen_progress = -1;
 	int  frames             = 0;
 	bool logged_first       = false;
+	u64  repeat_probe_at    = 0;
+	repeat_mode repeat_probe_from = REPEAT_OFF;
 
 	while (aptMainLoop()) {
 		hidScanInput();
@@ -400,8 +425,7 @@ int main(int argc, char **argv)
 		if (touch.clicked >= 0 && touch.clicked != BTN_SCRUB) {
 			switch (touch.clicked) {
 				case BTN_PLAY:
-					g_opt_playing    = !playing;
-					g_opt_play_until = osGetTime() + OPTIMISTIC_MS;
+					opt_set(&g_opt_play, !playing);
 					worker_post(playing ? CMD_PAUSE : CMD_PLAY, 0);
 					break;
 				case BTN_NEXT:
@@ -417,8 +441,7 @@ int main(int argc, char **argv)
 					worker_post(CMD_PREV, 0);
 					break;
 				case BTN_SHUFFLE:
-					g_opt_shuffle    = !shuffled;
-					g_opt_shuf_until = osGetTime() + OPTIMISTIC_MS;
+					opt_set(&g_opt_shuf, !shuffled);
 					worker_post(CMD_SHUFFLE, !shuffled);
 					break;
 				default:
@@ -482,6 +505,35 @@ int main(int argc, char **argv)
 			logged_first = true;
 			tl_step("first_poll", 1, "%s - %s", snap.state.track,
 			        snap.state.artist);
+
+			/* Phase 9: prove the new fields parse and the repeat endpoint
+			 * works, before phase 11 builds a button on top of them. */
+			tl_step("device_parsed", snap.state.device_name[0] != '\0',
+			        "name=%s type=%s", snap.state.device_name,
+			        snap.state.device_type);
+			tl_step("repeat_parsed", 1, "mode=%d effective=%d",
+			        (int)snap.state.repeat, (int)effective_repeat(&snap));
+
+			if (g_smoketest) {
+				/* Round-trip repeat through its full cycle and back, so a 403
+				 * or a rejected state shows up here rather than as a dead
+				 * button later. */
+				repeat_probe_from = snap.state.repeat;
+				worker_post(CMD_REPEAT, (long)repeat_next(snap.state.repeat));
+				repeat_probe_at = osGetTime();
+			}
+		}
+
+		/* Did the repeat command actually take? */
+		if (repeat_probe_at && osGetTime() - repeat_probe_at > 4000) {
+			const repeat_mode want = repeat_next(repeat_probe_from);
+			tl_step("repeat_cmd", snap.have_state && snap.state.repeat == want,
+			        "%d -> %d (wanted %d)", (int)repeat_probe_from,
+			        (int)(snap.have_state ? snap.state.repeat : REPEAT_OFF),
+			        (int)want);
+			/* Put it back where the user had it. */
+			worker_post(CMD_REPEAT, (long)repeat_probe_from);
+			repeat_probe_at = 0;
 		}
 
 		C2D_TextBufClear(textbuf);
@@ -605,7 +657,7 @@ int main(int argc, char **argv)
 		/* The headless harness needs the app to exit on its own; a real console
 		 * must not. So auto-exit is opt-in, enabled only by the presence of
 		 * sdmc:/spotify/.smoketest (which dev.sh creates). */
-		if (++frames == 420 && g_smoketest) {
+		if (++frames == 700 && g_smoketest) {
 			tl_step("ui_loop", 1, "%d frames, art=%d", frames,
 			        (int)g_art.valid);
 			tl_done();

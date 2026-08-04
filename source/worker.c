@@ -156,6 +156,7 @@ static void do_cmd(worker_cmd cmd, long arg)
 		case CMD_PREV:    pr = player_prev(err, sizeof err); break;
 		case CMD_SEEK:    pr = player_seek(arg, err, sizeof err); break;
 		case CMD_SHUFFLE: pr = player_shuffle(arg != 0, err, sizeof err); break;
+		case CMD_REPEAT:  pr = player_repeat((repeat_mode)arg, err, sizeof err); break;
 		default: return;
 	}
 

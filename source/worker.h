@@ -20,6 +20,7 @@ typedef enum {
 	CMD_PREV,
 	CMD_SEEK,
 	CMD_SHUFFLE,
+	CMD_REPEAT,
 } worker_cmd;
 
 typedef struct {
@@ -41,7 +42,8 @@ void worker_stop(void);
  * to render as the ordinary "Nothing playing" state. */
 void worker_set_fatal(const char *what, const char *hint);
 
-/* Queue a command. arg is position_ms for CMD_SEEK, 0/1 for CMD_SHUFFLE. */
+/* Queue a command. arg is position_ms for CMD_SEEK, 0/1 for CMD_SHUFFLE,
+ * and a repeat_mode for CMD_REPEAT. */
 void worker_post(worker_cmd cmd, long arg);
 
 /* Copy the current state out under lock. Never blocks on network I/O. */

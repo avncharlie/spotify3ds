@@ -105,6 +105,21 @@ player_result player_poll(player_state *out, char *err, int errlen)
 	json_get_bool(j, n, "is_playing", &out->is_playing);
 	json_get_bool(j, n, "shuffle_state", &out->shuffle);
 
+	/* Which device the audio is actually coming out of. Already in this
+	 * response, so the UI's device line costs no extra request. */
+	json_get_str(j, n, "device.name", out->device_name, sizeof out->device_name);
+	json_get_str(j, n, "device.type", out->device_type, sizeof out->device_type);
+
+	char rep[16] = "";
+	if (json_get_str(j, n, "repeat_state", rep, sizeof rep)) {
+		if (strcmp(rep, "track") == 0)
+			out->repeat = REPEAT_TRACK;
+		else if (strcmp(rep, "context") == 0)
+			out->repeat = REPEAT_CONTEXT;
+		else
+			out->repeat = REPEAT_OFF;
+	}
+
 	http_free(&r);
 
 	/* Ads and podcast episodes come back without a track name; report them as
@@ -163,5 +178,24 @@ player_result player_shuffle(bool on, char *err, int errlen)
 	char path[64];
 	snprintf(path, sizeof path, "/v1/me/player/shuffle?state=%s",
 	         on ? "true" : "false");
+	return simple_cmd("PUT", path, err, errlen);
+}
+
+repeat_mode repeat_next(repeat_mode m)
+{
+	switch (m) {
+		case REPEAT_OFF:     return REPEAT_CONTEXT;
+		case REPEAT_CONTEXT: return REPEAT_TRACK;
+		default:             return REPEAT_OFF;
+	}
+}
+
+player_result player_repeat(repeat_mode mode, char *err, int errlen)
+{
+	const char *s = mode == REPEAT_TRACK     ? "track"
+	                : mode == REPEAT_CONTEXT ? "context"
+	                                         : "off";
+	char path[64];
+	snprintf(path, sizeof path, "/v1/me/player/repeat?state=%s", s);
 	return simple_cmd("PUT", path, err, errlen);
 }

@@ -34,7 +34,8 @@ to install the latest CIA directly:
 3. Create a folder named `spotify` at the root of the 3DS SD card and copy the
    generated file to it. The resulting path must be `/spotify/creds.cfg`.
 4. Copy `Spotify3DS.cia` to the SD card, put the card back in the console, and
-   install the CIA with FBI or another homebrew CIA installer.
+   install the CIA with FBI or another homebrew CIA installer (Or install via
+   QR code)
 
 Start playback on a Spotify device before opening Spotify3DS. The app controls
 the active device; it does not play audio through the console.

@@ -449,16 +449,28 @@ int main(int argc, char **argv)
 			}
 		}
 
-		/* Did the repeat command actually take? */
-		if (repeat_probe_at && osGetTime() - repeat_probe_at > 4000) {
+		/* Did the repeat command actually take?
+		 *
+		 * Wait for the change rather than sampling once at a fixed deadline:
+		 * the worker polls on its own 3s cadence, so a single check can easily
+		 * land on a poll issued before Spotify applied the change and report a
+		 * false failure. Succeed as soon as the new state is observed, and only
+		 * fail if it never arrives. */
+		if (repeat_probe_at) {
 			const repeat_mode want = repeat_next(repeat_probe_from);
-			tl_step("repeat_cmd", snap.have_state && snap.state.repeat == want,
-			        "%d -> %d (wanted %d)", (int)repeat_probe_from,
-			        (int)(snap.have_state ? snap.state.repeat : REPEAT_OFF),
-			        (int)want);
-			/* Put it back where the user had it. */
-			worker_post(CMD_REPEAT, (long)repeat_probe_from);
-			repeat_probe_at = 0;
+			const bool arrived = snap.have_state && snap.state.repeat == want;
+			const bool expired = osGetTime() - repeat_probe_at > 12000;
+
+			if (arrived || expired) {
+				tl_step("repeat_cmd", arrived, "%d -> %d (wanted %d) after %llums",
+				        (int)repeat_probe_from,
+				        (int)(snap.have_state ? snap.state.repeat : REPEAT_OFF),
+				        (int)want,
+				        (unsigned long long)(osGetTime() - repeat_probe_at));
+				/* Put it back where the user had it. */
+				worker_post(CMD_REPEAT, (long)repeat_probe_from);
+				repeat_probe_at = 0;
+			}
 		}
 
 		C2D_TextBufClear(textbuf);

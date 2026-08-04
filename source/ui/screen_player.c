@@ -112,12 +112,36 @@ static void draw_repeat_glyph(float cx, float cy, u32 clr)
 	const float w = 17.0f, h = 13.0f, t = 2.0f;
 	const float x = cx - w / 2.0f, y = cy - h / 2.0f;
 
-	/* Horizontals span the full width; verticals fill between them. Drawing
-	 * them overlapping keeps the corners solid. */
-	C2D_DrawRectSolid(x, y, 0.0f, w, t, clr);                    /* top */
-	C2D_DrawRectSolid(x, y + h - t, 0.0f, w, t, clr);            /* bottom */
-	C2D_DrawRectSolid(x, y, 0.0f, t, h, clr);                    /* left */
-	C2D_DrawRectSolid(x + w - t, y, 0.0f, t, h, clr);            /* right */
+	/* Rounded corners: inset each straight run by the radius, then lay a small
+	 * disc of the same stroke width over each corner. Keeps the outline
+	 * continuous and exactly `t` thick the whole way round. */
+	const float r = 3.0f;
+
+	C2D_DrawRectSolid(x + r, y, 0.0f, w - 2.0f * r, t, clr);          /* top */
+	C2D_DrawRectSolid(x + r, y + h - t, 0.0f, w - 2.0f * r, t, clr);  /* bottom */
+	C2D_DrawRectSolid(x, y + r, 0.0f, t, h - 2.0f * r, clr);          /* left */
+	C2D_DrawRectSolid(x + w - t, y + r, 0.0f, t, h - 2.0f * r, clr);  /* right */
+
+	/* Corner arcs, drawn as an outer disc with the interior punched back out
+	 * would need a stencil; at this size a small filled disc centred on the
+	 * stroke reads as a rounded corner and costs one draw each. */
+	const float ci = t / 2.0f;
+	ui_disc(x + r, y + ci, ci, clr);
+	ui_disc(x + w - r, y + ci, ci, clr);
+	ui_disc(x + ci, y + r, ci, clr);
+	ui_disc(x + w - ci, y + r, ci, clr);
+	ui_disc(x + r, y + h - ci, ci, clr);
+	ui_disc(x + w - r, y + h - ci, ci, clr);
+	ui_disc(x + ci, y + h - r, ci, clr);
+	ui_disc(x + w - ci, y + h - r, ci, clr);
+
+	/* Diagonal nubs bridging each corner gap, so the turn looks curved rather
+	 * than notched. */
+	C2D_DrawLine(x + ci, y + r, clr, x + r, y + ci, clr, t, 0.0f);
+	C2D_DrawLine(x + w - ci, y + r, clr, x + w - r, y + ci, clr, t, 0.0f);
+	C2D_DrawLine(x + ci, y + h - r, clr, x + r, y + h - ci, clr, t, 0.0f);
+	C2D_DrawLine(x + w - ci, y + h - r, clr, x + w - r, y + h - ci, clr, t,
+	             0.0f);
 
 	/* Arrowhead riding on the top edge, pointing the way the loop travels.
 	 * Sitting it on the stroke rather than off a corner gives it room. */

@@ -7,6 +7,7 @@
 
 #include "net/net.h"
 #include "spotify/art.h"
+#include "spotify/artcache.h"
 #include "spotify/auth.h"
 #include "spotify/player.h"
 #include "testlog.h"
@@ -289,6 +290,12 @@ int main(int argc, char **argv)
 	/* Latency probes only during automated runs, so normal use stays quiet but
 	 * regressions remain measurable. */
 	tl_set_timing(g_smoketest);
+
+	/* Phase 1 of the art cache: measure SD throughput before building anything
+	 * that depends on it. Azahar reads from the host filesystem, so only the
+	 * hardware numbers mean anything here. */
+	if (g_smoketest)
+		artcache_probe();
 
 	C3D_RenderTarget *top    = C2D_CreateScreenTarget(GFX_TOP, GFX_LEFT);
 	C3D_RenderTarget *bottom = C2D_CreateScreenTarget(GFX_BOTTOM, GFX_LEFT);

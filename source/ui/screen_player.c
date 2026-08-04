@@ -124,16 +124,20 @@ static void draw_repeat_glyph(float cx, float cy, u32 clr, bool one)
 	 * is broken by a notch and the digit sits astride the break, which is how
 	 * Spotify draws it - a "1" laid over an unbroken bar reads as struck
 	 * through. */
-	const float digit_w  = 5.0f;
 	const float digit_cx = cx + 1.0f; /* the flag hangs left, so nudging the stem
 	                                   * right centres the digit optically */
 
 	if (one) {
-		/* The flag makes the digit wider on the left, so the notch is not
-		 * symmetric - a smaller gap on the right keeps the two clearances
-		 * looking equal. */
-		const float notch_l = digit_cx - digit_w / 2.0f - 1.5f;
-		const float notch_r = digit_cx + digit_w / 2.0f + 1.0f;
+		/* Asymmetric on purpose. The stem sits right of centre and the flag
+		 * hangs off its left, so the digit's ink already reaches into the left
+		 * clearance while nothing occupies the right. Measuring the notch from
+		 * the ink rather than from digit_cx is what makes the two gaps look
+		 * equal. */
+		const float ink_l   = digit_cx - 3.0f; /* flag tip  */
+		const float ink_r   = digit_cx + 1.0f; /* stem edge */
+		const float clear   = 1.5f;
+		const float notch_l = ink_l - clear;
+		const float notch_r = ink_r + clear;
 
 		C2D_DrawRectSolid(x + r, y, 0.0f, notch_l - (x + r), t, clr);
 		C2D_DrawRectSolid(notch_r, y, 0.0f, x + w - r - notch_r, t, clr);

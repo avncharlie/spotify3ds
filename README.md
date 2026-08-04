@@ -1,4 +1,4 @@
-# spotify3ds
+# Spotify3DS
 
 A Spotify remote for the Nintendo 3DS / New 2DS XL.
 
@@ -19,9 +19,6 @@ You can also scan this QR code in FBI under **Remote Install → Scan QR Code**
 to install the latest CIA directly:
 
 <a href="https://github.com/avncharlie/spotify3ds/releases/latest/download/Spotify3DS.cia"><img src="assets/latest-release-qr.png" alt="QR code for the latest Spotify3DS CIA" width="240"></a>
-
-The QR uses GitHub's latest-release redirect. Future releases must keep the
-CIA asset named `Spotify3DS.cia` for the link to continue working.
 
 1. Create an app in the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard).
    Select **Web API**, add `http://127.0.0.1:8888/callback` as a redirect URI,

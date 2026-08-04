@@ -24,3 +24,33 @@ bool json_get_int(const char *json, size_t len, const char *path, long *out);
 
 /* Parse a boolean value. Returns false if absent or not true/false. */
 bool json_get_bool(const char *json, size_t len, const char *path, bool *out);
+
+/* --- parse once, read many ------------------------------------------------
+ *
+ * The accessors above re-tokenise the whole document on every call, which is
+ * fine for the eight fields of a player response but not for a list: four
+ * recently-played items need ~16 lookups over a 13KB body.
+ *
+ * Just as important, they cannot report *why* they failed. jsmn returns
+ * JSMN_ERROR_NOMEM when the document needs more tokens than the fixed pool,
+ * and json_get_str turns that into a plain `false` - indistinguishable from an
+ * absent field. A response one item too large would silently look like an
+ * empty list. json_doc_parse surfaces it.
+ */
+typedef struct json_doc json_doc;
+
+/* Tokenise `json` into a reusable document. Returns NULL if it does not fit,
+ * writing the token count needed into *needed when non-NULL so the caller can
+ * log how far over the limit it was. The document borrows `json`; it must stay
+ * alive and unmodified until json_doc_free. */
+json_doc *json_doc_parse(const char *json, size_t len, int *needed);
+
+/* Tokens actually used, for logging headroom. */
+int json_doc_tokens(const json_doc *d);
+
+void json_doc_free(json_doc *d);
+
+/* Same path syntax as above, against an already-parsed document. */
+bool json_doc_str(const json_doc *d, const char *path, char *out,
+                  size_t outlen);
+bool json_doc_int(const json_doc *d, const char *path, long *out);

@@ -3,6 +3,7 @@
 #include <stdbool.h>
 
 #include "spotify/player.h"
+#include "spotify/recents.h"
 
 /* Background network thread.
  *
@@ -51,6 +52,16 @@ void worker_get(worker_snapshot *out);
 
 /* Ask for a poll on the next worker tick (e.g. after a command). */
 void worker_request_poll(void);
+
+/* --- recently played ---------------------------------------------------
+ * Fetched once at startup and refreshed when the track changes, debounced so
+ * skipping through a queue does not issue a request per skip. */
+
+/* Copy the current list out under lock. Returns the item count. */
+int worker_get_recents(recent_list *out);
+
+/* Ask for a refresh on the next worker tick. */
+void worker_request_recents(void);
 
 /* --- album art -------------------------------------------------------
  * Fetching and decoding art costs ~1.5s, almost all of it network. Doing that

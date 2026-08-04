@@ -270,6 +270,7 @@ int main(int argc, char **argv)
 	long last_seen_progress = -1;
 	int  frames             = 0;
 	bool logged_first       = false;
+	bool logged_recents     = false;
 	u64  repeat_probe_at    = 0;
 	repeat_mode repeat_probe_from = REPEAT_OFF;
 
@@ -423,6 +424,24 @@ int main(int argc, char **argv)
 
 				g_cmd_sent = 0;
 				art_payload_free(&art);
+			}
+		}
+
+		/* Phase 12: prove the shelf data arrives, and say what it is. A silent
+		 * empty list is the failure this step exists to make impossible. */
+		if (!logged_recents) {
+			recent_list rl;
+			if (worker_get_recents(&rl) > 0) {
+				logged_recents = true;
+				tl_step("recents", rl.count > 0, "%d items: %s | %s", rl.count,
+				        rl.items[0].name,
+				        rl.count > 1 ? rl.items[1].name : "-");
+				for (int i = 0; i < rl.count && i < 4; i++)
+					tl_log("  recent[%d] %s / %s -> %s", i, rl.items[i].name,
+					       rl.items[i].subtitle, rl.items[i].context_uri);
+			} else if (frames > 600) {
+				logged_recents = true;
+				tl_step("recents", 0, "no items after %d frames", frames);
 			}
 		}
 

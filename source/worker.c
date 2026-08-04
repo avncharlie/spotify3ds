@@ -8,6 +8,7 @@
 #include "spotify/art.h"
 #include "spotify/artcache.h"
 #include "spotify/auth.h"
+#include "spotify/recents.h"
 #include "testlog.h"
 
 #define WORKER_STACK (96 * 1024) /* TLS handshakes need room */
@@ -60,6 +61,11 @@ static bool s_poll_requested;
 
 /* Album art in flight. s_art_want is what the UI asked for; s_art_ready holds a
  * finished download waiting to be claimed. Guarded by s_lock. */
+static recent_list s_recents;
+static bool        s_recents_wanted = true; /* fetch once at startup */
+static u64         s_recents_at;            /* when last fetched */
+#define RECENTS_MIN_INTERVAL_MS 30000
+
 static char        s_art_want[256];
 static char        s_art_inflight[256];
 static art_payload s_art_ready;
@@ -84,6 +90,7 @@ static void set_fatal(const char *what, const char *hint)
 }
 
 static void do_art(void);
+static void do_recents(void);
 
 /* Short label for logs. Uses the *tail* of the content hash, not the head:
  * every Spotify art URL begins "ab67616d0000b273...", so a leading prefix is
@@ -276,6 +283,10 @@ static void worker_main(void *arg)
 		/* Download art after polling, so a fresh URL from the poll above is
 		 * picked up in the same iteration rather than 100ms later. */
 		do_art();
+
+		/* Recents last: the cover the user is looking at matters more than the
+		 * shelf behind it. */
+		do_recents();
 
 		LightLock_Lock(&s_lock);
 		s_busy = false;
@@ -493,6 +504,53 @@ void art_payload_free(art_payload *p)
 		linearFree(p->tiled);
 	p->rgba  = NULL;
 	p->tiled = NULL;
+}
+
+int worker_get_recents(recent_list *out)
+{
+	ensure_lock();
+	LightLock_Lock(&s_lock);
+	*out = s_recents;
+	const int n = s_recents.count;
+	LightLock_Unlock(&s_lock);
+	return n;
+}
+
+void worker_request_recents(void)
+{
+	ensure_lock();
+	LightLock_Lock(&s_lock);
+	s_recents_wanted = true;
+	LightLock_Unlock(&s_lock);
+}
+
+/* Runs on the worker thread. Debounced: a track change asks for a refresh, and
+ * skipping through a queue would otherwise issue one request per skip. */
+static void do_recents(void)
+{
+	LightLock_Lock(&s_lock);
+	const bool want = s_recents_wanted;
+	const u64  last = s_recents_at;
+	LightLock_Unlock(&s_lock);
+
+	if (!want)
+		return;
+	if (last && osGetTime() - last < RECENTS_MIN_INTERVAL_MS)
+		return;
+
+	recent_list fresh;
+	char        err[256];
+	const player_result pr = recents_fetch(&fresh, err, sizeof err);
+
+	LightLock_Lock(&s_lock);
+	s_recents_wanted = false;
+	s_recents_at     = osGetTime();
+	if (pr == PLAYER_OK)
+		s_recents = fresh;
+	LightLock_Unlock(&s_lock);
+
+	if (pr != PLAYER_OK && pr != PLAYER_NOTHING_PLAYING)
+		tl_log("recents: %s (%s)", player_result_str(pr), err);
 }
 
 void worker_request_poll(void)

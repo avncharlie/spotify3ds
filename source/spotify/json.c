@@ -147,6 +147,21 @@ static int parse_all(const char *json, size_t len, jsmntok_t *toks)
 	return jsmn_parse(&p, json, len, toks, MAX_TOKENS);
 }
 
+/* Shared by both the one-shot accessors and the parsed-document ones. */
+static bool extract_str(const char *json, const jsmntok_t *toks, int n,
+                        const char *path, char *out, size_t outlen)
+{
+	const int i = resolve(json, toks, n, path);
+	if (i < 0)
+		return false;
+	if (toks[i].type != JSMN_STRING && toks[i].type != JSMN_PRIMITIVE)
+		return false;
+
+	unescape(json + toks[i].start, (size_t)(toks[i].end - toks[i].start), out,
+	         outlen);
+	return true;
+}
+
 bool json_get_str(const char *json, size_t len, const char *path, char *out,
                   size_t outlen)
 {
@@ -156,14 +171,94 @@ bool json_get_str(const char *json, size_t len, const char *path, char *out,
 	if (n < 1)
 		return false;
 
-	int i = resolve(json, toks, n, path);
-	if (i < 0)
+	return extract_str(json, toks, n, path, out, outlen);
+}
+
+/* --- parse once, read many ---------------------------------------------- */
+
+struct json_doc {
+	const char *json;
+	jsmntok_t  *toks;
+	int         n;
+};
+
+json_doc *json_doc_parse(const char *json, size_t len, int *needed)
+{
+	if (needed)
+		*needed = 0;
+
+	if (!json || !len)
+		return NULL;
+
+	/* One token per ~11 bytes is generous for Spotify's payloads; cap it so a
+	 * surprising body cannot ask for an unbounded allocation. */
+	int cap = (int)(len / 8) + 64;
+	if (cap > 8192)
+		cap = 8192;
+
+	jsmntok_t *toks = malloc((size_t)cap * sizeof *toks);
+	if (!toks)
+		return NULL;
+
+	jsmn_parser p;
+	jsmn_init(&p);
+	const int n = jsmn_parse(&p, json, len, toks, (unsigned)cap);
+
+	if (n < 1) {
+		/* NOMEM is the interesting one: the document is well-formed but larger
+		 * than the pool. Report the cap so the caller can say by how much. */
+		if (needed)
+			*needed = (n == JSMN_ERROR_NOMEM) ? cap : n;
+		free(toks);
+		return NULL;
+	}
+
+	json_doc *d = malloc(sizeof *d);
+	if (!d) {
+		free(toks);
+		return NULL;
+	}
+	d->json = json;
+	d->toks = toks;
+	d->n    = n;
+	if (needed)
+		*needed = n;
+	return d;
+}
+
+int json_doc_tokens(const json_doc *d)
+{
+	return d ? d->n : 0;
+}
+
+void json_doc_free(json_doc *d)
+{
+	if (!d)
+		return;
+	free(d->toks);
+	free(d);
+}
+
+bool json_doc_str(const json_doc *d, const char *path, char *out, size_t outlen)
+{
+	if (!d)
 		return false;
-	if (toks[i].type != JSMN_STRING && toks[i].type != JSMN_PRIMITIVE)
+	return extract_str(d->json, d->toks, d->n, path, out, outlen);
+}
+
+bool json_doc_int(const json_doc *d, const char *path, long *out)
+{
+	char buf[32];
+	if (!json_doc_str(d, path, buf, sizeof buf))
+		return false;
+	if (buf[0] == 'n')
 		return false;
 
-	unescape(json + toks[i].start, (size_t)(toks[i].end - toks[i].start), out,
-	         outlen);
+	char     *end;
+	const long v = strtol(buf, &end, 10);
+	if (end == buf)
+		return false;
+	*out = v;
 	return true;
 }
 

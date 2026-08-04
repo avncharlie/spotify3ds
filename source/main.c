@@ -582,7 +582,8 @@ int main(int argc, char **argv)
 			}
 		}
 
-		if (g_view == VIEW_PLAYER && touch.clicked == BTN_SHELF_ALL) {
+		if (g_view == VIEW_PLAYER &&
+		    (touch.clicked == BTN_SHELF_ALL || (keys_down & KEY_X))) {
 			g_view        = VIEW_LIST;
 			g_list_scroll = 0.0f;
 			g_list_velocity = 0.0f;

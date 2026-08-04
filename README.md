@@ -13,6 +13,9 @@ Audio keeps playing on your phone or desktop — this controls Spotify's
 You need Spotify Premium, a homebrew-enabled 3DS, Python 3 on your computer,
 and access to the console's SD card.
 
+Download `Spotify3DS.cia` from the project's
+[latest release](https://github.com/avncharlie/spotify3ds/releases/latest).
+
 1. Create an app in the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard).
    Select **Web API**, add `http://127.0.0.1:8888/callback` as a redirect URI,
    and copy the app's Client ID. No client secret is needed.

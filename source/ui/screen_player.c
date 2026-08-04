@@ -111,41 +111,56 @@ static void draw_repeat_glyph(float cx, float cy, u32 clr)
 {
 	const float w = 17.0f, h = 13.0f, t = 2.0f;
 	const float x = cx - w / 2.0f, y = cy - h / 2.0f;
+	const float r = 3.5f; /* corner radius, measured to the stroke centre */
 
-	/* Rounded corners: inset each straight run by the radius, then lay a small
-	 * disc of the same stroke width over each corner. Keeps the outline
-	 * continuous and exactly `t` thick the whole way round. */
-	const float r = 3.0f;
+	/* The loop opens on the bottom-right, where the arrow tip goes. The bottom
+	 * run stops short of it so there is clear space between stroke and head. */
+	const float gap      = 3.0f;
+	const float head_w   = 5.5f;
+	const float bottom_w = w - 2.0f * r - gap - head_w;
 
+	/* Straight runs, inset by the radius at both ends. */
 	C2D_DrawRectSolid(x + r, y, 0.0f, w - 2.0f * r, t, clr);          /* top */
-	C2D_DrawRectSolid(x + r, y + h - t, 0.0f, w - 2.0f * r, t, clr);  /* bottom */
+	C2D_DrawRectSolid(x + r, y + h - t, 0.0f, bottom_w, t, clr);      /* bottom */
 	C2D_DrawRectSolid(x, y + r, 0.0f, t, h - 2.0f * r, clr);          /* left */
-	C2D_DrawRectSolid(x + w - t, y + r, 0.0f, t, h - 2.0f * r, clr);  /* right */
+	/* Right edge stops above the opening rather than running into it. */
+	C2D_DrawRectSolid(x + w - t, y + r, 0.0f, t, h - r - t - 4.0f, clr);
 
-	/* Corner arcs, drawn as an outer disc with the interior punched back out
-	 * would need a stencil; at this size a small filled disc centred on the
-	 * stroke reads as a rounded corner and costs one draw each. */
-	const float ci = t / 2.0f;
-	ui_disc(x + r, y + ci, ci, clr);
-	ui_disc(x + w - r, y + ci, ci, clr);
-	ui_disc(x + ci, y + r, ci, clr);
-	ui_disc(x + w - ci, y + r, ci, clr);
-	ui_disc(x + r, y + h - ci, ci, clr);
-	ui_disc(x + w - r, y + h - ci, ci, clr);
-	ui_disc(x + ci, y + h - r, ci, clr);
-	ui_disc(x + w - ci, y + h - r, ci, clr);
+	/* Corners as short arcs of line segments. An earlier attempt laid a
+	 * one-pixel disc on each corner, which is too small to round anything -
+	 * hence the square top-left. Stepping round the quarter turn and stroking
+	 * between the points actually curves it. */
+	const float m  = t / 2.0f;
+	const float rr = r - m; /* radius of the stroke centreline */
 
-	/* Diagonal nubs bridging each corner gap, so the turn looks curved rather
-	 * than notched. */
-	C2D_DrawLine(x + ci, y + r, clr, x + r, y + ci, clr, t, 0.0f);
-	C2D_DrawLine(x + w - ci, y + r, clr, x + w - r, y + ci, clr, t, 0.0f);
-	C2D_DrawLine(x + ci, y + h - r, clr, x + r, y + h - ci, clr, t, 0.0f);
-	C2D_DrawLine(x + w - ci, y + h - r, clr, x + w - r, y + h - ci, clr, t,
-	             0.0f);
+	/* Bottom-right is deliberately absent: that is where the loop opens for the
+	 * arrow, and arcing it would close the gap again. */
+	struct { float ox, oy, a0; } corners[3] = {
+		{x + r,     y + r,     180.0f}, /* top-left */
+		{x + w - r, y + r,     270.0f}, /* top-right */
+		{x + r,     y + h - r,  90.0f}, /* bottom-left */
+	};
 
-	/* Arrowhead riding on the top edge, pointing the way the loop travels.
-	 * Sitting it on the stroke rather than off a corner gives it room. */
-	tri_right(x + w - 9.0f, y - 3.0f, 6.0f, 8.0f, clr);
+	for (int c = 0; c < 3; c++) {
+		const int steps = 4;
+		float     px = 0.0f, py = 0.0f;
+		for (int i = 0; i <= steps; i++) {
+			const float a = (corners[c].a0 + 90.0f * (float)i / (float)steps) *
+			                (float)M_PI / 180.0f;
+			const float nx = corners[c].ox + rr * cosf(a);
+			const float ny = corners[c].oy + rr * sinf(a);
+			if (i)
+				C2D_DrawLine(px, py, clr, nx, ny, clr, t, 0.0f);
+			px = nx;
+			py = ny;
+		}
+	}
+
+	/* Arrowhead on the bottom edge pointing right, as Spotify draws it, sitting
+	 * after the gap left above. Centred on the stroke so the tip lines up with
+	 * the run it continues. */
+	tri_right(x + r + bottom_w + gap, y + h - t / 2.0f - 4.0f, head_w, 8.0f,
+	          clr);
 }
 
 static void draw_playpause(float cx, float cy, bool playing, bool pressed)

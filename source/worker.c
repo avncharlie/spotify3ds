@@ -85,12 +85,16 @@ static void set_fatal(const char *what, const char *hint)
 
 static void do_art(void);
 
-/* Short label for logs: the start of the URL's content hash is enough to
- * correlate a hit with a miss without dumping a 70-char URL every time. */
+/* Short label for logs. Uses the *tail* of the content hash, not the head:
+ * every Spotify art URL begins "ab67616d0000b273...", so a leading prefix is
+ * identical for every cover and makes different tracks look like the same
+ * entry in a transcript. */
 static const char *want_key8(const char *url)
 {
 	const char *slash = strrchr(url, '/');
-	return slash ? slash + 1 : url;
+	const char *seg   = slash ? slash + 1 : url;
+	const size_t n    = strlen(seg);
+	return n > 8 ? seg + n - 8 : seg;
 }
 
 static bool pop_cmd(worker_cmd *cmd, long *arg)

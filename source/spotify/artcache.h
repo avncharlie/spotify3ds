@@ -20,7 +20,7 @@
 
 /* Bump when the payload layout, ART_TEX_SIZE, the JPEG scale factor or the
  * pixel byte order changes: entries with a different version are discarded. */
-#define ARTCACHE_VERSION 1
+#define ARTCACHE_VERSION 2
 
 /* Create the cache root and drop any .tmp files orphaned by a power loss.
  * Cheap: does not scan entries. */

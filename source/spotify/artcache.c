@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dirent.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -26,7 +27,11 @@
 #define TILE_BYTES     (64 * 4) /* 8x8 texels, 4 bytes each */
 #define TILES_PER_ROW  (ART_TEX_SIZE / 8)
 
-typedef struct {
+/* Packed: this struct is written verbatim to disk, so the on-disk layout must
+ * be exactly what is written here rather than whatever padding the compiler
+ * chooses. Leaving it implicit already cost one debugging session - two bytes
+ * inserted after the accent triple silently shifted every field after it. */
+typedef struct __attribute__((packed)) {
 	u32 magic;
 	u16 version;
 	u16 flags;
@@ -34,15 +39,30 @@ typedef struct {
 	u16 src_w;
 	u16 src_h;
 	u8  accent_r, accent_g, accent_b;
-	u8  pad;
 	u32 payload_len;
 	u32 crc32;
-	u32 reserved[2];
-} artcache_hdr; /* 32 bytes */
+
+	/* Recency, for eviction. The obvious choice would be the file's mtime, but
+	 * the 3DS filesystem layer leaves st_mtime as 0 for every entry and utime()
+	 * is inert, so LRU by mtime silently evicts arbitrary files. Instead each
+	 * entry carries a counter stamped on write and refreshed on every hit; the
+	 * sweep evicts the lowest. Wraparound is not a practical concern at a few
+	 * hundred track changes a day. */
+	u32 use_seq;
+	u32 reserved;
+} artcache_hdr;
+
+/* The header is part of the on-disk format, so assert its size rather than
+ * trusting a comment. Packed, the fields total exactly 33 bytes. */
+_Static_assert(sizeof(artcache_hdr) == 33, "artcache header layout changed - "
+                                           "bump ARTCACHE_VERSION");
+
+/* Highest use_seq seen this session, so refreshes keep climbing across runs. */
+static u32 s_use_seq;
 
 static bool s_writes_disabled;
 
-/* A cache entry is a 32-byte header plus the populated tile rows of a 160x160
+/* A cache entry is a header plus the populated tile rows of a 160x160
  * image inside a 256x256 texture: 20 rows of 20 tiles, 64 texels each, 4 bytes
  * per texel = 102400. The probe writes exactly this so the numbers describe a
  * real entry rather than an arbitrary block. */
@@ -118,12 +138,129 @@ static void artcache_paths(const char *key, char *dir, int dirlen, char *file,
 		snprintf(tmp, tmplen, "%s/%s.tmp", dir, key);
 }
 
+/* Entries are all the same size, so the byte budget is really a count. */
+#define ARTCACHE_MAX_ENTRIES \
+	((int)(ARTCACHE_MAX_BYTES / (sizeof(artcache_hdr) + 102400)))
+
+typedef struct {
+	char path[192];
+	u32  use_seq;
+} sweep_entry;
+
+static int sweep_cmp(const void *a, const void *b)
+{
+	const u32 ta = ((const sweep_entry *)a)->use_seq;
+	const u32 tb = ((const sweep_entry *)b)->use_seq;
+	return (ta > tb) - (ta < tb); /* least recently used first */
+}
+
 void artcache_init(void)
 {
 	mkdir(CACHE_ROOT, 0777);
 	/* Shard directories are created lazily on first write: one mkdir costs
 	 * ~80ms on hardware, so creating all 256 up front would stall startup for
 	 * roughly twenty seconds. */
+
+	const u64 t0 = osGetTime();
+
+	DIR *root = opendir(CACHE_ROOT);
+	if (!root)
+		return;
+
+	/* Collect entries, deleting .tmp orphans as we go. A .tmp at startup is by
+	 * definition abandoned - nothing survives a reboot mid-write. */
+	sweep_entry *ents = NULL;
+	int          n = 0, cap = 0, orphans = 0;
+
+	struct dirent *shard;
+	while ((shard = readdir(root))) {
+		if (shard->d_name[0] == '.')
+			continue;
+
+		/* Shard names are two hex chars; anything longer is not ours. */
+		if (strlen(shard->d_name) != 2)
+			continue;
+
+		char shard_path[64];
+		snprintf(shard_path, sizeof shard_path, CACHE_ROOT "/%.2s",
+		         shard->d_name);
+
+		DIR *d = opendir(shard_path);
+		if (!d)
+			continue;
+
+		struct dirent *e;
+		while ((e = readdir(d))) {
+			if (e->d_name[0] == '.')
+				continue;
+
+			/* Entry names are "<hash>.a3c" or "<hash>.tmp"; a hash is at most
+			 * 64 hex chars, so anything longer is not ours. Bounding the copy
+			 * also keeps the path within `full`. */
+			const size_t len = strlen(e->d_name);
+			if (len < 5 || len > 68)
+				continue;
+
+			char full[192];
+			snprintf(full, sizeof full, "%s/%.68s", shard_path, e->d_name);
+
+			if (strcmp(e->d_name + len - 4, ".tmp") == 0) {
+				unlink(full);
+				orphans++;
+				continue;
+			}
+
+			if (n == cap) {
+				const int ncap = cap ? cap * 2 : 64;
+				sweep_entry *p = realloc(ents, (size_t)ncap * sizeof *ents);
+				if (!p)
+					break; /* out of memory: sweep what we have */
+				ents = p;
+				cap  = ncap;
+			}
+
+			/* Read just the header for its use counter. Cheap next to the
+			 * 100KB payload, and the only recency signal available. */
+			u32 seq = 0;
+			{
+				FILE *hf = fopen(full, "rb");
+				if (hf) {
+					artcache_hdr h;
+					if (fread(&h, 1, sizeof h, hf) == sizeof h &&
+					    h.magic == ARTCACHE_MAGIC)
+						seq = h.use_seq;
+					fclose(hf);
+				}
+			}
+
+			snprintf(ents[n].path, sizeof ents[n].path, "%s", full);
+			ents[n].use_seq = seq;
+			/* Resume the counter above the highest already on disk, so
+			 * refreshes keep climbing across runs instead of restarting at 1
+			 * and making old entries look newer than recent ones. */
+			if (seq > s_use_seq)
+				s_use_seq = seq;
+			n++;
+		}
+		closedir(d);
+	}
+	closedir(root);
+
+	int evicted = 0;
+	if (n > ARTCACHE_MAX_ENTRIES && ents) {
+		qsort(ents, (size_t)n, sizeof *ents, sweep_cmp);
+		const int to_drop = n - ARTCACHE_MAX_ENTRIES;
+		for (int i = 0; i < to_drop; i++) {
+			unlink(ents[i].path);
+			evicted++;
+		}
+	}
+
+	free(ents);
+
+	if (orphans || evicted || n)
+		tl_timing("artcache sweep: scanned=%d evicted=%d orphans=%d took=%lldms",
+		          n, evicted, orphans, (long long)(osGetTime() - t0));
 }
 
 bool artcache_load(const char *url, u8 **out_tiled, int *out_w, int *out_h,
@@ -197,6 +334,18 @@ bool artcache_load(const char *url, u8 **out_tiled, int *out_w, int *out_h,
 
 	free(rowbuf);
 
+	/* Refresh the use counter in place so eviction reflects last use, not last
+	 * write. Only the header is rewritten - 32 bytes, not the payload - and a
+	 * failure here is harmless: the entry simply looks older than it is. */
+	{
+		FILE *uf = fopen(file, "r+b");
+		if (uf) {
+			h.use_seq = ++s_use_seq;
+			fwrite(&h, 1, sizeof h, uf);
+			fclose(uf);
+		}
+	}
+
 	*out_tiled = tiled;
 	*out_w     = h.src_w;
 	*out_h     = h.src_h;
@@ -256,6 +405,7 @@ void artcache_store(const char *url, const u8 *rgba, int w, int h, u8 accent_r,
 	hdr.accent_b    = accent_b;
 	hdr.payload_len = len;
 	hdr.crc32       = crc32_buf(rowbuf, len);
+	hdr.use_seq     = ++s_use_seq;
 
 	mkdir(dir, 0777); /* lazy: only the shards actually used ever exist */
 

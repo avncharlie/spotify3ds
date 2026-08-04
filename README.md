@@ -8,11 +8,39 @@ A Spotify remote for the Nintendo 3DS / New 2DS XL.
 Audio keeps playing on your phone or desktop — this controls Spotify's
 *active device* via the official Web API. It is a remote, not a player.
 
+## Installation
+
+You need Spotify Premium, a homebrew-enabled 3DS, Python 3 on your computer,
+and access to the console's SD card.
+
+1. Create an app in the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard).
+   Select **Web API**, add `http://127.0.0.1:8888/callback` as a redirect URI,
+   and copy the app's Client ID. No client secret is needed.
+2. From this project directory, generate your console credentials:
+
+   ```sh
+   python3 tools/bootstrap_auth.py --client-id <YOUR_CLIENT_ID>
+   ```
+
+   Your browser will open Spotify's authorization page. After approval, the
+   script writes `creds.cfg` in the project directory.
+3. Create a folder named `spotify` at the root of the 3DS SD card and copy the
+   generated file to it. The resulting path must be `/spotify/creds.cfg`.
+4. Copy `Spotify3DS.cia` to the SD card, put the card back in the console, and
+   install the CIA with FBI or another homebrew CIA installer.
+
+Start playback on a Spotify device before opening Spotify3DS. The app controls
+the active device; it does not play audio through the console.
+
+`creds.cfg` contains a plaintext bearer credential. Keep it private and revoke
+access at <https://spotify.com/account/apps> if the SD card or file is lost.
+
 ## Requirements
 
 - Spotify **Premium** (the playback-control endpoints return 403 on free accounts)
 - A homebrew-enabled 3DS, or the Azahar emulator
-- devkitARM + libctru, plus the portlibs listed below
+- For source builds: devkitARM + libctru, the portlibs listed below, `makerom`,
+  and `bannertool`
 
 ## Why mbedTLS is bundled
 
@@ -42,7 +70,7 @@ RNG here, and its TLS 1.1 ceiling is irrelevant to that.
 `ENTROPY_SOURCE_FAILED` when absent, or it poisons the accumulator and seeding
 fails even though the sslc source is healthy.
 
-## Setup
+## Development setup
 
 ```sh
 sudo dkp-pacman -S 3ds-zlib 3ds-mbedtls 3ds-libjpeg-turbo
@@ -51,7 +79,7 @@ sudo dkp-pacman -S 3ds-zlib 3ds-mbedtls 3ds-libjpeg-turbo
 ./dev.sh --log    # also dump the guest debug log
 ```
 
-### Auth (one time)
+### Emulator auth (one time)
 
 1. Create an app at <https://developer.spotify.com/dashboard>
 2. Add this redirect URI **exactly**: `http://127.0.0.1:8888/callback`

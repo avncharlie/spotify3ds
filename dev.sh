@@ -26,7 +26,7 @@
 set -uo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TARGET="$(basename "$PROJECT_DIR")"
+TARGET="Spotify3DS"
 THREEDSX="$PROJECT_DIR/$TARGET.3dsx"
 
 AZAHAR_APP="/Applications/Azahar.app"

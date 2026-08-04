@@ -16,7 +16,7 @@ include $(DEVKITARM)/3ds_rules
 # DATA is a list of directories containing data files
 # INCLUDES is a list of directories containing header files
 #---------------------------------------------------------------------------------
-TARGET		:=	$(notdir $(CURDIR))
+TARGET		:=	Spotify3DS
 BUILD		:=	build
 SOURCES		:=	source source/net source/spotify source/ui
 DATA		:=	data
@@ -24,9 +24,16 @@ INCLUDES	:=	include
 GRAPHICS	:=	gfx
 GFXBUILD	:=	$(BUILD)
 
-APP_TITLE	:=	Spotify Controller
+APP_TITLE	:=	Spotify3DS
 APP_DESCRIPTION	:=	Spotify remote for 3DS
 APP_AUTHOR	:=	alvin
+ICON		:=	assets/icon.png
+
+CIA_RSF		:=	$(TOPDIR)/assets/app.rsf
+CIA_BANNER	:=	$(TOPDIR)/assets/banner.png
+CIA_AUDIO	:=	$(TOPDIR)/assets/banner.wav
+MAKEROM		?=	makerom
+BANNERTOOL	?=	bannertool
 
 #---------------------------------------------------------------------------------
 # options for code generation
@@ -149,11 +156,14 @@ ifneq ($(ROMFS),)
 	export _3DSXFLAGS += --romfs=$(CURDIR)/$(ROMFS)
 endif
 
-.PHONY: all clean
+.PHONY: all clean 3dsx cia
 
 #---------------------------------------------------------------------------------
 all: $(BUILD) $(GFXBUILD) $(DEPSDIR) $(ROMFS_T3XFILES) $(T3XHFILES)
 	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
+
+3dsx cia: $(BUILD) $(GFXBUILD) $(DEPSDIR) $(ROMFS_T3XFILES) $(T3XHFILES)
+	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile $@
 
 $(BUILD):
 	@mkdir -p $@
@@ -171,7 +181,7 @@ endif
 #---------------------------------------------------------------------------------
 clean:
 	@echo clean ...
-	@rm -fr $(BUILD) $(TARGET).3dsx $(OUTPUT).smdh $(TARGET).elf $(GFXBUILD)
+	@rm -fr $(BUILD) $(TARGET).3dsx $(OUTPUT).smdh $(TARGET).elf $(TARGET).cia $(GFXBUILD)
 
 #---------------------------------------------------------------------------------
 $(GFXBUILD)/%.t3x	$(BUILD)/%.h	:	%.t3s
@@ -185,7 +195,33 @@ else
 #---------------------------------------------------------------------------------
 # main targets
 #---------------------------------------------------------------------------------
+.PHONY: all 3dsx cia check-cia-tools
+
+all: $(OUTPUT).3dsx $(OUTPUT).cia
+
+3dsx: $(OUTPUT).3dsx
+
+cia: $(OUTPUT).cia
+
 $(OUTPUT).3dsx	:	$(OUTPUT).elf $(_3DSXDEPS)
+
+check-cia-tools:
+	@command -v $(MAKEROM) >/dev/null || { echo "makerom is required to build a CIA" >&2; exit 1; }
+	@command -v $(BANNERTOOL) >/dev/null || { echo "bannertool is required to build a CIA" >&2; exit 1; }
+
+banner.bnr: $(CIA_BANNER) $(CIA_AUDIO) | check-cia-tools
+	@$(BANNERTOOL) makebanner -i $(CIA_BANNER) -a $(CIA_AUDIO) -o $@ >/dev/null
+	@echo built ... $@
+
+icon.icn: $(APP_ICON) | check-cia-tools
+	@$(BANNERTOOL) makesmdh -s "$(APP_TITLE)" -l "$(APP_DESCRIPTION)" \
+		-p "$(APP_AUTHOR)" -i $(APP_ICON) -o $@ >/dev/null
+	@echo built ... $@
+
+$(OUTPUT).cia: $(OUTPUT).elf banner.bnr icon.icn $(CIA_RSF) | check-cia-tools
+	@$(MAKEROM) -f cia -o $@ -rsf $(CIA_RSF) -target t -elf $< \
+		-icon icon.icn -banner banner.bnr -exefslogo
+	@echo built ... $(notdir $@)
 
 $(OFILES_SOURCES) : $(HFILES)
 

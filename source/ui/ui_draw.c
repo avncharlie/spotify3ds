@@ -7,6 +7,13 @@
 
 #include "../testlog.h"
 
+/* Measured identical on the emulator and on a New 2DS XL (firmware
+ * 11.17.0-50E): height=30, ascent=25, lineFeed=30, and every derived width
+ * matching to the decimal. So typography can be judged in Azahar without a
+ * hardware round trip - unlike most things in this project, the font is not a
+ * divergence. Still read from fontGetInfo rather than hardcoded, since other
+ * regions were not measured. */
+
 /* The mockup's CSS px per role. TY_MICRO is deliberately absent: it is
  * variable while the 7px-vs-legible question is being settled. */
 static const float s_role_px[TY_COUNT] = {

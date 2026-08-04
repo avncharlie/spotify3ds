@@ -11,6 +11,7 @@
 #include "spotify/auth.h"
 #include "spotify/player.h"
 #include "testlog.h"
+#include "ui/screen_top.h"
 #include "ui/touch.h"
 #include "ui/ui.h"
 #include "worker.h"
@@ -85,6 +86,10 @@ static long g_base_progress;
 static u64  g_base_time;
 
 static album_art g_art;
+
+/* KEY_Y hides the cover and switches the top screen to the large-title
+ * layout. The top screen has no digitizer, so this has to be a button. */
+static bool g_art_hidden;
 
 /* True when running under the headless harness, which needs the app to quit by
  * itself. On a real console the app must stay up until the user exits. */
@@ -375,6 +380,16 @@ int main(int argc, char **argv)
 		hidScanInput();
 		if (hidKeysDown() & KEY_START)
 			break;
+		/* Y hides the cover. The top screen has no touch digitizer, so the
+		 * art-off layout needs a physical button; every key but START was
+		 * free. */
+		if (hidKeysDown() & KEY_Y)
+			g_art_hidden = !g_art_hidden;
+
+		/* Exercise the art-hidden layout headlessly too, so 2A cannot rot
+		 * unnoticed: flip it for a stretch in the middle of a smoketest. */
+		if (g_smoketest)
+			g_art_hidden = (frames > 480 && frames < 600);
 
 		register_player_rects(&g_tb);
 		touch_update(&touch, g_tb.rects, g_tb.n);
@@ -539,68 +554,32 @@ int main(int argc, char **argv)
 		C2D_TextBufClear(textbuf);
 
 		/* --- top screen ------------------------------------------------ */
-		const u32 wash = g_art.valid ? C2D_Color32(g_art.accent_r,
-		                                           g_art.accent_g,
-		                                           g_art.accent_b, 0xFF)
-		                             : C2D_Color32(0x18, 0x18, 0x18, 0xFF);
-
 		C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
 
-		C2D_TargetClear(top, wash);
+		C2D_TargetClear(top, C2D_Color32(0, 0, 0, 0xFF));
 		C2D_SceneBegin(top);
 
-		/* Vertical falloff to black, so the wash reads as depth rather than a
-		 * flat slab of colour. */
-		for (int i = 0; i < 8; i++) {
-			const u8 a = (u8)(i * 18);
-			C2D_DrawRectSolid(0.0f, SCREEN_H - (float)(8 - i) * 12.0f, 0.0f,
-			                  TOP_W, 12.0f, C2D_Color32(0, 0, 0, a));
-		}
-
-		if (g_art.valid) {
-			/* C2D_DrawImageAt scales relative to the subtexture's declared
-			 * size (sub.width/height), not the full 256x256 texture, so the
-			 * factor is target/subtex - not target/src. */
-			const float sx = ART_D / (float)g_art.sub.width;
-			const float sy = ART_D / (float)g_art.sub.height;
-			C2D_DrawImageAt(g_art.image, ART_X, ART_Y, 0.0f, NULL, sx, sy);
-		} else {
-			C2D_DrawRectSolid(ART_X, ART_Y, 0.0f, ART_D, ART_D,
-			                  C2D_Color32(0x22, 0x22, 0x22, 0xFF));
-		}
-
-		const float tx = ART_X + ART_D + 16.0f;
-		const float tw = TOP_W - tx - 12.0f;
-
-		if (snap.have_state) {
-			draw_text_fit(textbuf, snap.state.track, tx, 44.0f, 0.62f, tw,
-			              CLR_TEXT);
-			draw_text_fit(textbuf, snap.state.artist, tx, 78.0f, 0.48f, tw,
-			              CLR_DIM);
-			draw_text_fit(textbuf, snap.state.album, tx, 104.0f, 0.40f, tw,
-			              CLR_FAINT);
-		} else {
-			/* A setup failure must never look like the ordinary idle state.
-			 * Showing "Nothing playing" for a dead worker is exactly what made
-			 * the core-1 threadCreate failure invisible. */
-			const char *primary =
-			    snap.fatal ? snap.status
-			               : (snap.status[0] ? snap.status : "Nothing playing");
-
-			draw_text_fit(textbuf, primary, tx, 54.0f, 0.50f, tw,
-			              snap.fatal ? CLR_ERROR : CLR_DIM);
-
-			/* Say what to actually do about it. Diagnosing this on hardware
-			 * without a console is otherwise painful. */
+		{
 			const char *hint = NULL;
 			if (snap.fatal)
 				hint = snap.status_hint;
 			else if (snap.last_result == PLAYER_NO_DEVICE)
 				hint = "Start Spotify on a device";
 
-			if (hint)
-				draw_text_fit(textbuf, hint, tx, 84.0f, 0.34f, tw,
-				              snap.fatal ? CLR_ERROR_DIM : CLR_FAINT);
+			const screen_top_args ta = {
+				.buf        = textbuf,
+				.art        = &g_art,
+				.art_hidden = g_art_hidden,
+				.have_state = snap.have_state,
+				.fatal      = snap.fatal,
+				.track      = snap.state.track,
+				.artist     = snap.state.artist,
+				.album      = snap.state.album,
+				.device     = snap.state.device_name,
+				.status     = snap.status,
+				.hint       = hint,
+			};
+			screen_top_draw(&ta);
 		}
 
 		/* --- bottom screen --------------------------------------------- */

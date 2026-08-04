@@ -23,7 +23,13 @@ static const float s_role_px[TY_COUNT] = {
 };
 
 static float s_scale[TY_COUNT];
-static float s_micro_px = 7.0f; /* mockup value; ui_set_micro_px overrides */
+
+/* The mockup asks for 7px here. Rendered and compared side by side: at 7px the
+ * label is an unreadable smudge (the glyph atlas is minified ~4x and the
+ * bilinear filter finishes it off), while at 10px "ALVBOOK" reads cleanly and
+ * still carries the tracking that gives the mockup its character. 10px it is;
+ * ui_set_micro_px keeps the choice adjustable. */
+static float s_micro_px = 10.0f;
 static float s_em;              /* font em box at scale 1.0 */
 static float s_ascent;
 

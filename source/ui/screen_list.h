@@ -18,11 +18,14 @@ enum {
 	LIST_PLAYLIST0 = 200, /* .. LIST_PLAYLIST0 + PLAYLISTS_MAX - 1 */
 	LIST_ARM_PLAY = 300,
 	LIST_ALBUM0 = 400, /* .. LIST_ALBUM0 + ALBUMS_MAX - 1 */
+	LIST_CHEVRON_RECENT0 = 700,
+	LIST_CHEVRON_PLAYLIST0 = 800,
+	LIST_CHEVRON_ALBUM0 = 1000,
 };
 
 #define LIST_HEADER_H 30.0f
 #define LIST_ROW_H    42.0f
-#define LIST_ARMED_ROW_H 48.0f
+#define LIST_ARMED_ROW_H LIST_ROW_H
 
 typedef struct {
 	C2D_TextBuf          buf;
@@ -30,6 +33,9 @@ typedef struct {
 	const recent_list   *recents;
 	const playlist_list *playlists;
 	const album_list    *albums;
+	const char          *current_context_uri;
+	bool                 playing;
+	unsigned             animation_ms;
 
 	float scroll;     /* pixels scrolled down */
 	int   pressed_id; /* control under the finger, or -1 */

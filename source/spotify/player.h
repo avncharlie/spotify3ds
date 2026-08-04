@@ -26,6 +26,8 @@ typedef struct {
 	char artist[192];
 	char album[192];
 	char art_url[256];
+	char track_uri[128];
+	char context_uri[128];
 	char device_name[64];
 	char device_type[32];
 	long progress_ms;
@@ -43,6 +45,7 @@ player_result player_play(char *err, int errlen);
 player_result player_pause(char *err, int errlen);
 player_result player_next(char *err, int errlen);
 player_result player_prev(char *err, int errlen);
+player_result player_queue_item(const char *item_uri, char *err, int errlen);
 player_result player_seek(long position_ms, char *err, int errlen);
 player_result player_shuffle(bool on, char *err, int errlen);
 player_result player_repeat(repeat_mode mode, char *err, int errlen);
@@ -53,5 +56,16 @@ repeat_mode repeat_next(repeat_mode m);
 /* Start playback from a context (album or playlist uri). */
 player_result player_play_context(const char *context_uri, char *err,
                                   int errlen);
+
+/* Start a context at a raw zero-based playback position. Do not derive this
+ * from playlist-page offsets: unavailable/local entries can make them differ. */
+player_result player_play_context_at(const char *context_uri, int position,
+                                     char *err, int errlen);
+
+/* Start a context at a specific track URI. This remains exact when unavailable
+ * or local playlist entries make API page positions differ from playback. */
+player_result player_play_context_item(const char *context_uri,
+                                       const char *item_uri, char *err,
+                                       int errlen);
 
 const char *player_result_str(player_result r);

@@ -63,6 +63,11 @@ float ui_text_width(C2D_TextBuf buf, const char *s, type_role r);
  * 16 segments at r=20 keeps the chord error under half a pixel. */
 void ui_disc(float cx, float cy, float r, u32 clr);
 
+/* Darken cover art and draw the four-bar current-playback indicator. Active
+ * playback animates slowly; paused playback remains at a fixed silhouette. */
+void ui_now_playing_badge(float x, float y, float size, bool playing,
+                          unsigned animation_ms);
+
 /* Emit font metrics and the derived scales. Smoketest only; no-op unless
  * timing output is enabled. */
 void ui_font_probe(void);

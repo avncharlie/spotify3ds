@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "net/net.h"
 #include "spotify/art.h"
@@ -13,6 +14,7 @@
 #include "testlog.h"
 #include "ui/screen_list.h"
 #include "ui/screen_player.h"
+#include "ui/screen_tracks.h"
 #include "ui/screen_top.h"
 #include "ui/thumbs.h"
 #include "ui/touch.h"
@@ -78,12 +80,22 @@ static album_art g_art;
 static bool g_art_hidden;
 
 /* Which view the bottom screen is showing. */
-typedef enum { VIEW_PLAYER = 0, VIEW_LIST } bottom_view;
+typedef enum { VIEW_PLAYER = 0, VIEW_LIST, VIEW_TRACKS } bottom_view;
 static bottom_view g_view;
 static float       g_list_scroll;
 static float       g_list_velocity;
 static int         g_list_armed = -1;
 static u64         g_list_arm_until;
+
+static collection_item       g_tracks_collection;
+static worker_tracks_snapshot g_tracks_buf;
+static float                 g_tracks_scroll;
+static float                 g_tracks_velocity;
+static int                   g_tracks_armed = -1;
+static u64                   g_tracks_arm_until;
+static unsigned              g_tracks_applied_generation;
+/* -2: leave unselected, -1: select last row, otherwise page-local index. */
+static int                   g_tracks_select_on_load = -2;
 
 /* List momentum is measured in pixels per frame. Keep it deliberately short:
  * this is a 240px resistive screen, so a phone-style multi-screen fling would
@@ -196,6 +208,82 @@ static recent_list   g_recents_buf;
 static playlist_list g_playlists_buf;
 static album_list    g_albums_buf;
 
+static const collection_item *list_selected_item(int id, int recent_count,
+	                                             int playlist_count,
+	                                             int album_count)
+{
+	if (id >= LIST_RECENT0 && id < LIST_RECENT0 + recent_count)
+		return &g_recents_buf.items[id - LIST_RECENT0];
+	if (id >= LIST_PLAYLIST0 && id < LIST_PLAYLIST0 + playlist_count)
+		return &g_playlists_buf.items[id - LIST_PLAYLIST0];
+	if (id >= LIST_ALBUM0 && id < LIST_ALBUM0 + album_count)
+		return &g_albums_buf.items[id - LIST_ALBUM0];
+	return NULL;
+}
+
+static const collection_item *list_chevron_item(int id, int recent_count,
+	                                            int playlist_count,
+	                                            int album_count)
+{
+	if (id >= LIST_CHEVRON_RECENT0 &&
+	    id < LIST_CHEVRON_RECENT0 + recent_count)
+		return &g_recents_buf.items[id - LIST_CHEVRON_RECENT0];
+	if (id >= LIST_CHEVRON_PLAYLIST0 &&
+	    id < LIST_CHEVRON_PLAYLIST0 + playlist_count)
+		return &g_playlists_buf.items[id - LIST_CHEVRON_PLAYLIST0];
+	if (id >= LIST_CHEVRON_ALBUM0 &&
+	    id < LIST_CHEVRON_ALBUM0 + album_count)
+		return &g_albums_buf.items[id - LIST_CHEVRON_ALBUM0];
+	return NULL;
+}
+
+static void tracks_request_page(int offset, int select_on_load)
+{
+	g_tracks_scroll = 0.0f;
+	g_tracks_velocity = 0.0f;
+	g_tracks_armed = -1;
+	g_tracks_select_on_load = select_on_load;
+	worker_request_tracks(&g_tracks_collection, offset);
+}
+
+static void tracks_open(const collection_item *item)
+{
+	if (!item)
+		return;
+	g_tracks_collection = *item;
+	g_view = VIEW_TRACKS;
+	g_tracks_applied_generation = 0;
+	tracks_request_page(0, -2);
+}
+
+static bool collection_named(const char *name, collection_item *out)
+{
+	for (int i = 0; i < g_playlists_buf.count; i++) {
+		if (strcasecmp(g_playlists_buf.items[i].name, name) == 0) {
+			*out = g_playlists_buf.items[i];
+			return true;
+		}
+	}
+	for (int i = 0; i < g_recents_buf.count; i++) {
+		if (strcasecmp(g_recents_buf.items[i].name, name) == 0) {
+			*out = g_recents_buf.items[i];
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool track_page_offsets_valid(const track_page *page)
+{
+	if (!page || page->count < 0 || page->count > TRACK_PAGE_MAX ||
+	    page->offset < 0 || page->total < page->offset + page->count)
+		return false;
+	for (int i = 0; i < page->count; i++)
+		if (page->items[i].source_index != page->offset + i)
+			return false;
+	return true;
+}
+
 static int list_id_at(int pos, int recent_count, int playlist_count,
                       int album_count)
 {
@@ -277,6 +365,7 @@ int main(int argc, char **argv)
 	hidSetRepeatParameters(18, 5); /* 300ms delay, then about 12 rows/second */
 
 	tl_init(PHASE);
+	artcache_init();
 
 	/* Auto-exit is opt-in, so a real console runs until the user quits.
 	 *   emulator: dev.sh touches sdmc:/spotify/.smoketest
@@ -330,7 +419,6 @@ int main(int argc, char **argv)
 		 * "Nothing playing" state, which is what made this fail silently. */
 		worker_set_fatal("Internal error", err);
 	} else {
-		artcache_init();
 		tl_step("worker_start", 1, "network thread started");
 	}
 
@@ -346,6 +434,15 @@ int main(int argc, char **argv)
 	bool logged_albums      = false;
 	u64  repeat_probe_at    = 0;
 	repeat_mode repeat_probe_from = REPEAT_OFF;
+	int      tracks_probe_stage = 0;
+	unsigned tracks_probe_generation = 0;
+	int      tracks_probe_far_offset = 0;
+	u64      tracks_probe_play_at = 0;
+	unsigned tracks_probe_poll_seq = 0;
+	char     tracks_probe_expected[128] = "";
+	char     tracks_probe_item_uri[128] = "";
+	collection_item tracks_probe_good = {0};
+	collection_item tracks_probe_lux = {0};
 
 	while (aptMainLoop()) {
 		hidScanInput();
@@ -408,9 +505,46 @@ int main(int argc, char **argv)
 		const bool shuffled = effective_shuffle(&snap);
 		const long progress = effective_progress(&snap);
 		const long duration = snap.have_state ? snap.state.duration_ms : 0;
+		const bottom_view input_view = g_view;
+
+		if (input_view == VIEW_TRACKS) {
+			worker_get_tracks(&g_tracks_buf);
+			if (g_tracks_buf.state == TRACKS_READY &&
+			    g_tracks_buf.generation != g_tracks_applied_generation) {
+				g_tracks_applied_generation = g_tracks_buf.generation;
+				g_tracks_collection = g_tracks_buf.page.collection;
+				g_tracks_scroll = 0.0f;
+				g_tracks_velocity = 0.0f;
+				g_tracks_armed = -1;
+				if (g_tracks_buf.page.count > 0 &&
+				    g_tracks_select_on_load != -2) {
+					int idx = g_tracks_select_on_load < 0
+					              ? g_tracks_buf.page.count - 1
+					              : g_tracks_select_on_load;
+					if (idx >= g_tracks_buf.page.count)
+						idx = g_tracks_buf.page.count - 1;
+					g_tracks_armed = TRACK_ROW0 + idx;
+					g_tracks_arm_until = osGetTime() + LIST_ARM_MS;
+					int buffer_idx = idx;
+					if (g_tracks_select_on_load < 0 && idx > 0)
+						buffer_idx--;
+					else if (g_tracks_select_on_load == 0 &&
+					         idx + 1 < g_tracks_buf.page.count)
+						buffer_idx++;
+					g_tracks_scroll = screen_tracks_reveal_row(
+					    g_tracks_buf.page.count, g_tracks_armed, g_tracks_armed,
+					    g_tracks_scroll);
+					g_tracks_scroll = screen_tracks_reveal_row(
+					    g_tracks_buf.page.count, TRACK_ROW0 + buffer_idx,
+					    g_tracks_armed, g_tracks_scroll);
+				}
+				g_tracks_select_on_load = -2;
+
+			}
+		}
 
 		/* --- input ---------------------------------------------------- */
-		if (g_view == VIEW_PLAYER) {
+		if (input_view == VIEW_PLAYER) {
 			if (keys_down & KEY_A) {
 				opt_set(&g_opt_play, !playing);
 				worker_post(playing ? CMD_PAUSE : CMD_PLAY, 0);
@@ -428,8 +562,22 @@ int main(int argc, char **argv)
 				worker_post(CMD_PREV, 0);
 			}
 		}
+		if (input_view == VIEW_LIST || input_view == VIEW_TRACKS) {
+			if (keys_down & KEY_DRIGHT) {
+				g_cmd_sent = osGetTime();
+				tl_timing("button NEXT at %llu",
+				          (unsigned long long)g_cmd_sent);
+				worker_post(CMD_NEXT, 0);
+			}
+			if (keys_down & KEY_DLEFT) {
+				g_cmd_sent = osGetTime();
+				tl_timing("button PREV at %llu",
+				          (unsigned long long)g_cmd_sent);
+				worker_post(CMD_PREV, 0);
+			}
+		}
 
-		if (g_view == VIEW_PLAYER && touch.pressed &&
+		if (input_view == VIEW_PLAYER && touch.pressed &&
 		    touch.press_id == BTN_SCRUB && duration > 0)
 			g_scrub = SCRUB_DRAGGING;
 
@@ -449,7 +597,7 @@ int main(int argc, char **argv)
 		}
 
 		/* --- list view input ------------------------------------------- */
-		if (g_view == VIEW_LIST) {
+		if (input_view == VIEW_LIST) {
 			recent_list *const   rl = &g_recents_buf;
 			playlist_list *const pl = &g_playlists_buf;
 			album_list *const    al = &g_albums_buf;
@@ -524,25 +672,21 @@ int main(int argc, char **argv)
 				g_list_velocity = 0.0f;
 			}
 
-			if (touch.clicked == LIST_BTN_BACK || (keys_down & KEY_B)) {
+			const collection_item *selected = list_selected_item(
+			    g_list_armed, n, pn, an);
+			const collection_item *drilldown = list_chevron_item(
+			    touch.clicked, n, pn, an);
+			if (drilldown) {
+				tracks_open(drilldown);
+			} else if ((keys_down & KEY_X) && selected) {
+				tracks_open(selected);
+			} else if (touch.clicked == LIST_BTN_BACK || (keys_down & KEY_B)) {
 				g_view = VIEW_PLAYER;
 				g_list_armed = -1;
 			} else if (touch.clicked == LIST_ARM_PLAY || (keys_down & KEY_A)) {
-				const collection_item *item = NULL;
-				if (g_list_armed >= LIST_RECENT0 &&
-				    g_list_armed < LIST_RECENT0 + n)
-					item = &rl->items[g_list_armed - LIST_RECENT0];
-				else if (g_list_armed >= LIST_PLAYLIST0 &&
-				         g_list_armed < LIST_PLAYLIST0 + pn)
-					item = &pl->items[g_list_armed - LIST_PLAYLIST0];
-				else if (g_list_armed >= LIST_ALBUM0 &&
-				         g_list_armed < LIST_ALBUM0 + an)
-					item = &al->items[g_list_armed - LIST_ALBUM0];
-
-				if (item) {
-					tl_log("list: confirmed play %s", item->context_uri);
-					worker_play_context(item->context_uri);
-					g_view = VIEW_PLAYER;
+				if (selected) {
+					tl_log("list: confirmed play %s", selected->context_uri);
+					worker_play_context(selected->context_uri);
 					opt_set(&g_opt_play, 1);
 				}
 				g_list_armed = -1;
@@ -582,7 +726,157 @@ int main(int argc, char **argv)
 			}
 		}
 
-		if (g_view == VIEW_PLAYER &&
+		/* --- collection track input ------------------------------------ */
+		if (input_view == VIEW_TRACKS) {
+			track_page *const page = &g_tracks_buf.page;
+			const bool ready = g_tracks_buf.state == TRACKS_READY;
+
+			if (touch.clicked == TRACK_BTN_BACK || (keys_down & KEY_B)) {
+				worker_cancel_tracks();
+				g_view = VIEW_LIST;
+				g_tracks_armed = -1;
+			} else if ((touch.clicked == TRACK_BTN_RETRY ||
+			            (keys_down & KEY_X)) &&
+			           g_tracks_buf.state == TRACKS_ERROR) {
+				tracks_request_page(page->offset, -2);
+			} else if (ready) {
+				if (g_tracks_armed >= 0 && osGetTime() >= g_tracks_arm_until)
+					g_tracks_armed = -1;
+
+				const bool prev_page =
+				    touch.clicked == TRACK_BTN_PREV_PAGE || (keys_down & KEY_L);
+				const bool next_page =
+				    touch.clicked == TRACK_BTN_NEXT_PAGE || (keys_down & KEY_R);
+				if (prev_page && page->offset > 0) {
+					tracks_request_page(page->offset - TRACK_PAGE_MAX, -2);
+				} else if (prev_page &&
+				           page->collection.kind == COLLECTION_PLAYLIST &&
+				           page->total > page->count) {
+					const int last_offset =
+					    ((page->total - 1) / TRACK_PAGE_MAX) * TRACK_PAGE_MAX;
+					tracks_request_page(last_offset, -2);
+				} else if (next_page &&
+				           page->offset + page->count < page->total) {
+					tracks_request_page(page->offset + TRACK_PAGE_MAX, -2);
+				} else if (next_page &&
+				           page->collection.kind == COLLECTION_PLAYLIST &&
+				           page->offset > 0 && page->total > page->count) {
+					tracks_request_page(0, -2);
+				} else {
+					const u32 nav = keys_repeat & (KEY_UP | KEY_DOWN);
+					if (nav && page->count > 0) {
+						const int direction = nav & KEY_UP ? -1 : 1;
+						int idx = g_tracks_armed >= TRACK_ROW0
+						              ? g_tracks_armed - TRACK_ROW0
+						              : (direction < 0 ? page->count - 1 : 0);
+						if (g_tracks_armed >= TRACK_ROW0)
+							idx += direction;
+
+						if (idx < 0 && page->offset > 0) {
+							tracks_request_page(page->offset - TRACK_PAGE_MAX, -1);
+						} else if (idx < 0 &&
+						           page->collection.kind == COLLECTION_PLAYLIST &&
+						           page->total > page->count) {
+							const int last_offset =
+							    ((page->total - 1) / TRACK_PAGE_MAX) * TRACK_PAGE_MAX;
+							tracks_request_page(last_offset, -1);
+						} else if (idx >= page->count &&
+						           page->offset + page->count < page->total) {
+							tracks_request_page(page->offset + TRACK_PAGE_MAX, 0);
+						} else if (idx >= page->count &&
+						           page->collection.kind == COLLECTION_PLAYLIST &&
+						           page->offset > 0 && page->total > page->count) {
+							tracks_request_page(0, 0);
+						} else {
+							if (idx < 0)
+								idx = 0;
+							if (idx >= page->count)
+								idx = page->count - 1;
+							g_tracks_armed = TRACK_ROW0 + idx;
+							g_tracks_arm_until = osGetTime() + LIST_ARM_MS;
+							g_tracks_velocity = 0.0f;
+							int buffer_idx = idx + direction;
+							if (buffer_idx < 0)
+								buffer_idx = 0;
+							if (buffer_idx >= page->count)
+								buffer_idx = page->count - 1;
+							g_tracks_scroll = screen_tracks_reveal_row(
+							    page->count, g_tracks_armed, g_tracks_armed,
+							    g_tracks_scroll);
+							g_tracks_scroll = screen_tracks_reveal_row(
+							    page->count, TRACK_ROW0 + buffer_idx,
+							    g_tracks_armed, g_tracks_scroll);
+						}
+					}
+
+					if (touch.pressed)
+						g_tracks_velocity = 0.0f;
+					if (touch.down && touch.dragging) {
+						g_tracks_armed = -1;
+						const float delta = -(float)touch.dy;
+						g_tracks_scroll += delta;
+						g_tracks_velocity =
+						    g_tracks_velocity * 0.25f + delta * 0.75f;
+						if (g_tracks_velocity > LIST_FLING_MAX)
+							g_tracks_velocity = LIST_FLING_MAX;
+						if (g_tracks_velocity < -LIST_FLING_MAX)
+							g_tracks_velocity = -LIST_FLING_MAX;
+					} else if (!touch.down) {
+						g_tracks_scroll += g_tracks_velocity;
+						g_tracks_velocity *= LIST_FLING_FRICTION;
+						if (g_tracks_velocity > -LIST_FLING_STOP &&
+						    g_tracks_velocity < LIST_FLING_STOP)
+							g_tracks_velocity = 0.0f;
+					}
+
+					const float maxs =
+					    screen_tracks_max_scroll(page->count, g_tracks_armed);
+					if (g_tracks_scroll < 0) {
+						g_tracks_scroll = 0;
+						g_tracks_velocity = 0;
+					}
+					if (g_tracks_scroll > maxs) {
+						g_tracks_scroll = maxs;
+						g_tracks_velocity = 0;
+					}
+
+					const int idx = g_tracks_armed - TRACK_ROW0;
+					const int queue_idx = touch.clicked - TRACK_QUEUE0;
+					if (queue_idx >= 0 && queue_idx < page->count &&
+					    page->items[queue_idx].playable) {
+						tl_log("track: queue item=%s name=%s",
+						       page->items[queue_idx].uri,
+						       page->items[queue_idx].name);
+						worker_queue_item(page->items[queue_idx].uri);
+					} else if ((touch.clicked == TRACK_ARM_PLAY ||
+					     (keys_down & KEY_A)) &&
+					    idx >= 0 && idx < page->count && page->items[idx].playable) {
+						tl_log("track: play context=%s item=%s position=%d name=%s",
+						       g_tracks_collection.context_uri,
+						       page->items[idx].uri,
+						       page->items[idx].source_index, page->items[idx].name);
+						if (worker_play_context_item(g_tracks_collection.context_uri,
+						                             page->items[idx].uri)) {
+							opt_set(&g_opt_play, 1);
+						}
+						g_tracks_armed = -1;
+					} else if (touch.clicked >= TRACK_ROW0 &&
+					           touch.clicked < TRACK_ROW0 + page->count) {
+						if (g_tracks_armed == touch.clicked)
+							g_tracks_armed = -1;
+						else {
+							g_tracks_armed = touch.clicked;
+							g_tracks_arm_until = osGetTime() + LIST_ARM_MS;
+							g_tracks_scroll = screen_tracks_reveal_row(
+							    page->count, g_tracks_armed, g_tracks_armed,
+							    g_tracks_scroll);
+						}
+					}
+				}
+			}
+		}
+
+		if (input_view == VIEW_PLAYER &&
 		    (touch.clicked == BTN_SHELF_ALL || (keys_down & KEY_X))) {
 			g_view        = VIEW_LIST;
 			g_list_scroll = 0.0f;
@@ -590,7 +884,7 @@ int main(int argc, char **argv)
 			g_list_armed = -1;
 		}
 
-		if (g_view == VIEW_PLAYER && touch.clicked >= BTN_SHELF0 &&
+		if (input_view == VIEW_PLAYER && touch.clicked >= BTN_SHELF0 &&
 		    touch.clicked < BTN_SHELF0 + SHELF_TILES) {
 			recent_list *const rl  = &g_recents_buf;
 			const int          n   = worker_get_recents(rl);
@@ -602,7 +896,7 @@ int main(int argc, char **argv)
 			}
 		}
 
-		if (g_view == VIEW_PLAYER && touch.clicked >= 0 &&
+		if (input_view == VIEW_PLAYER && touch.clicked >= 0 &&
 		    touch.clicked != BTN_SCRUB) {
 			switch (touch.clicked) {
 				case BTN_PLAY:
@@ -760,6 +1054,202 @@ int main(int argc, char **argv)
 			}
 		}
 
+		/* Named live fixtures exercise the track browser against both extremes:
+		 * Good music is intentionally enormous, while LUX picks is small enough
+		 * to validate ordinary one-page use. Every transition goes through the
+		 * same bounded worker snapshot as the interactive UI. */
+		if (g_smoketest && frames > 430 && tracks_probe_stage < 99) {
+			static worker_tracks_snapshot tracks;
+			worker_get_tracks(&tracks);
+
+			switch (tracks_probe_stage) {
+				case 0:
+					worker_get_playlists(&g_playlists_buf);
+					worker_get_recents(&g_recents_buf);
+					if (collection_named("good music", &tracks_probe_good) &&
+					    collection_named("lux picks", &tracks_probe_lux)) {
+						g_tracks_collection = tracks_probe_good;
+						g_view = VIEW_TRACKS;
+						tracks_probe_generation =
+						    worker_request_tracks(&tracks_probe_good, 0);
+						tracks_probe_stage = 1;
+					} else if (frames > 900) {
+						tl_step("tracks_fixtures", 0,
+						        "missing good music or lux picks");
+						tracks_probe_stage = 99;
+					}
+					break;
+
+				case 1:
+					if (tracks.generation != tracks_probe_generation ||
+					    tracks.state == TRACKS_LOADING)
+						break;
+					if (tracks.state != TRACKS_READY) {
+						tl_step("tracks_good_first", 0, "%s", tracks.error);
+						tracks_probe_stage = 99;
+						break;
+					}
+					tracks_probe_good = tracks.page.collection;
+					tl_step("tracks_good_first",
+					        tracks.page.total > TRACK_PAGE_MAX &&
+					            tracks.page.count == TRACK_PAGE_MAX &&
+					            track_page_offsets_valid(&tracks.page),
+					        "count=%d total=%d", tracks.page.count,
+					        tracks.page.total);
+					tracks_probe_far_offset =
+					    ((tracks.page.total - 1) / TRACK_PAGE_MAX) * TRACK_PAGE_MAX;
+					tracks_probe_generation = worker_request_tracks(
+					    &tracks_probe_good, tracks_probe_far_offset);
+					tracks_probe_stage = 2;
+					break;
+
+				case 2:
+					if (tracks.generation != tracks_probe_generation ||
+					    tracks.state == TRACKS_LOADING)
+						break;
+					if (tracks.state != TRACKS_READY) {
+						tl_step("tracks_good_far", 0, "%s", tracks.error);
+						tracks_probe_stage = 99;
+						break;
+					}
+					tl_step("tracks_good_far",
+					        tracks.page.offset == tracks_probe_far_offset &&
+					            tracks.page.count > 0 &&
+					            tracks.page.offset + tracks.page.count ==
+					                tracks.page.total &&
+					            track_page_offsets_valid(&tracks.page),
+					        "offset=%d count=%d total=%d", tracks.page.offset,
+					        tracks.page.count, tracks.page.total);
+					for (int i = 0; i < tracks.page.count; i++) {
+						if (!tracks.page.items[i].playable)
+							continue;
+						snprintf(tracks_probe_expected,
+						         sizeof tracks_probe_expected, "%s",
+						         tracks.page.items[i].name);
+						snprintf(tracks_probe_item_uri,
+						         sizeof tracks_probe_item_uri, "%s",
+						         tracks.page.items[i].uri);
+						break;
+					}
+					tracks_probe_generation =
+					    worker_request_tracks(&tracks_probe_good, 0);
+					tracks_probe_stage = 3;
+					break;
+
+				case 3:
+					if (tracks.generation != tracks_probe_generation ||
+					    tracks.state == TRACKS_LOADING)
+						break;
+					if (tracks.state != TRACKS_READY) {
+						tl_step("tracks_refetch", 0, "%s", tracks.error);
+						tracks_probe_stage = 99;
+						break;
+					}
+					tl_step("tracks_refetch",
+					        tracks.page.offset == 0 && tracks.page.count > 0 &&
+					            track_page_offsets_valid(&tracks.page),
+					        "offset=%d count=%d", tracks.page.offset,
+					        tracks.page.count);
+					g_tracks_collection = tracks_probe_lux;
+					tracks_probe_generation =
+					    worker_request_tracks(&tracks_probe_lux, 0);
+					tracks_probe_stage = 4;
+					break;
+
+				case 4:
+					if (tracks.generation != tracks_probe_generation ||
+					    tracks.state == TRACKS_LOADING)
+						break;
+					if (tracks.state != TRACKS_READY) {
+						tl_step("tracks_lux", 0, "%s", tracks.error);
+						tracks_probe_stage = 99;
+						break;
+					}
+					tracks_probe_lux = tracks.page.collection;
+					int art_count = 0;
+					for (int i = 0; i < tracks.page.count; i++)
+						if (tracks.page.items[i].art_url[0])
+							art_count++;
+					tl_step("tracks_lux",
+					        tracks.page.count > 0 &&
+					            tracks.page.total < tracks_probe_good.item_total &&
+					            track_page_offsets_valid(&tracks.page) && art_count > 0,
+					        "count=%d total=%d art=%d", tracks.page.count,
+					        tracks.page.total, art_count);
+					if (!snap.have_state) {
+						tl_step("tracks_play", 1,
+						        "skipped - no active Spotify device");
+						tracks_probe_stage = 6;
+						break;
+					}
+					if (worker_play_context_item(tracks_probe_good.context_uri,
+					                             tracks_probe_item_uri)) {
+						tracks_probe_play_at = osGetTime();
+						tracks_probe_poll_seq = snap.poll_seq;
+					}
+					if (!tracks_probe_play_at) {
+						tl_step("tracks_play", 0, "no playable final-page item");
+						tracks_probe_stage = 6;
+					} else {
+						tracks_probe_stage = 5;
+					}
+					break;
+
+				case 5: {
+					const bool arrived = snap.poll_seq > tracks_probe_poll_seq &&
+					                     snap.have_state &&
+					                     strcmp(snap.state.track,
+					                            tracks_probe_expected) == 0 &&
+					                     strcmp(snap.state.track_uri,
+					                            tracks_probe_item_uri) == 0 &&
+					                     strcmp(snap.state.context_uri,
+					                            tracks_probe_good.context_uri) == 0;
+					const bool expired =
+					    osGetTime() - tracks_probe_play_at > 15000;
+					if (!arrived && !expired)
+						break;
+					tl_step("tracks_play", arrived || !snap.have_state,
+					        arrived ? "wanted=%s got=%s"
+					                : "skipped - active device disappeared",
+					        tracks_probe_expected,
+					        snap.have_state ? snap.state.track : "-");
+					tracks_probe_stage = 6;
+					break;
+				}
+
+				case 6:
+					worker_get_albums(&g_albums_buf);
+					if (g_albums_buf.count <= 0)
+						break;
+					g_tracks_collection = g_albums_buf.items[0];
+					tracks_probe_generation = worker_request_tracks(
+					    &g_tracks_collection, 0);
+					tracks_probe_stage = 7;
+					break;
+
+				case 7:
+					if (tracks.generation != tracks_probe_generation ||
+					    tracks.state == TRACKS_LOADING)
+						break;
+					if (tracks.state != TRACKS_READY) {
+						tl_step("tracks_album", 0, "%s", tracks.error);
+					} else {
+						tl_step("tracks_album",
+						        tracks.page.count > 0 &&
+						            track_page_offsets_valid(&tracks.page) &&
+						            tracks.page.items[0].art_url[0],
+						        "%s count=%d total=%d art=%s",
+						        tracks.page.collection.name, tracks.page.count,
+						        tracks.page.total,
+						        tracks.page.items[0].art_url[0] ? "yes" : "no");
+					}
+					tl_step("tracks_view", 1, "bounded loading and page views rendered");
+					g_view = VIEW_PLAYER;
+					tracks_probe_stage = 99;
+					break;
+			}
+		}
+
 		if (!logged_first && snap.have_state) {
 			logged_first = true;
 			tl_step("first_poll", 1, "%s - %s", snap.state.track,
@@ -856,11 +1346,34 @@ int main(int argc, char **argv)
 				.recents    = rl,
 				.playlists  = pl,
 				.albums     = al,
+				.current_context_uri =
+				    snap.have_state ? snap.state.context_uri : "",
+				.playing     = playing,
+				.animation_ms = (unsigned)osGetTime(),
 				.scroll     = g_list_scroll,
 				.pressed_id = touch.down ? touch.press_id : -1,
 				.armed_id   = g_list_armed,
 			};
 			screen_list_draw(&la);
+		} else if (g_view == VIEW_TRACKS) {
+			worker_get_tracks(&g_tracks_buf);
+			const screen_tracks_args ta = {
+				.buf = textbuf,
+				.tb = &g_tb,
+				.page = &g_tracks_buf.page,
+				.collection_name = g_tracks_collection.name,
+				.current_track_uri =
+				    snap.have_state ? snap.state.track_uri : "",
+				.error = g_tracks_buf.error,
+				.playing = playing,
+				.animation_ms = (unsigned)osGetTime(),
+				.loading = g_tracks_buf.state == TRACKS_LOADING,
+				.ready = g_tracks_buf.state == TRACKS_READY,
+				.scroll = g_tracks_scroll,
+				.pressed_id = touch.down ? touch.press_id : -1,
+				.armed_id = g_tracks_armed,
+			};
+			screen_tracks_draw(&ta);
 		} else {
 			screen_player_args pa = {
 				.buf         = textbuf,
@@ -889,7 +1402,12 @@ int main(int argc, char **argv)
 		/* The headless harness needs the app to exit on its own; a real console
 		 * must not. So auto-exit is opt-in, enabled only by the presence of
 		 * sdmc:/spotify/.smoketest (which dev.sh creates). */
-		if (++frames == 700 && g_smoketest) {
+		frames++;
+		if (g_smoketest &&
+		    ((frames >= 900 && tracks_probe_stage == 99 && !repeat_probe_at) ||
+		     frames == 1800)) {
+			if (frames == 1800 && tracks_probe_stage != 99)
+				tl_step("tracks_timeout", 0, "stage=%d", tracks_probe_stage);
 			tl_step("ui_loop", 1, "%d frames, art=%d", frames,
 			        (int)g_art.valid);
 			tl_done();

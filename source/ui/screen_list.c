@@ -1,6 +1,7 @@
 #include "screen_list.h"
 
 #include <stdio.h>
+#include <string.h>
 
 #include "thumbs.h"
 #include "ui.h"
@@ -10,13 +11,17 @@
 
 #define PAD_X    16.0f
 #define THUMB    30.0f
-#define THUMB_ARMED 34.0f
 #define THUMB_GAP 10.0f
 
 /* Armed-row confirmation action. */
-#define PLAY_X       240.0f
-#define PLAY_W       64.0f
+#define PLAY_X       214.0f
+#define PLAY_W       60.0f
 #define PLAY_H       36.0f
+
+/* Permanent navigation column. The scroll indicator starts exactly where this
+ * ends, so every collection row presents the same harmless drill-down target. */
+#define CHEVRON_X 280.0f
+#define CHEVRON_W 34.0f
 
 /* Scrollable document geometry below the fixed header. */
 #define CAPTION_H  20.0f
@@ -31,6 +36,7 @@
 
 #define CLR_HEADER   C2D_Color32(0x11, 0x11, 0x11, 0xFF)
 #define CLR_ROW_ARM  C2D_Color32(0x1B, 0x1B, 0x1B, 0xFF)
+#define CLR_NOW_BG   C2D_Color32(0x10, 0x16, 0x0F, 0xFF)
 #define CLR_ROW_PRESS C2D_Color32(0x24, 0x24, 0x24, 0xFF)
 #define CLR_GREEN    C2D_Color32(0x1D, 0xB9, 0x54, 0xFF)
 #define CLR_GREEN_PRESS C2D_Color32(0x28, 0xD8, 0x68, 0xFF)
@@ -43,6 +49,9 @@
 #define CLR_DIVIDER  C2D_Color32(0x26, 0x26, 0x26, 0xFF)
 #define CLR_IND_TRK  C2D_Color32(0x26, 0x26, 0x26, 0xFF)
 #define CLR_IND_THMB C2D_Color32(0x7A, 0x7A, 0x7A, 0xFF)
+#define CLR_GUTTER   C2D_Color32(0x16, 0x16, 0x16, 0xFF)
+#define CLR_GUTTER_PRESS C2D_Color32(0x20, 0x20, 0x20, 0xFF)
+#define CLR_CHEVRON  C2D_Color32(0x8A, 0x8A, 0x8A, 0xFF)
 
 /* Visible height below the header. */
 static float viewport_h(void)
@@ -249,6 +258,17 @@ static void add_clipped_hit(touch_builder *tb, float x, float y, float w,
 		tb_add(tb, x, top, w, bottom - top, id);
 }
 
+static int chevron_id_for_row(int id)
+{
+	if (id >= LIST_RECENT0 && id < LIST_RECENT0 + RECENTS_MAX)
+		return LIST_CHEVRON_RECENT0 + id - LIST_RECENT0;
+	if (id >= LIST_PLAYLIST0 && id < LIST_PLAYLIST0 + PLAYLISTS_MAX)
+		return LIST_CHEVRON_PLAYLIST0 + id - LIST_PLAYLIST0;
+	if (id >= LIST_ALBUM0 && id < LIST_ALBUM0 + ALBUMS_MAX)
+		return LIST_CHEVRON_ALBUM0 + id - LIST_ALBUM0;
+	return -1;
+}
+
 static void draw_caption(const screen_list_args *a, float y, const char *label,
                          int count)
 {
@@ -273,19 +293,38 @@ static void draw_row(const screen_list_args *a, const collection_item *item,
                      float y, int id)
 {
 	const bool armed = id == a->armed_id;
+	const bool current = a->current_context_uri &&
+	                     a->current_context_uri[0] &&
+	                     strcmp(item->context_uri,
+	                            a->current_context_uri) == 0;
 	const float h = row_h(id, a->armed_id);
 	if (y >= BOT_H || y + h <= LIST_HEADER_H)
 		return;
 
 	const bool pressed = a->pressed_id == id;
-	if (armed) {
+	const int chevron_id = chevron_id_for_row(id);
+	const bool chevron_pressed = a->pressed_id == chevron_id;
+	if (current) {
+		C2D_DrawRectSolid(0.0f, y, 0.0f, BOT_W, h, CLR_NOW_BG);
+	} else if (armed) {
 		C2D_DrawRectSolid(0.0f, y, 0.0f, BOT_W, h, CLR_ROW_ARM);
-		C2D_DrawRectSolid(0.0f, y, 0.0f, 2.0f, h, CLR_GREEN);
 	} else if (pressed) {
 		C2D_DrawRectSolid(0.0f, y, 0.0f, BOT_W, h, CLR_ROW_PRESS);
 	}
+	if (current || armed)
+		C2D_DrawRectSolid(0.0f, y, 0.0f, 3.0f, h, CLR_GREEN);
 
-	const float thumb = armed ? THUMB_ARMED : THUMB;
+	C2D_DrawRectSolid(CHEVRON_X, y, 0.0f, CHEVRON_W, h,
+	                  chevron_pressed ? CLR_GUTTER_PRESS : CLR_GUTTER);
+	const float ccx = CHEVRON_X + 18.0f;
+	const float ccy = y + h / 2.0f;
+	const u32 chevron_clr = chevron_pressed ? CLR_GREEN_PRESS : CLR_CHEVRON;
+	C2D_DrawLine(ccx - 5.0f, ccy - 7.0f, chevron_clr, ccx + 2.0f, ccy,
+	             chevron_clr, 3.0f, 0.0f);
+	C2D_DrawLine(ccx + 2.0f, ccy, chevron_clr, ccx - 5.0f, ccy + 7.0f,
+	             chevron_clr, 3.0f, 0.0f);
+
+	const float thumb = THUMB;
 	const float ty = y + (h - thumb) / 2.0f;
 	const C2D_Image *art = thumbs_get(item->art_url);
 	if (art) {
@@ -295,16 +334,18 @@ static void draw_row(const screen_list_args *a, const collection_item *item,
 	} else {
 		C2D_DrawRectSolid(PAD_X, ty, 0.0f, thumb, thumb, CLR_THUMB_BG);
 	}
+	if (current)
+		ui_now_playing_badge(PAD_X, ty, thumb, a->playing, a->animation_ms);
 
 	const float tx = PAD_X + thumb + THUMB_GAP;
-	const float tw = armed ? PLAY_X - tx - 7.0f : BOT_W - tx - PAD_X;
+	const float tw = armed ? PLAY_X - tx - 7.0f : CHEVRON_X - tx - 7.0f;
 	const float name_h = ui_px(TY_ROW_NAME);
 	const float sub_h  = ui_px(TY_ROW_SUB);
 	const float gap    = 2.0f;
 	const float top = y + (h - (name_h + gap + sub_h)) / 2.0f;
 
 	ui_text(a->buf, item->name, tx, ui_baseline(top, TY_ROW_NAME), TY_ROW_NAME,
-	        tw, CLR_NAME);
+	        tw, current ? CLR_GREEN : CLR_NAME);
 	ui_text(a->buf, item->subtitle, tx,
 	        ui_baseline(top + name_h + gap, TY_ROW_SUB), TY_ROW_SUB, tw, CLR_SUB);
 
@@ -327,8 +368,10 @@ static void draw_row(const screen_list_args *a, const collection_item *item,
 		add_clipped_hit(a->tb, PLAY_X, ay, PLAY_W, PLAY_H, LIST_ARM_PLAY);
 	}
 
-	/* A partially hidden row cannot be activated through the fixed header. */
-	add_clipped_hit(a->tb, 0.0f, y, BOT_W, h, id);
+	/* Register the drill-down before the row body, and keep the zones disjoint:
+	 * a near-edge tap can only navigate, never arm or play music. */
+	add_clipped_hit(a->tb, CHEVRON_X, y, CHEVRON_W, h, chevron_id);
+	add_clipped_hit(a->tb, 0.0f, y, CHEVRON_X, h, id);
 }
 
 void screen_list_draw(const screen_list_args *a)

@@ -4,6 +4,7 @@
 
 #include "spotify/player.h"
 #include "spotify/recents.h"
+#include "spotify/tracks.h"
 
 /* Background network thread.
  *
@@ -23,6 +24,7 @@ typedef enum {
 	CMD_SHUFFLE,
 	CMD_REPEAT,
 	CMD_PLAY_CONTEXT,
+	CMD_QUEUE_ITEM,
 } worker_cmd;
 
 typedef struct {
@@ -33,6 +35,7 @@ typedef struct {
 	char          status_hint[128]; /* what the user should do about it */
 	bool          fatal;            /* setup problem, not a transient state */
 	bool          busy;             /* a command or poll is in flight */
+	unsigned      poll_seq;         /* increments after each completed poll */
 } worker_snapshot;
 
 bool worker_start(char *err, int errlen);
@@ -82,6 +85,39 @@ void worker_request_albums(void);
 /* Start playback from a recents entry. The uri is copied, so the caller's
  * buffer need not outlive the call. */
 void worker_play_context(const char *context_uri);
+
+/* Start a collection at a raw playback position. The URI and position are
+ * stored in the command-ring entry, so later actions cannot overwrite them. */
+bool worker_play_context_at(const char *context_uri, int position);
+
+/* Start the context at the selected Spotify track URI. */
+bool worker_play_context_item(const char *context_uri, const char *item_uri);
+
+/* Add one Spotify track to the active device's playback queue. */
+bool worker_queue_item(const char *item_uri);
+
+/* --- collection tracks ------------------------------------------------ */
+
+typedef enum {
+	TRACKS_IDLE = 0,
+	TRACKS_LOADING,
+	TRACKS_READY,
+	TRACKS_ERROR,
+} tracks_state;
+
+typedef struct {
+	track_page    page;
+	tracks_state  state;
+	player_result result;
+	unsigned      generation;
+	char          error[160];
+} worker_tracks_snapshot;
+
+/* Newest request wins. Results from an older in-flight request are discarded
+ * by generation rather than replacing the collection the user now sees. */
+unsigned worker_request_tracks(const collection_item *collection, int offset);
+void     worker_cancel_tracks(void);
+void     worker_get_tracks(worker_tracks_snapshot *out);
 
 /* --- album art -------------------------------------------------------
  * Fetching and decoding art costs ~1.5s, almost all of it network. Doing that

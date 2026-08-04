@@ -271,104 +271,90 @@ player_result playlists_fetch(playlist_list *out, char *err, int errlen)
 	if (!token)
 		return PLAYER_AUTH_FAILED;
 
-	/* This endpoint honours `fields=`, unlike recently-played: dropping the
-	 * parts we never read takes the response from 52KB to 21KB, which is worth
-	 * having on a device parsing it by hand. */
-	/* No track counts requested: /me/playlists returns `tracks: null` for every
-	 * item regardless of what fields ask for, so the design's "84 tracks"
-	 * subtitle would cost one request per playlist. The owner is already here
-	 * and distinguishes your playlists from followed ones, which is the useful
-	 * part. */
-	char path[224];
-	snprintf(path, sizeof path,
-	         "/v1/me/playlists?limit=%d&fields=total,items(name,uri,images,"
-	         "owner(display_name))",
-	         PLAYLISTS_MAX);
+	for (int offset = 0; offset < PLAYLISTS_MAX; offset += FETCH_LIMIT) {
+		char path[256];
+		snprintf(path, sizeof path,
+		         "/v1/me/playlists?limit=%d&offset=%d&fields=total,items(name,uri,"
+		         "images,owner(display_name),items(total))",
+		         FETCH_LIMIT, offset);
 
-	http_response r;
-	if (!http_request(API_HOST, "GET", path, token, NULL, NULL, &r, err, errlen))
-		return PLAYER_ERROR;
-
-	if (r.status == 403) {
-		snprintf(err, errlen,
-		         "403 - token lacks playlist-read-private; re-run "
-		         "bootstrap_auth.py");
-		http_free(&r);
-		return PLAYER_FORBIDDEN;
-	}
-	if (r.status != 200 || !r.body || r.body_len == 0) {
-		snprintf(err, errlen, "playlists http %d", r.status);
-		http_free(&r);
-		return PLAYER_ERROR;
-	}
-
-	const u64 t0     = osGetTime();
-	int       needed = 0;
-	json_doc *d      = json_doc_parse(r.body, r.body_len, &needed);
-	if (!d) {
-		snprintf(err, errlen, "playlists parse failed (tokens %d, %u bytes)",
-		         needed, (unsigned)r.body_len);
-		http_free(&r);
-		return PLAYER_ERROR;
-	}
-
-	tl_timing("playlists parse: %u bytes %d tokens in %llums",
-	          (unsigned)r.body_len, json_doc_tokens(d),
-	          (unsigned long long)(osGetTime() - t0));
-
-	long total = 0;
-	if (json_doc_int(d, "total", &total))
-		out->total = (int)total;
-
-	for (int i = 0; i < PLAYLISTS_MAX && out->count < PLAYLISTS_MAX; i++) {
-		char p[96];
-		char name[128] = "", uri[128] = "", owner[128] = "", art[256] = "";
-
-		snprintf(p, sizeof p, "items[%d].name", i);
-		if (!json_doc_str(d, p, name, sizeof name))
-			break; /* ran out of items */
-
-		snprintf(p, sizeof p, "items[%d].uri", i);
-		if (!json_doc_str(d, p, uri, sizeof uri) || !uri[0])
-			continue;
-
-		snprintf(p, sizeof p, "items[%d].owner.display_name", i);
-		json_doc_str(d, p, owner, sizeof owner);
-
-		/* Playlist images are irregular in a way album covers are not: some
-		 * have three sizes, some a single mosaic with no dimensions reported,
-		 * and some none at all. Try the smallest-last convention first, then
-		 * the only entry, then give up and leave art_url empty for the caller
-		 * to draw a placeholder. */
-		snprintf(p, sizeof p, "items[%d].images[2].url", i);
-		if (!json_doc_str(d, p, art, sizeof art)) {
-			snprintf(p, sizeof p, "items[%d].images[0].url", i);
-			json_doc_str(d, p, art, sizeof art);
+		http_response r;
+		if (!http_request(API_HOST, "GET", path, token, NULL, NULL, &r, err,
+		                  errlen))
+			return out->count ? PLAYER_OK : PLAYER_ERROR;
+		if (r.status == 403) {
+			snprintf(err, errlen,
+			         "403 - token lacks playlist-read-private; re-run "
+			         "bootstrap_auth.py");
+			http_free(&r);
+			return out->count ? PLAYER_OK : PLAYER_FORBIDDEN;
+		}
+		if (r.status != 200 || !r.body || !r.body_len) {
+			snprintf(err, errlen, "playlists http %d", r.status);
+			http_free(&r);
+			return out->count ? PLAYER_OK : PLAYER_ERROR;
 		}
 
-		collection_item *it = &out->items[out->count++];
+		const u64 t0 = osGetTime();
+		int needed = 0;
+		json_doc *d = json_doc_parse(r.body, r.body_len, &needed);
+		if (!d) {
+			snprintf(err, errlen, "playlists parse failed (tokens %d, %u bytes)",
+			         needed, (unsigned)r.body_len);
+			http_free(&r);
+			return out->count ? PLAYER_OK : PLAYER_ERROR;
+		}
 
-		snprintf(it->name, sizeof it->name, "%s", name);
+		long total = 0;
+		if (json_doc_int(d, "total", &total))
+			out->total = (int)total;
+		int page_count = json_doc_array_size(d, "items");
+		if (page_count < 0)
+			page_count = 0;
 
-		if (owner[0])
-			snprintf(it->subtitle, sizeof it->subtitle, "Playlist" SUB_SEP "%s",
-			         owner);
-		else
-			snprintf(it->subtitle, sizeof it->subtitle, "Playlist");
+		for (int i = 0; i < page_count && out->count < PLAYLISTS_MAX; i++) {
+			char p[96];
+			char name[128] = "", uri[128] = "", owner[128] = "", art[256] = "";
+			snprintf(p, sizeof p, "items[%d].name", i);
+			if (!json_doc_str(d, p, name, sizeof name))
+				continue;
+			snprintf(p, sizeof p, "items[%d].uri", i);
+			if (!json_doc_str(d, p, uri, sizeof uri) || !uri[0])
+				continue;
+			snprintf(p, sizeof p, "items[%d].owner.display_name", i);
+			if (!json_doc_is_null(d, p))
+				json_doc_str(d, p, owner, sizeof owner);
+			long item_total = 0;
+			snprintf(p, sizeof p, "items[%d].items.total", i);
+			json_doc_int(d, p, &item_total);
+			snprintf(p, sizeof p, "items[%d].images[2].url", i);
+			if (!json_doc_str(d, p, art, sizeof art)) {
+				snprintf(p, sizeof p, "items[%d].images[0].url", i);
+				json_doc_str(d, p, art, sizeof art);
+			}
 
-		snprintf(it->art_url, sizeof it->art_url, "%s", art);
-		snprintf(it->context_uri, sizeof it->context_uri, "%s", uri);
-		it->kind = COLLECTION_PLAYLIST;
+			collection_item *it = &out->items[out->count++];
+			snprintf(it->name, sizeof it->name, "%s", name);
+			snprintf(it->subtitle, sizeof it->subtitle,
+			         owner[0] ? "Playlist" SUB_SEP "%s" : "Playlist", owner);
+			snprintf(it->art_url, sizeof it->art_url, "%s", art);
+			snprintf(it->context_uri, sizeof it->context_uri, "%s", uri);
+			it->item_total = (int)item_total;
+			it->kind = COLLECTION_PLAYLIST;
+			namecache_put(uri, name, owner, art);
+		}
 
-		/* Seed the name cache: these are the same uris recently-played refers
-		 * to, so filling it here saves a request per playlist later - and the
-		 * art especially, since recents cannot otherwise see a playlist's own
-		 * cover without going and asking for it. */
-		namecache_put(uri, name, owner, art);
+		tl_timing("playlists page offset=%d bytes=%u tokens=%d in %llums", offset,
+		          (unsigned)r.body_len, json_doc_tokens(d),
+		          (unsigned long long)(osGetTime() - t0));
+		json_doc_free(d);
+		http_free(&r);
+		/* Spotify may omit an inaccessible/null playlist from the array while
+		 * still counting its slot in total. Advance by the requested offset, not
+		 * by parsed rows, or that omission hides every later page. */
+		if (offset + FETCH_LIMIT >= out->total)
+			break;
 	}
-
-	json_doc_free(d);
-	http_free(&r);
 
 	tl_log("playlists: %d of %d total", out->count, out->total);
 	return out->count > 0 ? PLAYER_OK : PLAYER_NOTHING_PLAYING;
@@ -382,82 +368,81 @@ player_result albums_fetch(album_list *out, char *err, int errlen)
 	if (!token)
 		return PLAYER_AUTH_FAILED;
 
-	/* Measured on the test account: 50 of 55 albums, 23KB after selecting only
-	 * the row metadata rather than downloading the full album objects. */
-	char path[224];
-	snprintf(path, sizeof path,
-	         "/v1/me/albums?limit=%d&fields=total,items(album(name,uri,artists(name),images))",
-	         ALBUMS_MAX);
-
-	http_response r;
-	if (!http_request(API_HOST, "GET", path, token, NULL, NULL, &r, err, errlen))
-		return PLAYER_ERROR;
-
-	if (r.status == 403) {
-		snprintf(err, errlen,
-		         "403 - token lacks user-library-read; re-run bootstrap_auth.py");
-		http_free(&r);
-		return PLAYER_FORBIDDEN;
-	}
-	if (r.status != 200 || !r.body || r.body_len == 0) {
-		snprintf(err, errlen, "albums http %d", r.status);
-		http_free(&r);
-		return PLAYER_ERROR;
-	}
-
-	const u64 t0     = osGetTime();
-	int       needed = 0;
-	json_doc *d      = json_doc_parse(r.body, r.body_len, &needed);
-	if (!d) {
-		snprintf(err, errlen, "albums parse failed (tokens %d, %u bytes)", needed,
-		         (unsigned)r.body_len);
-		http_free(&r);
-		return PLAYER_ERROR;
-	}
-
-	tl_timing("albums parse: %u bytes %d tokens in %llums",
-	          (unsigned)r.body_len, json_doc_tokens(d),
-	          (unsigned long long)(osGetTime() - t0));
-
-	long total = 0;
-	if (json_doc_int(d, "total", &total))
-		out->total = (int)total;
-
-	for (int i = 0; i < ALBUMS_MAX && out->count < ALBUMS_MAX; i++) {
-		char p[96];
-		char name[128] = "", uri[128] = "", artist[128] = "", art[256] = "";
-
-		snprintf(p, sizeof p, "items[%d].album.name", i);
-		if (!json_doc_str(d, p, name, sizeof name))
-			break;
-
-		snprintf(p, sizeof p, "items[%d].album.uri", i);
-		if (!json_doc_str(d, p, uri, sizeof uri) || !uri[0])
-			continue;
-
-		snprintf(p, sizeof p, "items[%d].album.artists[0].name", i);
-		json_doc_str(d, p, artist, sizeof artist);
-
-		snprintf(p, sizeof p, "items[%d].album.images[2].url", i);
-		if (!json_doc_str(d, p, art, sizeof art)) {
-			snprintf(p, sizeof p, "items[%d].album.images[0].url", i);
-			json_doc_str(d, p, art, sizeof art);
+	for (int offset = 0; offset < ALBUMS_MAX; offset += FETCH_LIMIT) {
+		char path[256];
+		snprintf(path, sizeof path,
+		         "/v1/me/albums?limit=%d&offset=%d&fields=total,items(album(name,"
+		         "uri,total_tracks,artists(name),images))",
+		         FETCH_LIMIT, offset);
+		http_response r;
+		if (!http_request(API_HOST, "GET", path, token, NULL, NULL, &r, err,
+		                  errlen))
+			return out->count ? PLAYER_OK : PLAYER_ERROR;
+		if (r.status == 403) {
+			snprintf(err, errlen,
+			         "403 - token lacks user-library-read; re-run bootstrap_auth.py");
+			http_free(&r);
+			return out->count ? PLAYER_OK : PLAYER_FORBIDDEN;
+		}
+		if (r.status != 200 || !r.body || !r.body_len) {
+			snprintf(err, errlen, "albums http %d", r.status);
+			http_free(&r);
+			return out->count ? PLAYER_OK : PLAYER_ERROR;
 		}
 
-		collection_item *it = &out->items[out->count++];
-		snprintf(it->name, sizeof it->name, "%s", name);
-		if (artist[0])
-			snprintf(it->subtitle, sizeof it->subtitle, "Album" SUB_SEP "%s",
-			         artist);
-		else
-			snprintf(it->subtitle, sizeof it->subtitle, "Album");
-		snprintf(it->art_url, sizeof it->art_url, "%s", art);
-		snprintf(it->context_uri, sizeof it->context_uri, "%s", uri);
-		it->kind = COLLECTION_ALBUM;
-	}
+		const u64 t0 = osGetTime();
+		int needed = 0;
+		json_doc *d = json_doc_parse(r.body, r.body_len, &needed);
+		if (!d) {
+			snprintf(err, errlen, "albums parse failed (tokens %d, %u bytes)",
+			         needed, (unsigned)r.body_len);
+			http_free(&r);
+			return out->count ? PLAYER_OK : PLAYER_ERROR;
+		}
+		long total = 0;
+		if (json_doc_int(d, "total", &total))
+			out->total = (int)total;
+		int page_count = json_doc_array_size(d, "items");
+		if (page_count < 0)
+			page_count = 0;
 
-	json_doc_free(d);
-	http_free(&r);
+		for (int i = 0; i < page_count && out->count < ALBUMS_MAX; i++) {
+			char p[96];
+			char name[128] = "", uri[128] = "", artist[128] = "", art[256] = "";
+			snprintf(p, sizeof p, "items[%d].album.name", i);
+			if (!json_doc_str(d, p, name, sizeof name))
+				continue;
+			snprintf(p, sizeof p, "items[%d].album.uri", i);
+			if (!json_doc_str(d, p, uri, sizeof uri) || !uri[0])
+				continue;
+			snprintf(p, sizeof p, "items[%d].album.artists[0].name", i);
+			json_doc_str(d, p, artist, sizeof artist);
+			long item_total = 0;
+			snprintf(p, sizeof p, "items[%d].album.total_tracks", i);
+			json_doc_int(d, p, &item_total);
+			snprintf(p, sizeof p, "items[%d].album.images[2].url", i);
+			if (!json_doc_str(d, p, art, sizeof art)) {
+				snprintf(p, sizeof p, "items[%d].album.images[0].url", i);
+				json_doc_str(d, p, art, sizeof art);
+			}
+			collection_item *it = &out->items[out->count++];
+			snprintf(it->name, sizeof it->name, "%s", name);
+			snprintf(it->subtitle, sizeof it->subtitle,
+			         artist[0] ? "Album" SUB_SEP "%s" : "Album", artist);
+			snprintf(it->art_url, sizeof it->art_url, "%s", art);
+			snprintf(it->context_uri, sizeof it->context_uri, "%s", uri);
+			it->item_total = (int)item_total;
+			it->kind = COLLECTION_ALBUM;
+		}
+
+		tl_timing("albums page offset=%d bytes=%u tokens=%d in %llums", offset,
+		          (unsigned)r.body_len, json_doc_tokens(d),
+		          (unsigned long long)(osGetTime() - t0));
+		json_doc_free(d);
+		http_free(&r);
+		if (offset + FETCH_LIMIT >= out->total)
+			break;
+	}
 
 	tl_log("albums: %d of %d total", out->count, out->total);
 	return out->count > 0 ? PLAYER_OK : PLAYER_NOTHING_PLAYING;

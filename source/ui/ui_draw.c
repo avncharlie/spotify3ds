@@ -181,6 +181,32 @@ void ui_disc(float cx, float cy, float r, u32 clr)
 	}
 }
 
+void ui_now_playing_badge(float x, float y, float size, bool playing,
+                          unsigned animation_ms)
+{
+	static const unsigned char active_heights[8][4] = {
+		{7, 16, 10, 14}, {10, 18, 7, 12}, {14, 12, 9, 17}, {17, 8, 13, 11},
+		{12, 10, 18, 8}, {8, 14, 15, 10}, {11, 17, 8, 14}, {9, 13, 11, 18},
+	};
+	static const unsigned char paused_heights[4] = {8, 16, 10, 14};
+	const unsigned char *heights =
+	    playing ? active_heights[(animation_ms / 180) % 8] : paused_heights;
+	const float scale = size / 30.0f;
+	const float bar_w = 3.0f * scale;
+	const float gap = 2.0f * scale;
+	const float bars_w = 4.0f * bar_w + 3.0f * gap;
+	const float bx = x + (size - bars_w) / 2.0f;
+	const float base = y + size - 5.0f * scale;
+
+	C2D_DrawRectSolid(x, y, 0.0f, size, size,
+	                  C2D_Color32(0x00, 0x00, 0x00, 0x8C));
+	for (int i = 0; i < 4; i++) {
+		const float h = (float)heights[i] * scale;
+		C2D_DrawRectSolid(bx + (bar_w + gap) * i, base - h, 0.0f, bar_w, h,
+		                  C2D_Color32(0x1D, 0xB9, 0x54, 0xFF));
+	}
+}
+
 void ui_font_probe(void)
 {
 	FINF_s *fi = fontGetInfo(NULL);

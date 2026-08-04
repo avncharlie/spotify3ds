@@ -9,6 +9,7 @@
 #include "spotify/artcache.h"
 #include "spotify/auth.h"
 #include "spotify/recents.h"
+#include "spotify/tracks.h"
 #include "testlog.h"
 
 #define WORKER_STACK (96 * 1024) /* TLS handshakes need room */
@@ -50,19 +51,23 @@ static char          s_status[128];
 static char          s_status_hint[128];
 static bool          s_fatal;
 static bool          s_busy;
+static unsigned      s_poll_seq;
 
 /* Command ring, guarded by s_lock. */
-static struct {
+typedef struct {
 	worker_cmd cmd;
 	long       arg;
-} s_queue[CMD_QUEUE];
+	char       context_uri[128];
+	char       item_uri[128];
+	int        position;
+} queued_cmd;
+
+static queued_cmd s_queue[CMD_QUEUE];
 static int  s_qhead, s_qtail;
 static bool s_poll_requested;
 
 /* Album art in flight. s_art_want is what the UI asked for; s_art_ready holds a
  * finished download waiting to be claimed. Guarded by s_lock. */
-static char        s_play_uri[128]; /* pending CMD_PLAY_CONTEXT target */
-
 static recent_list s_recents;
 static bool        s_recents_wanted = true; /* fetch once at startup */
 static u64         s_recents_at;            /* last successful fetch */
@@ -93,6 +98,17 @@ static int         s_thumb_n;
 static art_payload s_thumb_ready;
 static bool        s_thumb_have;
 
+typedef struct {
+	collection_item collection;
+	int             offset;
+	unsigned        generation;
+} track_request;
+
+static track_request          s_tracks_want;
+static bool                   s_tracks_pending;
+static unsigned               s_tracks_generation;
+static worker_tracks_snapshot s_tracks;
+
 static void set_status(const char *s)
 {
 	LightLock_Lock(&s_lock);
@@ -115,6 +131,7 @@ static void do_art(void);
 static void do_recents(void);
 static void do_playlists(void);
 static void do_albums(void);
+static void do_tracks(void);
 static void do_thumbs(void);
 
 /* Short label for logs. Uses the *tail* of the content hash, not the head:
@@ -129,13 +146,12 @@ static const char *want_key8(const char *url)
 	return n > 8 ? seg + n - 8 : seg;
 }
 
-static bool pop_cmd(worker_cmd *cmd, long *arg)
+static bool pop_cmd(queued_cmd *out)
 {
 	LightLock_Lock(&s_lock);
 	bool got = s_qhead != s_qtail;
 	if (got) {
-		*cmd    = s_queue[s_qhead].cmd;
-		*arg    = s_queue[s_qhead].arg;
+		*out = s_queue[s_qhead];
 		s_qhead = (s_qhead + 1) % CMD_QUEUE;
 	}
 	LightLock_Unlock(&s_lock);
@@ -152,6 +168,7 @@ static void do_poll(void)
 	tl_timing("poll http took %lldms", (long long)(osGetTime() - t0));
 
 	LightLock_Lock(&s_lock);
+	s_poll_seq++;
 	s_last_result = pr;
 	if (pr == PLAYER_OK) {
 		s_state      = st;
@@ -168,43 +185,49 @@ static void do_poll(void)
 	 * could be a genuine 204 or a masked error, and on hardware this is the
 	 * only way to tell them apart. */
 	if (pr == PLAYER_OK)
-		tl_log("poll ok: %s - %s (playing=%d)", st.track, st.artist,
-		       (int)st.is_playing);
+		tl_log("poll ok: %s - %s (playing=%d item=%s context=%s)", st.track,
+		       st.artist, (int)st.is_playing, st.track_uri,
+		       st.context_uri[0] ? st.context_uri : "-");
 	else
 		tl_log("poll: %s (%s)", player_result_str(pr), err);
 }
 
-static void do_cmd(worker_cmd cmd, long arg)
+static void do_cmd(const queued_cmd *q)
 {
 	char          err[256];
 	player_result pr = PLAYER_OK;
 
 	const u64 t0 = osGetTime();
 
-	switch (cmd) {
+	switch (q->cmd) {
 		case CMD_PLAY:    pr = player_play(err, sizeof err); break;
 		case CMD_PAUSE:   pr = player_pause(err, sizeof err); break;
 		case CMD_NEXT:    pr = player_next(err, sizeof err); break;
 		case CMD_PREV:    pr = player_prev(err, sizeof err); break;
-		case CMD_SEEK:    pr = player_seek(arg, err, sizeof err); break;
-		case CMD_SHUFFLE: pr = player_shuffle(arg != 0, err, sizeof err); break;
-		case CMD_REPEAT:  pr = player_repeat((repeat_mode)arg, err, sizeof err); break;
-		case CMD_PLAY_CONTEXT: {
-			char uri[128];
-			LightLock_Lock(&s_lock);
-			snprintf(uri, sizeof uri, "%s", s_play_uri);
-			LightLock_Unlock(&s_lock);
-			pr = player_play_context(uri, err, sizeof err);
+		case CMD_QUEUE_ITEM:
+			pr = player_queue_item(q->item_uri, err, sizeof err);
 			break;
-		}
+		case CMD_SEEK:    pr = player_seek(q->arg, err, sizeof err); break;
+		case CMD_SHUFFLE: pr = player_shuffle(q->arg != 0, err, sizeof err); break;
+		case CMD_REPEAT:  pr = player_repeat((repeat_mode)q->arg, err, sizeof err); break;
+		case CMD_PLAY_CONTEXT:
+			if (q->item_uri[0])
+				pr = player_play_context_item(q->context_uri, q->item_uri, err,
+				                              sizeof err);
+			else
+				pr = player_play_context_at(q->context_uri, q->position, err,
+				                            sizeof err);
+			break;
 		default: return;
 	}
 
-	tl_timing("cmd %d http took %lldms", (int)cmd,
+	tl_timing("cmd %d http took %lldms", (int)q->cmd,
 	       (long long)(osGetTime() - t0));
+	if (q->cmd == CMD_QUEUE_ITEM)
+		tl_log("queue: %s item=%s", player_result_str(pr), q->item_uri);
 
 	if (pr != PLAYER_OK) {
-		tl_log("cmd %d: %s (%s)", (int)cmd, player_result_str(pr), err);
+		tl_log("cmd %d: %s (%s)", (int)q->cmd, player_result_str(pr), err);
 		set_status(player_result_str(pr));
 	}
 }
@@ -240,16 +263,15 @@ static void worker_main(void *arg)
 	int settle_left = 0;
 
 	while (!s_quit) {
-		worker_cmd cmd;
-		long       cmd_arg;
+		queued_cmd cmd;
 		bool       did_work = false;
 
-		while (pop_cmd(&cmd, &cmd_arg)) {
+		while (pop_cmd(&cmd)) {
 			LightLock_Lock(&s_lock);
 			s_busy = true;
 			LightLock_Unlock(&s_lock);
 
-			do_cmd(cmd, cmd_arg);
+			do_cmd(&cmd);
 			did_work = true;
 		}
 
@@ -316,6 +338,7 @@ static void worker_main(void *arg)
 		/* Download art after polling, so a fresh URL from the poll above is
 		 * picked up in the same iteration rather than 100ms later. */
 		do_art();
+		do_tracks();
 
 		/* Lists last: the cover the user is looking at matters more than the
 		 * shelf behind it. Playlists before recents so the name cache is warm
@@ -394,16 +417,29 @@ void worker_stop(void)
 	}
 }
 
-void worker_post(worker_cmd cmd, long arg)
+static bool enqueue(const queued_cmd *q)
 {
+	bool queued = false;
 	LightLock_Lock(&s_lock);
 	int next = (s_qtail + 1) % CMD_QUEUE;
 	if (next != s_qhead) { /* drop if full rather than block the UI */
-		s_queue[s_qtail].cmd = cmd;
-		s_queue[s_qtail].arg = arg;
-		s_qtail              = next;
+		s_queue[s_qtail] = *q;
+		s_qtail = next;
+		queued = true;
 	}
 	LightLock_Unlock(&s_lock);
+	return queued;
+}
+
+void worker_post(worker_cmd cmd, long arg)
+{
+	ensure_lock();
+	queued_cmd q;
+	memset(&q, 0, sizeof q);
+	q.cmd = cmd;
+	q.arg = arg;
+	q.position = -1;
+	enqueue(&q);
 }
 
 void worker_request_art(const char *url)
@@ -785,16 +821,146 @@ static void do_albums(void)
 		tl_log("albums: %s (%s)", player_result_str(pr), err);
 }
 
-void worker_play_context(const char *context_uri)
+unsigned worker_request_tracks(const collection_item *collection, int offset)
 {
-	if (!context_uri || !context_uri[0])
-		return;
+	if (!collection || !collection->context_uri[0])
+		return 0;
+	if (offset < 0)
+		offset = 0;
+	offset = (offset / TRACK_PAGE_MAX) * TRACK_PAGE_MAX;
 
 	ensure_lock();
 	LightLock_Lock(&s_lock);
-	snprintf(s_play_uri, sizeof s_play_uri, "%s", context_uri);
+	const unsigned generation = ++s_tracks_generation;
+	s_tracks_want.collection = *collection;
+	s_tracks_want.offset = offset;
+	s_tracks_want.generation = generation;
+	s_tracks_pending = true;
+
+	memset(&s_tracks.page, 0, sizeof s_tracks.page);
+	s_tracks.page.collection = *collection;
+	s_tracks.page.offset = offset;
+	s_tracks.state = TRACKS_LOADING;
+	s_tracks.result = PLAYER_OK;
+	s_tracks.generation = generation;
+	s_tracks.error[0] = '\0';
 	LightLock_Unlock(&s_lock);
-	worker_post(CMD_PLAY_CONTEXT, 0);
+	return generation;
+}
+
+void worker_cancel_tracks(void)
+{
+	ensure_lock();
+	LightLock_Lock(&s_lock);
+	s_tracks_generation++;
+	s_tracks_pending = false;
+	s_tracks.state = TRACKS_IDLE;
+	s_tracks.generation = s_tracks_generation;
+	memset(&s_tracks.page, 0, sizeof s_tracks.page);
+	LightLock_Unlock(&s_lock);
+}
+
+void worker_get_tracks(worker_tracks_snapshot *out)
+{
+	ensure_lock();
+	LightLock_Lock(&s_lock);
+	*out = s_tracks;
+	LightLock_Unlock(&s_lock);
+}
+
+static void do_tracks(void)
+{
+	track_request request;
+	LightLock_Lock(&s_lock);
+	const bool pending = s_tracks_pending;
+	if (pending) {
+		request = s_tracks_want;
+		s_tracks_pending = false;
+		s_busy = true;
+	}
+	LightLock_Unlock(&s_lock);
+	if (!pending)
+		return;
+
+	track_page *page = malloc(sizeof *page);
+	if (!page) {
+		LightLock_Lock(&s_lock);
+		if (request.generation == s_tracks_generation) {
+			s_tracks.state = TRACKS_ERROR;
+			s_tracks.result = PLAYER_ERROR;
+			snprintf(s_tracks.error, sizeof s_tracks.error, "Out of memory");
+		}
+		LightLock_Unlock(&s_lock);
+		return;
+	}
+
+	char err[256] = "";
+	const player_result pr = tracks_fetch_page(
+	    &request.collection, request.offset, page, err, sizeof err);
+
+	LightLock_Lock(&s_lock);
+	if (request.generation == s_tracks_generation) {
+		s_tracks.result = pr;
+		s_tracks.generation = request.generation;
+		if (pr == PLAYER_OK) {
+			s_tracks.page = *page;
+			s_tracks.state = TRACKS_READY;
+			s_tracks.error[0] = '\0';
+		} else {
+			s_tracks.state = TRACKS_ERROR;
+			snprintf(s_tracks.error, sizeof s_tracks.error, "%s",
+			         err[0] ? err : player_result_str(pr));
+		}
+	}
+	LightLock_Unlock(&s_lock);
+
+	if (pr != PLAYER_OK)
+		tl_log("tracks offset=%d: %s (%s)", request.offset,
+		       player_result_str(pr), err);
+	free(page);
+}
+
+void worker_play_context(const char *context_uri)
+{
+	worker_play_context_at(context_uri, -1);
+}
+
+bool worker_play_context_at(const char *context_uri, int position)
+{
+	if (!context_uri || !context_uri[0])
+		return false;
+	ensure_lock();
+	queued_cmd q;
+	memset(&q, 0, sizeof q);
+	q.cmd = CMD_PLAY_CONTEXT;
+	q.position = position;
+	snprintf(q.context_uri, sizeof q.context_uri, "%s", context_uri);
+	return enqueue(&q);
+}
+
+bool worker_play_context_item(const char *context_uri, const char *item_uri)
+{
+	if (!context_uri || !context_uri[0] || !item_uri || !item_uri[0])
+		return false;
+	ensure_lock();
+	queued_cmd q;
+	memset(&q, 0, sizeof q);
+	q.cmd = CMD_PLAY_CONTEXT;
+	snprintf(q.context_uri, sizeof q.context_uri, "%s", context_uri);
+	snprintf(q.item_uri, sizeof q.item_uri, "%s", item_uri);
+	return enqueue(&q);
+}
+
+bool worker_queue_item(const char *item_uri)
+{
+	if (!item_uri || !item_uri[0])
+		return false;
+	ensure_lock();
+	queued_cmd q;
+	memset(&q, 0, sizeof q);
+	q.cmd = CMD_QUEUE_ITEM;
+	snprintf(q.item_uri, sizeof q.item_uri, "%s", item_uri);
+	return enqueue(&q);
 }
 
 void worker_request_recents(void)
@@ -864,6 +1030,7 @@ void worker_get(worker_snapshot *out)
 	out->last_result = s_last_result;
 	out->busy        = s_busy;
 	out->fatal       = s_fatal;
+	out->poll_seq    = s_poll_seq;
 	snprintf(out->status, sizeof out->status, "%s", s_status);
 	snprintf(out->status_hint, sizeof out->status_hint, "%s", s_status_hint);
 	LightLock_Unlock(&s_lock);

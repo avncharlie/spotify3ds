@@ -54,3 +54,10 @@ void json_doc_free(json_doc *d);
 bool json_doc_str(const json_doc *d, const char *path, char *out,
                   size_t outlen);
 bool json_doc_int(const json_doc *d, const char *path, long *out);
+bool json_doc_bool(const json_doc *d, const char *path, bool *out);
+
+/* Number of direct elements in an array, or -1 when the path is absent or is
+ * not an array. This is important for Spotify pages containing null entries:
+ * callers must not mistake a missing field in the middle for end-of-list. */
+int json_doc_array_size(const json_doc *d, const char *path);
+bool json_doc_is_null(const json_doc *d, const char *path);

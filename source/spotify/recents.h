@@ -18,12 +18,11 @@
  * result while staying small enough to copy under lock. */
 #define RECENTS_MAX 16
 
-/* One page of /me/playlists. The API returns at most 50 per page and paging
- * further would cost a round trip per page for rows far below the fold. */
-#define PLAYLISTS_MAX 50
+/* Two pages keep large personal libraries useful (the test account has 66)
+ * without turning the render-thread snapshot into an unbounded allocation. */
+#define PLAYLISTS_MAX 100
 
-/* One page of /me/albums, matching the playlist section's bounded fetch. */
-#define ALBUMS_MAX 50
+#define ALBUMS_MAX 100
 
 /* Number of recent previews on the player screen. */
 #define SHELF_TILES 4
@@ -38,6 +37,7 @@ typedef struct {
 	char            subtitle[128]; /* "Album · Artist" / "Playlist · Owner" */
 	char            art_url[256];  /* empty when the collection has no image */
 	char            context_uri[128]; /* what to play when tapped */
+	int             item_total;       /* tracks/items when supplied by Spotify */
 	collection_kind kind;
 } collection_item;
 

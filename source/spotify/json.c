@@ -268,6 +268,40 @@ bool json_doc_int(const json_doc *d, const char *path, long *out)
 	return true;
 }
 
+bool json_doc_bool(const json_doc *d, const char *path, bool *out)
+{
+	char buf[16];
+	if (!json_doc_str(d, path, buf, sizeof buf))
+		return false;
+	if (strcmp(buf, "true") == 0) {
+		*out = true;
+		return true;
+	}
+	if (strcmp(buf, "false") == 0) {
+		*out = false;
+		return true;
+	}
+	return false;
+}
+
+int json_doc_array_size(const json_doc *d, const char *path)
+{
+	if (!d)
+		return -1;
+	const int i = resolve(d->json, d->toks, d->n, path);
+	return i >= 0 && d->toks[i].type == JSMN_ARRAY ? d->toks[i].size : -1;
+}
+
+bool json_doc_is_null(const json_doc *d, const char *path)
+{
+	if (!d)
+		return false;
+	const int i = resolve(d->json, d->toks, d->n, path);
+	return i >= 0 && d->toks[i].type == JSMN_PRIMITIVE &&
+	       d->toks[i].end - d->toks[i].start == 4 &&
+	       strncmp(d->json + d->toks[i].start, "null", 4) == 0;
+}
+
 bool json_get_int(const char *json, size_t len, const char *path, long *out)
 {
 	char buf[32];

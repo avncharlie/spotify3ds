@@ -4,6 +4,8 @@ A Spotify remote for the Nintendo 3DS / New 2DS XL.
 
 - **Top screen:** album cover, artist, album/track name
 - **Bottom screen (touch):** previous / play-pause / next, plus a seek scrubber
+- **Library:** recently played collections, playlists, saved albums, and their
+  individual tracks
 
 Audio keeps playing on your phone or desktop — this controls Spotify's
 *active device* via the official Web API. It is a remote, not a player.
@@ -42,6 +44,30 @@ the active device; it does not play audio through the console.
 
 `creds.cfg` contains a plaintext bearer credential. Keep it private and revoke
 access at <https://spotify.com/account/apps> if the SD card or file is lost.
+
+## Controls
+
+- Player: `A` play/pause, D-pad left/right previous/next, `X` Library, and `Y`
+  show/hide cover art.
+- Library: tap a row's right chevron to open its tracks directly. D-pad up/down
+  selects a collection, `A` plays the whole collection, `X` opens its tracks,
+  D-pad left/right skips the previous/next song, `L/R` jumps sections, and `B`
+  returns.
+- Tracks: D-pad up/down selects a song, `A` plays it, `L/R` changes 50-track
+  pages, D-pad left/right skips the previous/next song, and `B` returns to the
+  Library. Tap a row's right queue icon to add that song to Spotify's playback
+  queue. Moving past a page boundary with D-pad up/down also loads the adjacent
+  page automatically. Playlist pagination wraps: `L`/Up on the first page opens
+  the last page, and `R`/Down on the last page opens the first page.
+
+Library and Tracks mark Spotify's current context or song with a green title,
+edge, row tint, and an equalizer over its artwork. The bars animate while
+playing and remain fixed while paused.
+
+Only the current 50-track page is kept in RAM, so playlists with thousands of
+songs use the same bounded memory as small playlists. Track ordering is always
+fetched fresh from Spotify. Album-cover thumbnails use the content-addressed SD
+artwork cache.
 
 ## Requirements
 

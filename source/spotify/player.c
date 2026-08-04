@@ -100,6 +100,9 @@ player_result player_poll(player_state *out, char *err, int errlen)
 	json_get_str(j, n, "item.album.name", out->album, sizeof out->album);
 	json_get_str(j, n, "item.album.images[0].url", out->art_url,
 	             sizeof out->art_url);
+	json_get_str(j, n, "item.uri", out->track_uri, sizeof out->track_uri);
+	json_get_str(j, n, "context.uri", out->context_uri,
+	             sizeof out->context_uri);
 	json_get_int(j, n, "progress_ms", &out->progress_ms);
 	json_get_int(j, n, "item.duration_ms", &out->duration_ms);
 	json_get_bool(j, n, "is_playing", &out->is_playing);
@@ -162,6 +165,32 @@ player_result player_prev(char *err, int errlen)
 	return simple_cmd("POST", "/v1/me/player/previous", err, errlen);
 }
 
+player_result player_queue_item(const char *item_uri, char *err, int errlen)
+{
+	static const char prefix[] = "spotify:track:";
+	if (!item_uri || strncmp(item_uri, prefix, sizeof prefix - 1) != 0) {
+		snprintf(err, errlen, "invalid queue item uri");
+		return PLAYER_ERROR;
+	}
+	const char *id = item_uri + sizeof prefix - 1;
+	if (!id[0]) {
+		snprintf(err, errlen, "invalid queue item uri");
+		return PLAYER_ERROR;
+	}
+	for (const char *p = id; *p; p++) {
+		if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+		      (*p >= '0' && *p <= '9'))) {
+			snprintf(err, errlen, "invalid queue item uri");
+			return PLAYER_ERROR;
+		}
+	}
+
+	char path[192];
+	snprintf(path, sizeof path,
+	         "/v1/me/player/queue?uri=spotify%%3Atrack%%3A%s", id);
+	return simple_cmd("POST", path, err, errlen);
+}
+
 player_result player_seek(long position_ms, char *err, int errlen)
 {
 	if (position_ms < 0)
@@ -193,13 +222,48 @@ repeat_mode repeat_next(repeat_mode m)
 player_result player_play_context(const char *context_uri, char *err,
                                   int errlen)
 {
+	return player_play_context_at(context_uri, -1, err, errlen);
+}
+
+player_result player_play_context_at(const char *context_uri, int position,
+                                     char *err, int errlen)
+{
 	if (!context_uri || !context_uri[0]) {
 		snprintf(err, errlen, "no context uri");
 		return PLAYER_ERROR;
 	}
 
-	char body[192];
-	snprintf(body, sizeof body, "{\"context_uri\":\"%s\"}", context_uri);
+	char body[256];
+	if (position >= 0)
+		snprintf(body, sizeof body,
+		         "{\"context_uri\":\"%s\",\"offset\":{\"position\":%d},"
+		         "\"position_ms\":0}",
+		         context_uri, position);
+	else
+		snprintf(body, sizeof body, "{\"context_uri\":\"%s\"}", context_uri);
+
+	http_response r;
+	const player_result pr = api_call("PUT", "/v1/me/player/play",
+	                                  "application/json", body, &r, err, errlen);
+	if (pr == PLAYER_OK || r.body)
+		http_free(&r);
+	return pr;
+}
+
+player_result player_play_context_item(const char *context_uri,
+                                       const char *item_uri, char *err,
+                                       int errlen)
+{
+	if (!context_uri || !context_uri[0] || !item_uri || !item_uri[0]) {
+		snprintf(err, errlen, "no context or item uri");
+		return PLAYER_ERROR;
+	}
+
+	char body[384];
+	snprintf(body, sizeof body,
+	         "{\"context_uri\":\"%s\",\"offset\":{\"uri\":\"%s\"},"
+	         "\"position_ms\":0}",
+	         context_uri, item_uri);
 
 	http_response r;
 	const player_result pr = api_call("PUT", "/v1/me/player/play",

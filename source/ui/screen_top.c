@@ -22,14 +22,16 @@
 #define BIG_X 40.0f
 #define BIG_W 320.0f
 
-/* Gaps between baselines, as the mockup states them. */
-#define GAP_1A_ARTIST 10.0f
-#define GAP_1A_ALBUM  4.0f
-#define GAP_1A_DEVICE 22.0f
+/* Gaps between baselines. Scaled up with the type, which runs ~17% above the
+ * mockup's sizes (see s_role_px): holding the mockup's gaps while enlarging the
+ * text would have tightened the block relative to what it specified. */
+#define GAP_1A_ARTIST 12.0f
+#define GAP_1A_ALBUM  5.0f
+#define GAP_1A_DEVICE 26.0f
 
-#define GAP_2A_ARTIST 16.0f
-#define GAP_2A_ALBUM  6.0f
-#define GAP_2A_DEVICE 26.0f
+#define GAP_2A_ARTIST 18.0f
+#define GAP_2A_ALBUM  7.0f
+#define GAP_2A_DEVICE 29.0f
 
 #define CLR_TITLE  C2D_Color32(0xFF, 0xFF, 0xFF, 0xFF)
 #define CLR_ARTIST C2D_Color32(0xD2, 0xC8, 0xCC, 0xFF)

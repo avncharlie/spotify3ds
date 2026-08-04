@@ -53,10 +53,14 @@
 #define CLR_GUTTER_PRESS C2D_Color32(0x20, 0x20, 0x20, 0xFF)
 #define CLR_CHEVRON  C2D_Color32(0x8A, 0x8A, 0x8A, 0xFF)
 
-/* Visible height below the header. */
-static float viewport_h(void)
+static float document_top(bool filtering)
 {
-	return BOT_H - LIST_HEADER_H;
+	return LIST_HEADER_H + (filtering ? LIST_FILTER_H : 0.0f);
+}
+
+static float viewport_h(bool filtering)
+{
+	return BOT_H - document_top(filtering);
 }
 
 static bool armed_valid(int id, int recent_count, int playlist_count,
@@ -77,12 +81,18 @@ static float row_h(int id, int armed_id)
 static float content_h(int recent_count, int playlist_count, int album_count,
                        int armed_id)
 {
-	const int rn = recent_count;
-	float h = CAPTION_H + (float)playlist_count * LIST_ROW_H + DIVIDER_H +
-	          SECTION_GAP + CAPTION_H + (float)album_count * LIST_ROW_H;
-
-	if (rn > 0)
-		h += CAPTION_H + (float)rn * LIST_ROW_H + DIVIDER_H + SECTION_GAP;
+	float h = 0.0f;
+	int sections = 0;
+#define ADD_SECTION(count) do { \
+	if ((count) > 0) { \
+		if (sections++) h += DIVIDER_H + SECTION_GAP; \
+		h += CAPTION_H + (float)(count) * LIST_ROW_H; \
+	} \
+} while (0)
+	ADD_SECTION(recent_count);
+	ADD_SECTION(playlist_count);
+	ADD_SECTION(album_count);
+#undef ADD_SECTION
 	if (armed_valid(armed_id, recent_count, playlist_count, album_count))
 		h += LIST_ARMED_ROW_H - LIST_ROW_H;
 
@@ -90,20 +100,24 @@ static float content_h(int recent_count, int playlist_count, int album_count,
 }
 
 float screen_list_max_scroll(int recent_count, int playlist_count,
-                             int album_count, int armed_id)
+                             int album_count, int armed_id,
+                             bool filtering)
 {
 	const float content =
 	    content_h(recent_count, playlist_count, album_count, armed_id);
-	const float max     = content - viewport_h();
+	const float max     = content - viewport_h(filtering);
 	return max > 0.0f ? max : 0.0f;
 }
 
 static bool row_bounds(int recent_count, int playlist_count, int album_count,
-                       int target_id, int armed_id, float *top, float *bottom)
+                       int target_id, int armed_id, float *top, float *bottom,
+                       bool filtering)
 {
-	float y = LIST_HEADER_H;
+	float y = document_top(filtering);
+	bool have_section = false;
 
 	if (recent_count > 0) {
+		have_section = true;
 		y += CAPTION_H;
 		for (int i = 0; i < recent_count; i++) {
 			const int id = LIST_RECENT0 + i;
@@ -115,31 +129,39 @@ static bool row_bounds(int recent_count, int playlist_count, int album_count,
 			}
 			y += h;
 		}
-		y += DIVIDER_H + SECTION_GAP;
 	}
 
-	y += CAPTION_H;
-	for (int i = 0; i < playlist_count; i++) {
-		const int id = LIST_PLAYLIST0 + i;
-		const float h = row_h(id, armed_id);
-		if (id == target_id) {
-			*top = y;
-			*bottom = y + h;
-			return true;
+	if (playlist_count > 0) {
+		if (have_section)
+			y += DIVIDER_H + SECTION_GAP;
+		have_section = true;
+		y += CAPTION_H;
+		for (int i = 0; i < playlist_count; i++) {
+			const int id = LIST_PLAYLIST0 + i;
+			const float h = row_h(id, armed_id);
+			if (id == target_id) {
+				*top = y;
+				*bottom = y + h;
+				return true;
+			}
+			y += h;
 		}
-		y += h;
 	}
 
-	y += DIVIDER_H + SECTION_GAP + CAPTION_H;
-	for (int i = 0; i < album_count; i++) {
-		const int id = LIST_ALBUM0 + i;
-		const float h = row_h(id, armed_id);
-		if (id == target_id) {
-			*top = y;
-			*bottom = y + h;
-			return true;
+	if (album_count > 0) {
+		if (have_section)
+			y += DIVIDER_H + SECTION_GAP;
+		y += CAPTION_H;
+		for (int i = 0; i < album_count; i++) {
+			const int id = LIST_ALBUM0 + i;
+			const float h = row_h(id, armed_id);
+			if (id == target_id) {
+				*top = y;
+				*bottom = y + h;
+				return true;
+			}
+			y += h;
 		}
-		y += h;
 	}
 
 	return false;
@@ -147,21 +169,22 @@ static bool row_bounds(int recent_count, int playlist_count, int album_count,
 
 float screen_list_reveal_row(int recent_count, int playlist_count,
                              int album_count, int target_id, int armed_id,
-                             float scroll)
+                             float scroll, bool filtering)
 {
 	float top, bottom;
 	if (!row_bounds(recent_count, playlist_count, album_count, target_id,
-	                armed_id, &top, &bottom))
+	                armed_id, &top, &bottom, filtering))
 		return scroll;
 
-	if (top < scroll + LIST_HEADER_H)
-		scroll = top - LIST_HEADER_H;
+	const float doc_top = document_top(filtering);
+	if (top < scroll + doc_top)
+		scroll = top - doc_top;
 	else if (bottom > scroll + BOT_H)
 		scroll = bottom - BOT_H;
 
 	const float max =
 	    screen_list_max_scroll(recent_count, playlist_count, album_count,
-	                           armed_id);
+	                           armed_id, filtering);
 	if (scroll < 0.0f)
 		scroll = 0.0f;
 	if (scroll > max)
@@ -170,22 +193,31 @@ float screen_list_reveal_row(int recent_count, int playlist_count,
 }
 
 float screen_list_jump_section(int recent_count, int playlist_count,
-                               int album_count, float scroll, int direction)
+                               int album_count, float scroll, int direction,
+                               bool filtering)
 {
 	float targets[3];
 	int n = 0;
-	float y = LIST_HEADER_H;
+	const float doc_top = document_top(filtering);
+	float y = doc_top;
 
 	if (recent_count > 0) {
-		targets[n++] = 0.0f;
-		y += CAPTION_H + (float)recent_count * LIST_ROW_H + DIVIDER_H +
-		     SECTION_GAP;
+		targets[n++] = y - doc_top;
+		y += CAPTION_H + (float)recent_count * LIST_ROW_H;
 	}
-
-	targets[n++] = y - LIST_HEADER_H;
-	y += CAPTION_H + (float)playlist_count * LIST_ROW_H + DIVIDER_H +
-	     SECTION_GAP;
-	targets[n++] = y - LIST_HEADER_H;
+	if (playlist_count > 0) {
+		if (n)
+			y += DIVIDER_H + SECTION_GAP;
+		targets[n++] = y - doc_top;
+		y += CAPTION_H + (float)playlist_count * LIST_ROW_H;
+	}
+	if (album_count > 0) {
+		if (n)
+			y += DIVIDER_H + SECTION_GAP;
+		targets[n++] = y - doc_top;
+	}
+	if (!n)
+		return 0.0f;
 
 	float target = direction > 0 ? targets[n - 1] : targets[0];
 	if (direction > 0) {
@@ -205,31 +237,44 @@ float screen_list_jump_section(int recent_count, int playlist_count,
 	}
 
 	const float max =
-	    screen_list_max_scroll(recent_count, playlist_count, album_count, -1);
+	    screen_list_max_scroll(recent_count, playlist_count, album_count, -1,
+	                           filtering);
 	return target > max ? max : target;
 }
 
 int screen_list_section_first_id(int recent_count, int playlist_count,
-                                 int album_count, float scroll)
+                                 int album_count, float scroll,
+                                 bool filtering)
 {
-	float y = LIST_HEADER_H;
+	const float doc_top = document_top(filtering);
+	float y = doc_top;
+	int sections = 0;
 	if (recent_count > 0) {
 		if (scroll > -0.5f && scroll < 0.5f)
 			return LIST_RECENT0;
-		y += CAPTION_H + (float)recent_count * LIST_ROW_H + DIVIDER_H +
-		     SECTION_GAP;
+		y += CAPTION_H + (float)recent_count * LIST_ROW_H;
+		sections++;
 	}
 
-	const float playlist_scroll = y - LIST_HEADER_H;
-	if (playlist_count > 0 && scroll > playlist_scroll - 0.5f &&
-	    scroll < playlist_scroll + 0.5f)
-		return LIST_PLAYLIST0;
+	if (playlist_count > 0) {
+		if (sections)
+			y += DIVIDER_H + SECTION_GAP;
+		const float playlist_scroll = y - doc_top;
+		if (scroll > playlist_scroll - 0.5f &&
+		    scroll < playlist_scroll + 0.5f)
+			return LIST_PLAYLIST0;
+		y += CAPTION_H + (float)playlist_count * LIST_ROW_H;
+		sections++;
+	}
 
-	y += CAPTION_H + (float)playlist_count * LIST_ROW_H + DIVIDER_H +
-	     SECTION_GAP;
-	float album_scroll = y - LIST_HEADER_H;
+	if (album_count <= 0)
+		return -1;
+	if (sections)
+		y += DIVIDER_H + SECTION_GAP;
+	float album_scroll = y - doc_top;
 	const float max =
-	    screen_list_max_scroll(recent_count, playlist_count, album_count, -1);
+	    screen_list_max_scroll(recent_count, playlist_count, album_count, -1,
+	                           filtering);
 	if (album_scroll > max)
 		album_scroll = max;
 	if (album_count > 0 && scroll > album_scroll - 0.5f &&
@@ -250,9 +295,9 @@ static void rounded_rect(float x, float y, float w, float h, float r, u32 clr)
 }
 
 static void add_clipped_hit(touch_builder *tb, float x, float y, float w,
-                            float h, int id)
+                            float h, int id, float clip_top)
 {
-	const float top = y < LIST_HEADER_H ? LIST_HEADER_H : y;
+	const float top = y < clip_top ? clip_top : y;
 	const float bottom = y + h > BOT_H ? BOT_H : y + h;
 	if (bottom - top > 8.0f)
 		tb_add(tb, x, top, w, bottom - top, id);
@@ -272,7 +317,8 @@ static int chevron_id_for_row(int id)
 static void draw_caption(const screen_list_args *a, float y, const char *label,
                          int count)
 {
-	if (y >= BOT_H || y + CAPTION_H <= LIST_HEADER_H)
+	const float clip_top = document_top(a->search_query && a->search_query[0]);
+	if (y >= BOT_H || y + CAPTION_H <= clip_top)
 		return;
 
 	C2D_DrawRectSolid(0.0f, y, 0.0f, BOT_W, CAPTION_H, CLR_HEADER);
@@ -293,6 +339,7 @@ static void draw_row(const screen_list_args *a, const collection_item *item,
                      float y, int id)
 {
 	const bool armed = id == a->armed_id;
+	const bool filtering = a->search_query && a->search_query[0];
 	const bool current = a->current_context_uri &&
 	                     a->current_context_uri[0] &&
 	                     strcmp(item->context_uri,
@@ -344,10 +391,12 @@ static void draw_row(const screen_list_args *a, const collection_item *item,
 	const float gap    = 2.0f;
 	const float top = y + (h - (name_h + gap + sub_h)) / 2.0f;
 
-	ui_text(a->buf, item->name, tx, ui_baseline(top, TY_ROW_NAME), TY_ROW_NAME,
-	        tw, current ? CLR_GREEN : CLR_NAME);
-	ui_text(a->buf, item->subtitle, tx,
-	        ui_baseline(top + name_h + gap, TY_ROW_SUB), TY_ROW_SUB, tw, CLR_SUB);
+	ui_text_highlight(a->buf, item->name, a->search_query, tx,
+	                  ui_baseline(top, TY_ROW_NAME), TY_ROW_NAME, tw,
+	                  current ? CLR_GREEN : CLR_NAME, CLR_GREEN);
+	ui_text_highlight(a->buf, item->subtitle, a->search_query, tx,
+	                  ui_baseline(top + name_h + gap, TY_ROW_SUB), TY_ROW_SUB,
+	                  tw, CLR_SUB, CLR_GREEN);
 
 	if (armed) {
 		const float ay = y + (h - PLAY_H) / 2.0f;
@@ -365,13 +414,16 @@ static void draw_row(const screen_list_args *a, const collection_item *item,
 		        TY_ROW_NAME, PLAY_W - 22.0f, CLR_ACTION);
 
 		/* Register actions first: touch_hit returns the first overlapping rect. */
-		add_clipped_hit(a->tb, PLAY_X, ay, PLAY_W, PLAY_H, LIST_ARM_PLAY);
+		add_clipped_hit(a->tb, PLAY_X, ay, PLAY_W, PLAY_H, LIST_ARM_PLAY,
+		                document_top(filtering));
 	}
 
 	/* Register the drill-down before the row body, and keep the zones disjoint:
 	 * a near-edge tap can only navigate, never arm or play music. */
-	add_clipped_hit(a->tb, CHEVRON_X, y, CHEVRON_W, h, chevron_id);
-	add_clipped_hit(a->tb, 0.0f, y, CHEVRON_X, h, id);
+	add_clipped_hit(a->tb, CHEVRON_X, y, CHEVRON_W, h, chevron_id,
+	                document_top(filtering));
+	add_clipped_hit(a->tb, 0.0f, y, CHEVRON_X, h, id,
+	                document_top(filtering));
 }
 
 void screen_list_draw(const screen_list_args *a)
@@ -380,11 +432,14 @@ void screen_list_draw(const screen_list_args *a)
 	const int playlist_count = a->playlists ? a->playlists->count : 0;
 	const int album_count = a->albums ? a->albums->count : 0;
 	const int rn = recent_count;
-	float y = LIST_HEADER_H - a->scroll;
+	const bool filtering = a->search_query && a->search_query[0];
+	float y = document_top(filtering) - a->scroll;
+	bool have_section = false;
 
 	/* Everything scrollable is drawn before the fixed header because citro2d
 	 * has no scissor rectangle. */
 	if (rn > 0) {
+		have_section = true;
 		draw_caption(a, y, "RECENTLY PLAYED", -1);
 		y += CAPTION_H;
 
@@ -394,46 +449,89 @@ void screen_list_draw(const screen_list_args *a)
 			y += row_h(id, a->armed_id);
 		}
 
-		C2D_DrawRectSolid(0.0f, y, 0.0f, BOT_W, DIVIDER_H, CLR_DIVIDER);
-		y += DIVIDER_H + SECTION_GAP;
 	}
 
-	draw_caption(a, y, "PLAYLISTS",
-	             a->playlists ? a->playlists->total : playlist_count);
-	y += CAPTION_H;
-
-	for (int i = 0; i < playlist_count; i++) {
-		const int id = LIST_PLAYLIST0 + i;
-		draw_row(a, &a->playlists->items[i], y, id);
-		y += row_h(id, a->armed_id);
+	if (playlist_count > 0) {
+		if (have_section) {
+			C2D_DrawRectSolid(0.0f, y, 0.0f, BOT_W, DIVIDER_H, CLR_DIVIDER);
+			y += DIVIDER_H + SECTION_GAP;
+		}
+		have_section = true;
+		draw_caption(a, y, "PLAYLISTS",
+		             a->playlists ? a->playlists->total : playlist_count);
+		y += CAPTION_H;
+		for (int i = 0; i < playlist_count; i++) {
+			const int id = LIST_PLAYLIST0 + i;
+			draw_row(a, &a->playlists->items[i], y, id);
+			y += row_h(id, a->armed_id);
+		}
 	}
 
-	C2D_DrawRectSolid(0.0f, y, 0.0f, BOT_W, DIVIDER_H, CLR_DIVIDER);
-	y += DIVIDER_H + SECTION_GAP;
-
-	draw_caption(a, y, "ALBUMS", a->albums ? a->albums->total : album_count);
-	y += CAPTION_H;
-
-	for (int i = 0; i < album_count; i++) {
-		const int id = LIST_ALBUM0 + i;
-		draw_row(a, &a->albums->items[i], y, id);
-		y += row_h(id, a->armed_id);
+	if (album_count > 0) {
+		if (have_section) {
+			C2D_DrawRectSolid(0.0f, y, 0.0f, BOT_W, DIVIDER_H, CLR_DIVIDER);
+			y += DIVIDER_H + SECTION_GAP;
+		}
+		draw_caption(a, y, "ALBUMS", a->albums ? a->albums->total : album_count);
+		y += CAPTION_H;
+		for (int i = 0; i < album_count; i++) {
+			const int id = LIST_ALBUM0 + i;
+			draw_row(a, &a->albums->items[i], y, id);
+			y += row_h(id, a->armed_id);
+		}
+	}
+	if (filtering && playlist_count + album_count == 0) {
+		ui_text(a->buf, "No matches", PAD_X, ui_baseline(y + 34, TY_ROW_NAME),
+		        TY_ROW_NAME, BOT_W - 2 * PAD_X, CLR_SUB);
 	}
 
 	/* --- scroll indicator ---------------------------------------------- */
 	const float max_scroll =
 	    screen_list_max_scroll(recent_count, playlist_count, album_count,
-	                           a->armed_id);
+	                           a->armed_id, filtering);
 	if (max_scroll > 0.0f) {
-		C2D_DrawRectSolid(IND_X, IND_Y, 0.0f, IND_W, IND_H, CLR_IND_TRK);
+		const float ind_y = document_top(filtering) + 4.0f;
+		const float ind_h = BOT_H - ind_y - 4.0f;
+		C2D_DrawRectSolid(IND_X, ind_y, 0.0f, IND_W, ind_h, CLR_IND_TRK);
 
-		float th = IND_H * viewport_h() /
+		float th = ind_h * viewport_h(filtering) /
 		           content_h(recent_count, playlist_count, album_count,
 		                     a->armed_id);
 		if (th < 20.0f)
 			th = 20.0f;
-		const float ty = IND_Y + (IND_H - th) * (a->scroll / max_scroll);
+		const float ty = ind_y + (ind_h - th) * (a->scroll / max_scroll);
 		C2D_DrawRectSolid(IND_X, ty, 0.0f, IND_W, th, CLR_IND_THMB);
+	}
+
+	if (filtering) {
+		const float fy = LIST_HEADER_H;
+		C2D_DrawRectSolid(0, fy, 0, BOT_W, LIST_FILTER_H,
+		                  C2D_Color32(0x1B, 0x1B, 0x1B, 0xFF));
+		ui_disc(17, fy + 11, 5, CLR_GREEN);
+		ui_disc(17, fy + 11, 3, C2D_Color32(0x1B, 0x1B, 0x1B, 0xFF));
+		C2D_DrawLine(20.5f, fy + 14.5f, CLR_GREEN, 25, fy + 19, CLR_GREEN,
+		             2.0f, 0.0f);
+		ui_text(a->buf, a->search_query, 34,
+		        ui_baseline(fy + (LIST_FILTER_H - ui_px(TY_ROW_NAME)) / 2,
+		                    TY_ROW_NAME),
+		        TY_ROW_NAME, 150, CLR_NAME);
+		char matches[24];
+		snprintf(matches, sizeof matches, "%d matches", a->search_matches);
+		const float mw = ui_text_width(a->buf, matches, TY_ROW_SUB);
+		ui_text(a->buf, matches, 274 - mw,
+		        ui_baseline(fy + (LIST_FILTER_H - ui_px(TY_ROW_SUB)) / 2,
+		                    TY_ROW_SUB),
+		        TY_ROW_SUB, mw, CLR_SUB);
+		C2D_DrawRectSolid(280, fy + 2, 0, 34, LIST_FILTER_H - 4,
+		                  a->pressed_id == LIST_BTN_CLEAR_SEARCH
+		                      ? CLR_GUTTER_PRESS
+		                      : CLR_GUTTER);
+		const u32 xclr = a->pressed_id == LIST_BTN_CLEAR_SEARCH
+		                     ? CLR_GREEN_PRESS
+		                     : CLR_NAME;
+		C2D_DrawLine(291, fy + 8, xclr, 303, fy + 20, xclr, 2.5f, 0);
+		C2D_DrawLine(303, fy + 8, xclr, 291, fy + 20, xclr, 2.5f, 0);
+		tb_add(a->tb, 280, fy, 34, LIST_FILTER_H, LIST_BTN_CLEAR_SEARCH);
 	}
 
 	/* --- header, last so it covers scrolled rows ------------------------ */
@@ -451,8 +549,20 @@ void screen_list_draw(const screen_list_args *a)
 	ui_text(a->buf, "Library", ax + 17.0f,
 	        ui_baseline(LIST_HEADER_H / 2.0f - ui_px(TY_ROW_NAME) / 2.0f,
 	                    TY_ROW_NAME),
-	        TY_ROW_NAME, 240.0f, CLR_NAME);
+	        TY_ROW_NAME, 145.0f, CLR_NAME);
+
+	const bool find_pressed = a->pressed_id == LIST_BTN_FIND;
+	rounded_rect(240, 3, 74, 24, 6,
+	             find_pressed ? CLR_GUTTER_PRESS : CLR_GUTTER);
+	const u32 find_clr = find_pressed ? CLR_GREEN_PRESS : CLR_SUB;
+	ui_disc(251, 13, 5, find_clr);
+	ui_disc(251, 13, 3, find_pressed ? CLR_GUTTER_PRESS : CLR_GUTTER);
+	C2D_DrawLine(254.5f, 16.5f, find_clr, 259, 21, find_clr, 2, 0);
+	ui_text(a->buf, "FIND", 264,
+	        ui_baseline((LIST_HEADER_H - ui_px(TY_ROW_SUB)) / 2, TY_ROW_SUB),
+	        TY_ROW_SUB, 44, find_clr);
 
 	/* Generous hit area: the arrow itself is small. */
 	tb_add(a->tb, 0.0f, 0.0f, 90.0f, LIST_HEADER_H, LIST_BTN_BACK);
+	tb_add(a->tb, 238.0f, 0.0f, 82.0f, LIST_HEADER_H, LIST_BTN_FIND);
 }

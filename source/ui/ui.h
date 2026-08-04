@@ -50,6 +50,12 @@ float ui_baseline(float top, type_role r);
 void ui_text(C2D_TextBuf buf, const char *s, float x, float y, type_role r,
              float maxw, u32 clr);
 
+/* Draw one case-insensitive matched substring in a second colour. Falls back
+ * to ui_text when needle is empty or absent. */
+void ui_text_highlight(C2D_TextBuf buf, const char *s, const char *needle,
+                       float x, float y, type_role r, float maxw, u32 clr,
+                       u32 highlight_clr);
+
 /* Draw text with per-glyph letter-spacing, for the mockup's tracked micro
  * labels ("RECENTLY PLAYED", "IPHONE"). citro2d has no tracking parameter, so
  * this advances glyph by glyph. Only worth it for short labels. */

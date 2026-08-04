@@ -10,6 +10,7 @@
 #define BOT_H 240.0f
 #define HEADER_H 30.0f
 #define CAPTION_H 20.0f
+#define ROWS_TOP (HEADER_H + CAPTION_H)
 #define ROW_H 38.0f
 #define ROW_ARMED_H ROW_H
 #define PAD_X 16.0f
@@ -51,7 +52,7 @@ static float row_h(int id, int armed_id)
 
 static float content_h(int count, int armed_id)
 {
-	float h = CAPTION_H + (float)count * ROW_H;
+	float h = (float)count * ROW_H;
 	if (armed_id >= TRACK_ROW0 && armed_id < TRACK_ROW0 + count)
 		h += ROW_ARMED_H - ROW_H;
 	return h;
@@ -59,7 +60,7 @@ static float content_h(int count, int armed_id)
 
 float screen_tracks_max_scroll(int count, int armed_id)
 {
-	const float max = content_h(count, armed_id) - (BOT_H - HEADER_H);
+	const float max = content_h(count, armed_id) - (BOT_H - ROWS_TOP);
 	return max > 0.0f ? max : 0.0f;
 }
 
@@ -69,12 +70,12 @@ float screen_tracks_reveal_row(int count, int row_id, int armed_id,
 	const int idx = row_id - TRACK_ROW0;
 	if (idx < 0 || idx >= count)
 		return scroll;
-	float top = HEADER_H + CAPTION_H;
+	float top = ROWS_TOP;
 	for (int i = 0; i < idx; i++)
 		top += row_h(TRACK_ROW0 + i, armed_id);
 	const float bottom = top + row_h(row_id, armed_id);
-	if (top < scroll + HEADER_H)
-		scroll = top - HEADER_H;
+	if (top < scroll + ROWS_TOP)
+		scroll = top - ROWS_TOP;
 	else if (bottom > scroll + BOT_H)
 		scroll = bottom - BOT_H;
 	const float max = screen_tracks_max_scroll(count, armed_id);
@@ -98,7 +99,7 @@ static void rounded_rect(float x, float y, float w, float h, float r, u32 clr)
 static void clipped_hit(touch_builder *tb, float x, float y, float w, float h,
 	                    int id)
 {
-	const float top = y < HEADER_H ? HEADER_H : y;
+	const float top = y < ROWS_TOP ? ROWS_TOP : y;
 	const float bottom = y + h > BOT_H ? BOT_H : y + h;
 	if (bottom - top > 8.0f)
 		tb_add(tb, x, top, w, bottom - top, id);
@@ -200,24 +201,9 @@ static void draw_row(const screen_tracks_args *a, const track_item *item,
 void screen_tracks_draw(const screen_tracks_args *a)
 {
 	const int count = a->ready && a->page ? a->page->count : 0;
-	float y = HEADER_H - a->scroll;
+	float y = ROWS_TOP - a->scroll;
 
 	if (a->ready && a->page && a->page->count > 0) {
-		C2D_DrawRectSolid(0, y, 0, BOT_W, CAPTION_H, CLR_HEADER);
-		ui_text_tracked(a->buf, "TRACKS", PAD_X,
-		                ui_baseline(y + (CAPTION_H - ui_px(TY_MICRO)) / 2,
-		                            TY_MICRO),
-		                TY_MICRO, 1.1f, CLR_CAPTION);
-		char range[32];
-		const int first = count ? a->page->offset + 1 : 0;
-		const int last = a->page->offset + count;
-		snprintf(range, sizeof range, "%d-%d / %d", first, last, a->page->total);
-		const float rw = ui_text_width(a->buf, range, TY_MICRO);
-		ui_text(a->buf, range, BOT_W - PAD_X - rw,
-		        ui_baseline(y + (CAPTION_H - ui_px(TY_MICRO)) / 2, TY_MICRO),
-		        TY_MICRO, rw, CLR_COUNT);
-		y += CAPTION_H;
-
 		for (int i = 0; i < count; i++) {
 			const int id = TRACK_ROW0 + i;
 			draw_row(a, &a->page->items[i], y, id);
@@ -227,7 +213,7 @@ void screen_tracks_draw(const screen_tracks_args *a)
 		const float max = screen_tracks_max_scroll(count, a->armed_id);
 		if (max > 0) {
 			C2D_DrawRectSolid(IND_X, IND_Y, 0, IND_W, IND_H, CLR_IND_TRK);
-			float th = IND_H * (BOT_H - HEADER_H) /
+			float th = IND_H * (BOT_H - ROWS_TOP) /
 			           content_h(count, a->armed_id);
 			if (th < 20)
 				th = 20;
@@ -251,6 +237,27 @@ void screen_tracks_draw(const screen_tracks_args *a)
 			        TY_ROW_NAME, 70, CLR_ACTION);
 			tb_add(a->tb, 116, 135, 88, 34, TRACK_BTN_RETRY);
 		}
+	}
+
+	/* Fixed page caption: rows are drawn first so this strip masks anything
+	 * scrolling beneath it, just like the fixed navigation header above. */
+	C2D_DrawRectSolid(0, HEADER_H, 0, BOT_W, CAPTION_H, CLR_HEADER);
+	ui_text_tracked(a->buf, "TRACKS", PAD_X,
+	                ui_baseline(HEADER_H +
+	                                (CAPTION_H - ui_px(TY_MICRO)) / 2,
+	                            TY_MICRO),
+	                TY_MICRO, 1.1f, CLR_CAPTION);
+	if (a->ready && a->page) {
+		char range[32];
+		const int first = count ? a->page->offset + 1 : 0;
+		const int last = a->page->offset + count;
+		snprintf(range, sizeof range, "%d-%d / %d", first, last, a->page->total);
+		const float rw = ui_text_width(a->buf, range, TY_MICRO);
+		ui_text(a->buf, range, BOT_W - PAD_X - rw,
+		        ui_baseline(HEADER_H +
+		                        (CAPTION_H - ui_px(TY_MICRO)) / 2,
+		                    TY_MICRO),
+		        TY_MICRO, rw, CLR_COUNT);
 	}
 
 	C2D_DrawRectSolid(0, 0, 0, BOT_W, HEADER_H, CLR_HEADER);

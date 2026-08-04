@@ -1,6 +1,7 @@
 #include <3ds.h>
 #include <3ds/3dslink.h>
 #include <citro2d.h>
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -92,6 +93,7 @@ static worker_tracks_snapshot g_tracks_buf;
 static float                 g_tracks_scroll;
 static float                 g_tracks_velocity;
 static int                   g_tracks_armed = -1;
+static int                   g_tracks_cursor = -1;
 static u64                   g_tracks_arm_until;
 static unsigned              g_tracks_applied_generation;
 /* -2: leave unselected, -1: select last row, otherwise page-local index. */
@@ -207,33 +209,132 @@ static opt_field g_opt_play, g_opt_shuf, g_opt_rep;
 static recent_list   g_recents_buf;
 static playlist_list g_playlists_buf;
 static album_list    g_albums_buf;
+static recent_list   g_search_recents;
+static playlist_list g_search_playlists;
+static album_list    g_search_albums;
+static char          g_list_search[64];
+static char          g_filter_query[64];
+static int           g_filter_playlist_count = -1;
+static int           g_filter_album_count = -1;
 
-static const collection_item *list_selected_item(int id, int recent_count,
-	                                             int playlist_count,
-	                                             int album_count)
+static bool contains_ci(const char *text, const char *needle)
 {
-	if (id >= LIST_RECENT0 && id < LIST_RECENT0 + recent_count)
-		return &g_recents_buf.items[id - LIST_RECENT0];
-	if (id >= LIST_PLAYLIST0 && id < LIST_PLAYLIST0 + playlist_count)
-		return &g_playlists_buf.items[id - LIST_PLAYLIST0];
-	if (id >= LIST_ALBUM0 && id < LIST_ALBUM0 + album_count)
-		return &g_albums_buf.items[id - LIST_ALBUM0];
+	if (!needle[0])
+		return true;
+	for (const char *p = text; *p; p++) {
+		int i = 0;
+		while (needle[i] && p[i] &&
+		       tolower((unsigned char)p[i]) ==
+		           tolower((unsigned char)needle[i]))
+			i++;
+		if (!needle[i])
+			return true;
+	}
+	return false;
+}
+
+static bool collection_matches(const collection_item *item)
+{
+	return contains_ci(item->name, g_list_search) ||
+	       contains_ci(item->subtitle, g_list_search);
+}
+
+static void library_get_lists(recent_list **recents, playlist_list **playlists,
+	                          album_list **albums)
+{
+	worker_get_recents(&g_recents_buf);
+	worker_get_playlists(&g_playlists_buf);
+	worker_get_albums(&g_albums_buf);
+	if (!g_list_search[0]) {
+		*recents = &g_recents_buf;
+		*playlists = &g_playlists_buf;
+		*albums = &g_albums_buf;
+		return;
+	}
+
+	if (strcmp(g_filter_query, g_list_search) != 0 ||
+	    g_filter_playlist_count != g_playlists_buf.count ||
+	    g_filter_album_count != g_albums_buf.count) {
+		memset(&g_search_recents, 0, sizeof g_search_recents);
+		memset(&g_search_playlists, 0, sizeof g_search_playlists);
+		memset(&g_search_albums, 0, sizeof g_search_albums);
+		for (int i = 0; i < g_playlists_buf.count; i++)
+			if (collection_matches(&g_playlists_buf.items[i]))
+				g_search_playlists.items[g_search_playlists.count++] =
+				    g_playlists_buf.items[i];
+		for (int i = 0; i < g_albums_buf.count; i++)
+			if (collection_matches(&g_albums_buf.items[i]))
+				g_search_albums.items[g_search_albums.count++] =
+				    g_albums_buf.items[i];
+		g_search_playlists.total = g_search_playlists.count;
+		g_search_albums.total = g_search_albums.count;
+		snprintf(g_filter_query, sizeof g_filter_query, "%s", g_list_search);
+		g_filter_playlist_count = g_playlists_buf.count;
+		g_filter_album_count = g_albums_buf.count;
+	}
+
+	*recents = &g_search_recents;
+	*playlists = &g_search_playlists;
+	*albums = &g_search_albums;
+}
+
+static void library_reset_position(void)
+{
+	g_list_scroll = 0.0f;
+	g_list_velocity = 0.0f;
+	g_list_armed = -1;
+}
+
+static void library_edit_search(void)
+{
+	SwkbdState keyboard;
+	char query[sizeof g_list_search];
+	snprintf(query, sizeof query, "%s", g_list_search);
+	swkbdInit(&keyboard, SWKBD_TYPE_NORMAL, 2, (int)sizeof query - 1);
+	swkbdSetHintText(&keyboard, "Albums and playlists");
+	swkbdSetInitialText(&keyboard, query);
+	swkbdSetButton(&keyboard, SWKBD_BUTTON_LEFT, "Cancel", false);
+	swkbdSetButton(&keyboard, SWKBD_BUTTON_RIGHT, "Find", true);
+	if (swkbdInputText(&keyboard, query, sizeof query) != SWKBD_BUTTON_RIGHT)
+		return;
+
+	char *start = query;
+	while (*start && isspace((unsigned char)*start))
+		start++;
+	char *end = start + strlen(start);
+	while (end > start && isspace((unsigned char)end[-1]))
+		*--end = '\0';
+	snprintf(g_list_search, sizeof g_list_search, "%s", start);
+	g_filter_query[0] = '\0';
+	library_reset_position();
+}
+
+static const collection_item *list_selected_item(int id, const recent_list *rl,
+	                                             const playlist_list *pl,
+	                                             const album_list *al)
+{
+	if (id >= LIST_RECENT0 && id < LIST_RECENT0 + rl->count)
+		return &rl->items[id - LIST_RECENT0];
+	if (id >= LIST_PLAYLIST0 && id < LIST_PLAYLIST0 + pl->count)
+		return &pl->items[id - LIST_PLAYLIST0];
+	if (id >= LIST_ALBUM0 && id < LIST_ALBUM0 + al->count)
+		return &al->items[id - LIST_ALBUM0];
 	return NULL;
 }
 
-static const collection_item *list_chevron_item(int id, int recent_count,
-	                                            int playlist_count,
-	                                            int album_count)
+static const collection_item *list_chevron_item(int id, const recent_list *rl,
+	                                            const playlist_list *pl,
+	                                            const album_list *al)
 {
 	if (id >= LIST_CHEVRON_RECENT0 &&
-	    id < LIST_CHEVRON_RECENT0 + recent_count)
-		return &g_recents_buf.items[id - LIST_CHEVRON_RECENT0];
+	    id < LIST_CHEVRON_RECENT0 + rl->count)
+		return &rl->items[id - LIST_CHEVRON_RECENT0];
 	if (id >= LIST_CHEVRON_PLAYLIST0 &&
-	    id < LIST_CHEVRON_PLAYLIST0 + playlist_count)
-		return &g_playlists_buf.items[id - LIST_CHEVRON_PLAYLIST0];
+	    id < LIST_CHEVRON_PLAYLIST0 + pl->count)
+		return &pl->items[id - LIST_CHEVRON_PLAYLIST0];
 	if (id >= LIST_CHEVRON_ALBUM0 &&
-	    id < LIST_CHEVRON_ALBUM0 + album_count)
-		return &g_albums_buf.items[id - LIST_CHEVRON_ALBUM0];
+	    id < LIST_CHEVRON_ALBUM0 + al->count)
+		return &al->items[id - LIST_CHEVRON_ALBUM0];
 	return NULL;
 }
 
@@ -242,6 +343,7 @@ static void tracks_request_page(int offset, int select_on_load)
 	g_tracks_scroll = 0.0f;
 	g_tracks_velocity = 0.0f;
 	g_tracks_armed = -1;
+	g_tracks_cursor = -1;
 	g_tracks_select_on_load = select_on_load;
 	worker_request_tracks(&g_tracks_collection, offset);
 }
@@ -468,9 +570,21 @@ int main(int argc, char **argv)
 				g_list_armed = LIST_PLAYLIST0;
 				g_list_arm_until = osGetTime() + 1000;
 			}
+			if (frames == 360) {
+				snprintf(g_list_search, sizeof g_list_search, "tame");
+				g_filter_query[0] = '\0';
+				library_reset_position();
+			}
 			if (frames == 390)
 				g_list_armed = -1;
 			if (frames == 420) {
+				tl_step("list_search",
+				        g_search_recents.count == 0 &&
+				            g_search_albums.count > 0,
+				        "query=%s playlists=%d albums=%d", g_list_search,
+				        g_search_playlists.count, g_search_albums.count);
+				g_list_search[0] = '\0';
+				g_filter_query[0] = '\0';
 				tl_step("list_view", 1, "rendered %d frames", 120);
 				g_view = VIEW_PLAYER;
 				g_list_armed = -1;
@@ -516,6 +630,7 @@ int main(int argc, char **argv)
 				g_tracks_scroll = 0.0f;
 				g_tracks_velocity = 0.0f;
 				g_tracks_armed = -1;
+				g_tracks_cursor = -1;
 				if (g_tracks_buf.page.count > 0 &&
 				    g_tracks_select_on_load != -2) {
 					int idx = g_tracks_select_on_load < 0
@@ -524,6 +639,7 @@ int main(int argc, char **argv)
 					if (idx >= g_tracks_buf.page.count)
 						idx = g_tracks_buf.page.count - 1;
 					g_tracks_armed = TRACK_ROW0 + idx;
+					g_tracks_cursor = g_tracks_armed;
 					g_tracks_arm_until = osGetTime() + LIST_ARM_MS;
 					int buffer_idx = idx;
 					if (g_tracks_select_on_load < 0 && idx > 0)
@@ -563,6 +679,10 @@ int main(int argc, char **argv)
 			}
 		}
 		if (input_view == VIEW_LIST || input_view == VIEW_TRACKS) {
+			if (keys_down & KEY_SELECT) {
+				opt_set(&g_opt_play, !playing);
+				worker_post(playing ? CMD_PAUSE : CMD_PLAY, 0);
+			}
 			if (keys_down & KEY_DRIGHT) {
 				g_cmd_sent = osGetTime();
 				tl_timing("button NEXT at %llu",
@@ -598,12 +718,14 @@ int main(int argc, char **argv)
 
 		/* --- list view input ------------------------------------------- */
 		if (input_view == VIEW_LIST) {
-			recent_list *const   rl = &g_recents_buf;
-			playlist_list *const pl = &g_playlists_buf;
-			album_list *const    al = &g_albums_buf;
-			const int            n  = worker_get_recents(rl);
-			const int            pn = worker_get_playlists(pl);
-			const int            an = worker_get_albums(al);
+			recent_list *rl;
+			playlist_list *pl;
+			album_list *al;
+			library_get_lists(&rl, &pl, &al);
+			const int n = rl->count;
+			const int pn = pl->count;
+			const int an = al->count;
+			const bool filtering = g_list_search[0] != '\0';
 
 			if (g_list_armed >= 0 && osGetTime() >= g_list_arm_until)
 				g_list_armed = -1;
@@ -614,7 +736,7 @@ int main(int argc, char **argv)
 				int next = -1;
 				if (g_list_armed < 0)
 					next = screen_list_section_first_id(
-					    n, pn, an, g_list_scroll);
+					    n, pn, an, g_list_scroll, filtering);
 				if (next < 0)
 					next = list_move_id(g_list_armed, direction, n, pn, an);
 				g_list_armed = next;
@@ -624,7 +746,8 @@ int main(int argc, char **argv)
 					const int buffer_id = list_move_id(
 					    g_list_armed, direction, n, pn, an);
 					g_list_scroll = screen_list_reveal_row(
-					    n, pn, an, buffer_id, g_list_armed, g_list_scroll);
+					    n, pn, an, buffer_id, g_list_armed, g_list_scroll,
+					    filtering);
 				}
 			}
 
@@ -633,7 +756,7 @@ int main(int argc, char **argv)
 				g_list_armed = -1;
 				g_list_velocity = 0.0f;
 				g_list_scroll = screen_list_jump_section(
-				    n, pn, an, g_list_scroll, direction);
+				    n, pn, an, g_list_scroll, direction, filtering);
 			}
 
 			/* Drag 1:1 while held, then retain a filtered portion of the final
@@ -662,7 +785,8 @@ int main(int argc, char **argv)
 					g_list_velocity = 0.0f;
 			}
 
-			const float maxs = screen_list_max_scroll(n, pn, an, g_list_armed);
+			const float maxs =
+			    screen_list_max_scroll(n, pn, an, g_list_armed, filtering);
 			if (g_list_scroll < 0.0f) {
 				g_list_scroll = 0.0f;
 				g_list_velocity = 0.0f;
@@ -672,11 +796,17 @@ int main(int argc, char **argv)
 				g_list_velocity = 0.0f;
 			}
 
-			const collection_item *selected = list_selected_item(
-			    g_list_armed, n, pn, an);
-			const collection_item *drilldown = list_chevron_item(
-			    touch.clicked, n, pn, an);
-			if (drilldown) {
+			const collection_item *selected =
+			    list_selected_item(g_list_armed, rl, pl, al);
+			const collection_item *drilldown =
+			    list_chevron_item(touch.clicked, rl, pl, al);
+			if (touch.clicked == LIST_BTN_FIND) {
+				library_edit_search();
+			} else if (touch.clicked == LIST_BTN_CLEAR_SEARCH) {
+				g_list_search[0] = '\0';
+				g_filter_query[0] = '\0';
+				library_reset_position();
+			} else if (drilldown) {
 				tracks_open(drilldown);
 			} else if ((keys_down & KEY_X) && selected) {
 				tracks_open(selected);
@@ -735,6 +865,7 @@ int main(int argc, char **argv)
 				worker_cancel_tracks();
 				g_view = VIEW_LIST;
 				g_tracks_armed = -1;
+				g_tracks_cursor = -1;
 			} else if ((touch.clicked == TRACK_BTN_RETRY ||
 			            (keys_down & KEY_X)) &&
 			           g_tracks_buf.state == TRACKS_ERROR) {
@@ -766,10 +897,10 @@ int main(int argc, char **argv)
 					const u32 nav = keys_repeat & (KEY_UP | KEY_DOWN);
 					if (nav && page->count > 0) {
 						const int direction = nav & KEY_UP ? -1 : 1;
-						int idx = g_tracks_armed >= TRACK_ROW0
-						              ? g_tracks_armed - TRACK_ROW0
+						int idx = g_tracks_cursor >= TRACK_ROW0
+						              ? g_tracks_cursor - TRACK_ROW0
 						              : (direction < 0 ? page->count - 1 : 0);
-						if (g_tracks_armed >= TRACK_ROW0)
+						if (g_tracks_cursor >= TRACK_ROW0)
 							idx += direction;
 
 						if (idx < 0 && page->offset > 0) {
@@ -793,6 +924,7 @@ int main(int argc, char **argv)
 							if (idx >= page->count)
 								idx = page->count - 1;
 							g_tracks_armed = TRACK_ROW0 + idx;
+							g_tracks_cursor = g_tracks_armed;
 							g_tracks_arm_until = osGetTime() + LIST_ARM_MS;
 							g_tracks_velocity = 0.0f;
 							int buffer_idx = idx + direction;
@@ -841,7 +973,10 @@ int main(int argc, char **argv)
 					}
 
 					const int idx = g_tracks_armed - TRACK_ROW0;
-					const int queue_idx = touch.clicked - TRACK_QUEUE0;
+					int queue_idx = touch.clicked - TRACK_QUEUE0;
+					if ((queue_idx < 0 || queue_idx >= page->count) &&
+					    (keys_down & KEY_X))
+						queue_idx = idx;
 					if (queue_idx >= 0 && queue_idx < page->count &&
 					    page->items[queue_idx].playable) {
 						tl_log("track: queue item=%s name=%s",
@@ -862,6 +997,7 @@ int main(int argc, char **argv)
 						g_tracks_armed = -1;
 					} else if (touch.clicked >= TRACK_ROW0 &&
 					           touch.clicked < TRACK_ROW0 + page->count) {
+						g_tracks_cursor = touch.clicked;
 						if (g_tracks_armed == touch.clicked)
 							g_tracks_armed = -1;
 						else {
@@ -1333,12 +1469,10 @@ int main(int argc, char **argv)
 		C2D_SceneBegin(bottom);
 
 		if (g_view == VIEW_LIST) {
-			recent_list *const   rl = &g_recents_buf;
-			playlist_list *const pl = &g_playlists_buf;
-			album_list *const    al = &g_albums_buf;
-			worker_get_recents(rl);
-			worker_get_playlists(pl);
-			worker_get_albums(al);
+			recent_list *rl;
+			playlist_list *pl;
+			album_list *al;
+			library_get_lists(&rl, &pl, &al);
 
 			const screen_list_args la = {
 				.buf        = textbuf,
@@ -1348,6 +1482,8 @@ int main(int argc, char **argv)
 				.albums     = al,
 				.current_context_uri =
 				    snap.have_state ? snap.state.context_uri : "",
+				.search_query = g_list_search,
+				.search_matches = pl->count + al->count,
 				.playing     = playing,
 				.animation_ms = (unsigned)osGetTime(),
 				.scroll     = g_list_scroll,

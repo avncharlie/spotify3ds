@@ -51,14 +51,17 @@ access at <https://spotify.com/account/apps> if the SD card or file is lost.
   show/hide cover art.
 - Library: tap a row's right chevron to open its tracks directly. D-pad up/down
   selects a collection, `A` plays the whole collection, `X` opens its tracks,
-  D-pad left/right skips the previous/next song, `L/R` jumps sections, and `B`
-  returns.
+  D-pad left/right skips the previous/next song, `SELECT` toggles play/pause,
+  `L/R` jumps sections, and `B` returns. Tap `FIND` to filter saved albums and
+  playlists by name, artist, or owner using the system keyboard; tap the filter
+  strip's `X` to clear it.
 - Tracks: D-pad up/down selects a song, `A` plays it, `L/R` changes 50-track
-  pages, D-pad left/right skips the previous/next song, and `B` returns to the
-  Library. Tap a row's right queue icon to add that song to Spotify's playback
-  queue. Moving past a page boundary with D-pad up/down also loads the adjacent
-  page automatically. Playlist pagination wraps: `L`/Up on the first page opens
-  the last page, and `R`/Down on the last page opens the first page.
+  pages, D-pad left/right skips the previous/next song, `SELECT` toggles
+  play/pause, `X` queues the selected song, and `B` returns to the Library. Tap a
+  row's right queue icon to queue it directly. Moving past a page boundary with
+  D-pad up/down also loads the adjacent page automatically. Playlist pagination
+  wraps: `L`/Up on the first page opens the last page, and `R`/Down on the last
+  page opens the first page.
 
 Library and Tracks mark Spotify's current context or song with a green title,
 edge, row tint, and an equalizer over its artwork. The bars animate while

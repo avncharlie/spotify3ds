@@ -1,6 +1,7 @@
 #include "ui.h"
 
 #include <3ds.h>
+#include <ctype.h>
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -135,6 +136,70 @@ void ui_text(C2D_TextBuf buf, const char *s, float x, float y, type_role r,
 	}
 
 	C2D_DrawText(&t, C2D_WithColor | C2D_AtBaseline, x, y, 0.0f, sc, sc, clr);
+}
+
+static char *find_ci(char *text, const char *needle)
+{
+	const size_t nn = strlen(needle);
+	if (!nn)
+		return NULL;
+	for (char *p = text; *p; p++) {
+		size_t i = 0;
+		while (i < nn && p[i] &&
+		       tolower((unsigned char)p[i]) ==
+		           tolower((unsigned char)needle[i]))
+			i++;
+		if (i == nn)
+			return p;
+	}
+	return NULL;
+}
+
+void ui_text_highlight(C2D_TextBuf buf, const char *s, const char *needle,
+                       float x, float y, type_role r, float maxw, u32 clr,
+                       u32 highlight_clr)
+{
+	if (!s || !s[0] || !needle || !needle[0]) {
+		ui_text(buf, s, x, y, r, maxw, clr);
+		return;
+	}
+
+	char tmp[256];
+	snprintf(tmp, sizeof tmp, "%s", s);
+	char *match = find_ci(tmp, needle);
+	if (!match) {
+		ui_text(buf, s, x, y, r, maxw, clr);
+		return;
+	}
+
+	/* Keep the same ellipsis behaviour as ui_text before splitting the colour
+	 * runs. A truncated-away match simply renders as ordinary text. */
+	int len = (int)strlen(tmp);
+	while (maxw > 0.0f && ui_text_width(buf, tmp, r) > maxw && len > 2) {
+		len--;
+		tmp[len - 1] = '.';
+		tmp[len] = '.';
+		tmp[len + 1] = '\0';
+	}
+	match = find_ci(tmp, needle);
+	if (!match) {
+		ui_text(buf, tmp, x, y, r, maxw, clr);
+		return;
+	}
+
+	const size_t nn = strlen(needle);
+	const size_t before_n = (size_t)(match - tmp);
+	char before[256], matched[256], after[256];
+	snprintf(before, sizeof before, "%.*s", (int)before_n, tmp);
+	snprintf(matched, sizeof matched, "%.*s", (int)nn, match);
+	snprintf(after, sizeof after, "%s", match + nn);
+
+	const float before_w = ui_text_width(buf, before, r);
+	const float match_w = ui_text_width(buf, matched, r);
+	ui_text(buf, before, x, y, r, maxw, clr);
+	ui_text(buf, matched, x + before_w, y, r, maxw - before_w, highlight_clr);
+	ui_text(buf, after, x + before_w + match_w, y, r,
+	        maxw - before_w - match_w, clr);
 }
 
 void ui_text_tracked(C2D_TextBuf buf, const char *s, float x, float y,

@@ -173,6 +173,16 @@ typedef struct {
 
 static opt_field g_opt_play, g_opt_shuf, g_opt_rep;
 
+/* Scratch for the worker's list snapshots.
+ *
+ * File scope rather than locals because these are large - recent_list is ~10KB
+ * and playlist_list ~32KB - and several of the call sites run every frame. A
+ * stack copy per frame is both a needless memcpy and, stacked with a TLS
+ * handshake on the worker, enough to overflow. The render thread is the only
+ * reader, so a single shared buffer is safe. */
+static recent_list   g_recents_buf;
+static playlist_list g_playlists_buf;
+
 static void opt_set(opt_field *o, long v)
 {
 	o->value = v;
@@ -277,6 +287,7 @@ int main(int argc, char **argv)
 	int  frames             = 0;
 	bool logged_first       = false;
 	bool logged_recents     = false;
+	bool logged_playlists   = false;
 	u64  repeat_probe_at    = 0;
 	repeat_mode repeat_probe_from = REPEAT_OFF;
 
@@ -355,8 +366,8 @@ int main(int argc, char **argv)
 
 		/* --- list view input ------------------------------------------- */
 		if (g_view == VIEW_LIST) {
-			recent_list rl;
-			const int   n = worker_get_recents(&rl);
+			recent_list *const rl = &g_recents_buf;
+			const int          n  = worker_get_recents(rl);
 
 			/* 1:1 drag while held. No momentum: four and a half visible rows
 			 * of a handful is a short list, and a flick would overshoot it. */
@@ -374,8 +385,8 @@ int main(int argc, char **argv)
 			} else if (touch.clicked >= LIST_ROW0 &&
 			           touch.clicked < LIST_ROW0 + n) {
 				const int idx = touch.clicked - LIST_ROW0;
-				tl_log("list: play %s", rl.items[idx].context_uri);
-				worker_play_context(rl.items[idx].context_uri);
+				tl_log("list: play %s", rl->items[idx].context_uri);
+				worker_play_context(rl->items[idx].context_uri);
 				/* Back to the player, where the result of the tap is visible. */
 				g_view = VIEW_PLAYER;
 				opt_set(&g_opt_play, 1);
@@ -389,12 +400,12 @@ int main(int argc, char **argv)
 
 		if (g_view == VIEW_PLAYER && touch.clicked >= BTN_SHELF0 &&
 		    touch.clicked < BTN_SHELF0 + SHELF_TILES) {
-			recent_list rl;
-			const int   n   = worker_get_recents(&rl);
-			const int   idx = touch.clicked - BTN_SHELF0;
+			recent_list *const rl  = &g_recents_buf;
+			const int          n   = worker_get_recents(rl);
+			const int          idx = touch.clicked - BTN_SHELF0;
 			if (idx < n) {
-				tl_log("shelf: play %s", rl.items[idx].context_uri);
-				worker_play_context(rl.items[idx].context_uri);
+				tl_log("shelf: play %s", rl->items[idx].context_uri);
+				worker_play_context(rl->items[idx].context_uri);
 				opt_set(&g_opt_play, 1);
 			}
 		}
@@ -493,18 +504,48 @@ int main(int argc, char **argv)
 		/* Phase 12: prove the shelf data arrives, and say what it is. A silent
 		 * empty list is the failure this step exists to make impossible. */
 		if (!logged_recents) {
-			recent_list rl;
-			if (worker_get_recents(&rl) > 0) {
+			recent_list *const rl = &g_recents_buf;
+			if (worker_get_recents(rl) > 0) {
 				logged_recents = true;
-				tl_step("recents", rl.count > 0, "%d items: %s | %s", rl.count,
-				        rl.items[0].name,
-				        rl.count > 1 ? rl.items[1].name : "-");
-				for (int i = 0; i < rl.count && i < 4; i++)
-					tl_log("  recent[%d] %s / %s -> %s", i, rl.items[i].name,
-					       rl.items[i].subtitle, rl.items[i].context_uri);
+				tl_step("recents", rl->count > 0, "%d items: %s | %s", rl->count,
+				        rl->items[0].name,
+				        rl->count > 1 ? rl->items[1].name : "-");
+				for (int i = 0; i < rl->count && i < 4; i++)
+					tl_log("  recent[%d] %s / %s -> %s", i, rl->items[i].name,
+					       rl->items[i].subtitle, rl->items[i].context_uri);
 			} else if (frames > 600) {
 				logged_recents = true;
 				tl_step("recents", 0, "no items after %d frames", frames);
+			}
+		}
+
+		/* Phase 14: same for the playlist library. This is the section that
+		 * actually fills the Library screen - the history dedupes to only a
+		 * handful of collections - so an empty list here is the difference
+		 * between a working screen and a blank one. */
+		if (!logged_playlists) {
+			playlist_list *const pl = &g_playlists_buf;
+
+			if (worker_get_playlists(pl) > 0) {
+				logged_playlists = true;
+				tl_step("playlists", pl->count > 0, "%d of %d total: %s | %s",
+				        pl->count, pl->total, pl->items[0].name,
+				        pl->count > 1 ? pl->items[1].name : "-");
+
+				int no_art = 0;
+				for (int i = 0; i < pl->count; i++)
+					if (!pl->items[i].art_url[0])
+						no_art++;
+				tl_log("  playlists without art: %d of %d", no_art, pl->count);
+
+				for (int i = 0; i < pl->count && i < 3; i++)
+					tl_log("  playlist[%d] %s / %s", i, pl->items[i].name,
+					       pl->items[i].subtitle);
+			} else if (frames > 650) {
+				/* Must land before the 700-frame smoketest exit, or a genuine
+				 * failure would never be reported at all. */
+				logged_playlists = true;
+				tl_step("playlists", 0, "no items after %d frames", frames);
 			}
 		}
 
@@ -591,13 +632,13 @@ int main(int argc, char **argv)
 		C2D_SceneBegin(bottom);
 
 		if (g_view == VIEW_LIST) {
-			recent_list rl;
-			worker_get_recents(&rl);
+			recent_list *const rl = &g_recents_buf;
+			worker_get_recents(rl);
 
 			const screen_list_args la = {
 				.buf        = textbuf,
 				.tb         = &g_tb,
-				.items      = &rl,
+				.items      = rl,
 				.art        = NULL,
 				.scroll     = g_list_scroll,
 				.pressed_id = touch.down ? touch.press_id : -1,

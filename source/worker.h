@@ -64,6 +64,16 @@ int worker_get_recents(recent_list *out);
 /* Ask for a refresh on the next worker tick. */
 void worker_request_recents(void);
 
+/* --- playlist library --------------------------------------------------
+ * The user's own and followed playlists, for the Library screen. Fetched once
+ * at startup: it changes far more slowly than playback state. */
+
+/* Copy the current list out under lock. Returns the item count. */
+int worker_get_playlists(playlist_list *out);
+
+/* Ask for a refresh on the next worker tick. */
+void worker_request_playlists(void);
+
 /* Start playback from a recents entry. The uri is copied, so the caller's
  * buffer need not outlive the call. */
 void worker_play_context(const char *context_uri);

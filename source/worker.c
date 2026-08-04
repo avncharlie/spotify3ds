@@ -66,6 +66,9 @@ static char        s_play_uri[128]; /* pending CMD_PLAY_CONTEXT target */
 static recent_list s_recents;
 static bool        s_recents_wanted = true; /* fetch once at startup */
 static u64         s_recents_at;            /* when last fetched */
+
+static playlist_list s_playlists;
+static bool          s_playlists_wanted = true; /* fetch once at startup */
 #define RECENTS_MIN_INTERVAL_MS 30000
 
 static char        s_art_want[256];
@@ -93,6 +96,7 @@ static void set_fatal(const char *what, const char *hint)
 
 static void do_art(void);
 static void do_recents(void);
+static void do_playlists(void);
 
 /* Short label for logs. Uses the *tail* of the content hash, not the head:
  * every Spotify art URL begins "ab67616d0000b273...", so a leading prefix is
@@ -294,8 +298,10 @@ static void worker_main(void *arg)
 		 * picked up in the same iteration rather than 100ms later. */
 		do_art();
 
-		/* Recents last: the cover the user is looking at matters more than the
-		 * shelf behind it. */
+		/* Lists last: the cover the user is looking at matters more than the
+		 * shelf behind it. Playlists before recents so the name cache is warm
+		 * when recents_fetch needs to label a playlist context. */
+		do_playlists();
 		do_recents();
 
 		LightLock_Lock(&s_lock);
@@ -528,6 +534,62 @@ int worker_get_recents(recent_list *out)
 	return n;
 }
 
+int worker_get_playlists(playlist_list *out)
+{
+	ensure_lock();
+	LightLock_Lock(&s_lock);
+	*out = s_playlists;
+	const int n = s_playlists.count;
+	LightLock_Unlock(&s_lock);
+	return n;
+}
+
+void worker_request_playlists(void)
+{
+	ensure_lock();
+	LightLock_Lock(&s_lock);
+	s_playlists_wanted = true;
+	LightLock_Unlock(&s_lock);
+}
+
+/* Runs on the worker thread.
+ *
+ * Fetched once per session rather than on a timer: a playlist library changes
+ * far more slowly than playback state, and the response is 21KB. Ordered
+ * *before* do_recents on purpose - it seeds the name cache with every playlist
+ * the user owns or follows, so recents_fetch usually finds the names it needs
+ * without a request of its own. */
+static void do_playlists(void)
+{
+	LightLock_Lock(&s_lock);
+	const bool want = s_playlists_wanted;
+	LightLock_Unlock(&s_lock);
+
+	if (!want)
+		return;
+
+	/* On the heap, not the stack: playlist_list is ~32KB and the worker runs on
+	 * a 96KB stack that TLS handshakes already want most of. A stack copy here
+	 * overflowed it and took the app down before it could log anything. */
+	playlist_list *fresh = malloc(sizeof *fresh);
+	if (!fresh)
+		return;
+
+	char                err[256];
+	const player_result pr = playlists_fetch(fresh, err, sizeof err);
+
+	LightLock_Lock(&s_lock);
+	s_playlists_wanted = false;
+	if (pr == PLAYER_OK)
+		s_playlists = *fresh;
+	LightLock_Unlock(&s_lock);
+
+	free(fresh);
+
+	if (pr != PLAYER_OK && pr != PLAYER_NOTHING_PLAYING)
+		tl_log("playlists: %s (%s)", player_result_str(pr), err);
+}
+
 void worker_play_context(const char *context_uri)
 {
 	if (!context_uri || !context_uri[0])
@@ -562,16 +624,24 @@ static void do_recents(void)
 	if (last && osGetTime() - last < RECENTS_MIN_INTERVAL_MS)
 		return;
 
-	recent_list fresh;
-	char        err[256];
-	const player_result pr = recents_fetch(&fresh, err, sizeof err);
+	/* Heap for the same reason as do_playlists: RECENTS_MAX grew from 8 to 16
+	 * for the 50-item fetch, and 10KB of stack alongside a TLS handshake is not
+	 * a margin worth relying on. */
+	recent_list *fresh = malloc(sizeof *fresh);
+	if (!fresh)
+		return;
+
+	char                err[256];
+	const player_result pr = recents_fetch(fresh, err, sizeof err);
 
 	LightLock_Lock(&s_lock);
 	s_recents_wanted = false;
 	s_recents_at     = osGetTime();
 	if (pr == PLAYER_OK)
-		s_recents = fresh;
+		s_recents = *fresh;
 	LightLock_Unlock(&s_lock);
+
+	free(fresh);
 
 	if (pr != PLAYER_OK && pr != PLAYER_NOTHING_PLAYING)
 		tl_log("recents: %s (%s)", player_result_str(pr), err);

@@ -8,14 +8,87 @@
 #include "../testlog.h"
 #include "auth.h"
 #include "json.h"
+#include "namecache.h"
 
 #define API_HOST "api.spotify.com"
 
-/* Ask for more items than the shelf shows, because consecutive tracks from one
- * album collapse to a single entry: listening through one record would
- * otherwise yield a shelf of the same cover four times. 10 raw items reliably
- * yields enough distinct albums without making the response large. */
-#define FETCH_LIMIT 10
+/* The most Spotify will return in one page.
+ *
+ * Asking for far more items than the shelf shows is the point: entries collapse
+ * by collection, and a user listening through one album yields a single tile
+ * from dozens of tracks. Measured on this account, 50 raw items deduped to 4
+ * distinct collections, so a smaller limit would leave the Library screen
+ * nearly empty.
+ *
+ * Note this endpoint ignores `fields=` - it returns items of `{}` rather than a
+ * trimmed object - so the full ~147KB body has to come down and be parsed. That
+ * is what sets the json token pool ceiling. */
+#define FETCH_LIMIT 50
+
+/* Copy the last path-ish segment of a spotify uri: the id after the final
+ * colon. Returns false when the uri is not of the expected shape. */
+static bool uri_id(const char *uri, char *out, int outlen)
+{
+	const char *colon = strrchr(uri, ':');
+	if (!colon || !colon[1])
+		return false;
+	snprintf(out, outlen, "%s", colon + 1);
+	return true;
+}
+
+/* GET /v1/playlists/{id}?fields=name,owner(display_name).
+ *
+ * recently-played gives a context uri but never its name, so this is the only
+ * way to label a playlist correctly. Results go through namecache, so this runs
+ * once per playlist rather than once per launch. */
+static bool playlist_name(const char *uri, char *name, int namelen, char *owner,
+                          int ownerlen)
+{
+	name[0]  = '\0';
+	owner[0] = '\0';
+
+	if (namecache_get(uri, name, namelen, owner, ownerlen))
+		return true;
+
+	char id[64];
+	if (!uri_id(uri, id, sizeof id))
+		return false;
+
+	/* auth_token writes into err on failure, so give it somewhere to write:
+	 * snprintf into NULL is undefined, not a no-op. */
+	char        aerr[128];
+	const char *token = auth_token(aerr, sizeof aerr);
+	if (!token)
+		return false;
+
+	char path[192];
+	snprintf(path, sizeof path,
+	         "/v1/playlists/%s?fields=name,owner(display_name)", id);
+
+	char         err[128];
+	http_response r;
+	if (!http_request(API_HOST, "GET", path, token, NULL, NULL, &r, err,
+	                  sizeof err))
+		return false;
+
+	if (r.status != 200 || !r.body || r.body_len == 0) {
+		/* A playlist can be deleted or made private after being played, which
+		 * shows up as 404/403. Not an error worth failing the whole list over. */
+		tl_log("playlist name %s: http %d", id, r.status);
+		http_free(&r);
+		return false;
+	}
+
+	const bool ok = json_get_str(r.body, r.body_len, "name", name, (size_t)namelen);
+	json_get_str(r.body, r.body_len, "owner.display_name", owner,
+	             (size_t)ownerlen);
+	http_free(&r);
+
+	if (ok && name[0])
+		namecache_put(uri, name, owner);
+
+	return ok && name[0];
+}
 
 player_result recents_fetch(recent_list *out, char *err, int errlen)
 {
@@ -68,14 +141,15 @@ player_result recents_fetch(recent_list *out, char *err, int errlen)
 
 	for (int i = 0; i < FETCH_LIMIT && out->count < RECENTS_MAX; i++) {
 		char p[96];
-		char album[128] = "", artist[128] = "", uri[128] = "", art[256] = "";
+		char album[128] = "", artist[128] = "", album_uri[128] = "",
+		     art[256] = "";
 
 		snprintf(p, sizeof p, "items[%d].track.album.name", i);
 		if (!json_doc_str(d, p, album, sizeof album))
 			break; /* ran out of items */
 
 		snprintf(p, sizeof p, "items[%d].track.album.uri", i);
-		json_doc_str(d, p, uri, sizeof uri);
+		json_doc_str(d, p, album_uri, sizeof album_uri);
 
 		/* Prefer the context the track was played from (a playlist, say) so
 		 * tapping resumes what the user was actually listening to; fall back to
@@ -84,7 +158,9 @@ player_result recents_fetch(recent_list *out, char *err, int errlen)
 		snprintf(p, sizeof p, "items[%d].context.uri", i);
 		json_doc_str(d, p, ctx, sizeof ctx);
 
-		const char *play_uri = ctx[0] ? ctx : uri;
+		const bool  is_playlist = strncmp(ctx, "spotify:playlist:", 17) == 0;
+		const char *play_uri    = is_playlist ? ctx : album_uri;
+
 		if (!play_uri[0])
 			continue; /* nothing to play; skip rather than send a bad body */
 
@@ -99,7 +175,9 @@ player_result recents_fetch(recent_list *out, char *err, int errlen)
 			json_doc_str(d, p, art, sizeof art);
 		}
 
-		/* Collapse consecutive plays from the same album. */
+		/* Collapse repeats of the same collection anywhere in the page, not
+		 * just consecutive ones: an album returned to later in the session is
+		 * still the same tile. */
 		bool dup = false;
 		for (int k = 0; k < out->count; k++) {
 			if (strcmp(out->items[k].context_uri, play_uri) == 0) {
@@ -110,26 +188,33 @@ player_result recents_fetch(recent_list *out, char *err, int errlen)
 		if (dup)
 			continue;
 
-		recent_item *it = &out->items[out->count++];
-
-		/* Label by what tapping will actually play. Spotify only gives the
-		 * context's *uri* here, not its name, so a playlist has to be
-		 * described by the track it was reached through - saying
-		 * "Album - Artist" over a playlist uri would be plainly wrong, and the
-		 * album name shown would not be what starts playing. */
-		const bool is_playlist = strncmp(play_uri, "spotify:playlist:", 17) == 0;
+		collection_item *it = &out->items[out->count++];
 
 		if (is_playlist) {
-			char track[128] = "";
-			snprintf(p, sizeof p, "items[%d].track.name", i);
-			json_doc_str(d, p, track, sizeof track);
-			snprintf(it->name, sizeof it->name, "%s",
-			         track[0] ? track : album);
-			snprintf(it->subtitle, sizeof it->subtitle, "Playlist - %s",
-			         artist);
+			char pname[128] = "", powner[128] = "";
+
+			if (playlist_name(play_uri, pname, sizeof pname, powner,
+			                  sizeof powner)) {
+				snprintf(it->name, sizeof it->name, "%s", pname);
+				snprintf(it->subtitle, sizeof it->subtitle, "Playlist - %s",
+				         powner[0] ? powner : artist);
+			} else {
+				/* Naming failed (deleted, private, or offline). Label it by the
+				 * track it was reached through rather than claiming it is an
+				 * album, which would be plainly wrong about what tapping does. */
+				snprintf(p, sizeof p, "items[%d].track.name", i);
+				char track[128] = "";
+				json_doc_str(d, p, track, sizeof track);
+				snprintf(it->name, sizeof it->name, "%s",
+				         track[0] ? track : album);
+				snprintf(it->subtitle, sizeof it->subtitle, "Playlist - %s",
+				         artist);
+			}
+			it->kind = COLLECTION_PLAYLIST;
 		} else {
 			snprintf(it->name, sizeof it->name, "%s", album);
 			snprintf(it->subtitle, sizeof it->subtitle, "Album - %s", artist);
+			it->kind = COLLECTION_ALBUM;
 		}
 
 		snprintf(it->art_url, sizeof it->art_url, "%s", art);
@@ -140,5 +225,113 @@ player_result recents_fetch(recent_list *out, char *err, int errlen)
 	http_free(&r);
 
 	tl_log("recents: %d distinct of %d fetched", out->count, FETCH_LIMIT);
+	return out->count > 0 ? PLAYER_OK : PLAYER_NOTHING_PLAYING;
+}
+
+player_result playlists_fetch(playlist_list *out, char *err, int errlen)
+{
+	memset(out, 0, sizeof *out);
+
+	const char *token = auth_token(err, errlen);
+	if (!token)
+		return PLAYER_AUTH_FAILED;
+
+	/* This endpoint honours `fields=`, unlike recently-played: dropping the
+	 * parts we never read takes the response from 52KB to 21KB, which is worth
+	 * having on a device parsing it by hand. */
+	/* No track counts requested: /me/playlists returns `tracks: null` for every
+	 * item regardless of what fields ask for, so the design's "84 tracks"
+	 * subtitle would cost one request per playlist. The owner is already here
+	 * and distinguishes your playlists from followed ones, which is the useful
+	 * part. */
+	char path[224];
+	snprintf(path, sizeof path,
+	         "/v1/me/playlists?limit=%d&fields=total,items(name,uri,images,"
+	         "owner(display_name))",
+	         PLAYLISTS_MAX);
+
+	http_response r;
+	if (!http_request(API_HOST, "GET", path, token, NULL, NULL, &r, err, errlen))
+		return PLAYER_ERROR;
+
+	if (r.status == 403) {
+		snprintf(err, errlen,
+		         "403 - token lacks playlist-read-private; re-run "
+		         "bootstrap_auth.py");
+		http_free(&r);
+		return PLAYER_FORBIDDEN;
+	}
+	if (r.status != 200 || !r.body || r.body_len == 0) {
+		snprintf(err, errlen, "playlists http %d", r.status);
+		http_free(&r);
+		return PLAYER_ERROR;
+	}
+
+	const u64 t0     = osGetTime();
+	int       needed = 0;
+	json_doc *d      = json_doc_parse(r.body, r.body_len, &needed);
+	if (!d) {
+		snprintf(err, errlen, "playlists parse failed (tokens %d, %u bytes)",
+		         needed, (unsigned)r.body_len);
+		http_free(&r);
+		return PLAYER_ERROR;
+	}
+
+	tl_timing("playlists parse: %u bytes %d tokens in %llums",
+	          (unsigned)r.body_len, json_doc_tokens(d),
+	          (unsigned long long)(osGetTime() - t0));
+
+	long total = 0;
+	if (json_doc_int(d, "total", &total))
+		out->total = (int)total;
+
+	for (int i = 0; i < PLAYLISTS_MAX && out->count < PLAYLISTS_MAX; i++) {
+		char p[96];
+		char name[128] = "", uri[128] = "", owner[128] = "", art[256] = "";
+
+		snprintf(p, sizeof p, "items[%d].name", i);
+		if (!json_doc_str(d, p, name, sizeof name))
+			break; /* ran out of items */
+
+		snprintf(p, sizeof p, "items[%d].uri", i);
+		if (!json_doc_str(d, p, uri, sizeof uri) || !uri[0])
+			continue;
+
+		snprintf(p, sizeof p, "items[%d].owner.display_name", i);
+		json_doc_str(d, p, owner, sizeof owner);
+
+		/* Playlist images are irregular in a way album covers are not: some
+		 * have three sizes, some a single mosaic with no dimensions reported,
+		 * and some none at all. Try the smallest-last convention first, then
+		 * the only entry, then give up and leave art_url empty for the caller
+		 * to draw a placeholder. */
+		snprintf(p, sizeof p, "items[%d].images[2].url", i);
+		if (!json_doc_str(d, p, art, sizeof art)) {
+			snprintf(p, sizeof p, "items[%d].images[0].url", i);
+			json_doc_str(d, p, art, sizeof art);
+		}
+
+		collection_item *it = &out->items[out->count++];
+
+		snprintf(it->name, sizeof it->name, "%s", name);
+
+		if (owner[0])
+			snprintf(it->subtitle, sizeof it->subtitle, "Playlist - %s", owner);
+		else
+			snprintf(it->subtitle, sizeof it->subtitle, "Playlist");
+
+		snprintf(it->art_url, sizeof it->art_url, "%s", art);
+		snprintf(it->context_uri, sizeof it->context_uri, "%s", uri);
+		it->kind = COLLECTION_PLAYLIST;
+
+		/* Seed the name cache: these are the same uris recently-played refers
+		 * to, so filling it here saves a request per playlist later. */
+		namecache_put(uri, name, owner);
+	}
+
+	json_doc_free(d);
+	http_free(&r);
+
+	tl_log("playlists: %d of %d total", out->count, out->total);
 	return out->count > 0 ? PLAYER_OK : PLAYER_NOTHING_PLAYING;
 }

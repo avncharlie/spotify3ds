@@ -51,8 +51,23 @@ static bool playlist_meta(const char *uri, char *name, int namelen, char *owner,
 	owner[0] = '\0';
 	art[0]   = '\0';
 
-	if (namecache_get(uri, name, namelen, owner, ownerlen, art, artlen))
+	/* A hit is only useful if it has the artwork too. Entries written before
+	 * the art column existed read back with an empty url, and returning them
+	 * as-is stuck those playlists on the wrong cover permanently: the cache
+	 * answered, so the request that would have filled it never ran. Treating
+	 * that as a miss lets an old cache heal itself on the next launch.
+	 *
+	 * A playlist genuinely without art re-requests once per launch as a
+	 * result. That is a handful of requests at most, and only for playlists
+	 * that have no image to find. */
+	if (namecache_get(uri, name, namelen, owner, ownerlen, art, artlen) &&
+	    art[0])
 		return true;
+
+	/* Fall through to the fetch, discarding the partial hit. */
+	name[0]  = '\0';
+	owner[0] = '\0';
+	art[0]   = '\0';
 
 	char id[64];
 	if (!uri_id(uri, id, sizeof id))

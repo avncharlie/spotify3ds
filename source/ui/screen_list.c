@@ -552,13 +552,13 @@ void screen_list_draw(const screen_list_args *a)
 	        TY_ROW_NAME, 145.0f, CLR_NAME);
 
 	const bool find_pressed = a->pressed_id == LIST_BTN_FIND;
-	rounded_rect(240, 3, 74, 24, 6,
+	rounded_rect(252, 3, 62, 24, 6,
 	             find_pressed ? CLR_GUTTER_PRESS : CLR_GUTTER);
 	const u32 find_clr = find_pressed ? CLR_GREEN_PRESS : CLR_SUB;
-	ui_disc(251, 13, 5, find_clr);
-	ui_disc(251, 13, 3, find_pressed ? CLR_GUTTER_PRESS : CLR_GUTTER);
-	C2D_DrawLine(254.5f, 16.5f, find_clr, 259, 21, find_clr, 2, 0);
-	ui_text(a->buf, "FIND", 264,
+	ui_disc(263, 13, 5, find_clr);
+	ui_disc(263, 13, 3, find_pressed ? CLR_GUTTER_PRESS : CLR_GUTTER);
+	C2D_DrawLine(266.5f, 16.5f, find_clr, 271, 21, find_clr, 2, 0);
+	ui_text(a->buf, "FIND", 276,
 	        ui_baseline((LIST_HEADER_H - ui_px(TY_ROW_SUB)) / 2, TY_ROW_SUB),
 	        TY_ROW_SUB, 44, find_clr);
 

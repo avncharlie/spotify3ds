@@ -12,6 +12,7 @@
 #include "spotify/player.h"
 #include "testlog.h"
 #include "ui/touch.h"
+#include "ui/ui.h"
 #include "worker.h"
 
 #define PHASE 6
@@ -270,6 +271,7 @@ int main(int argc, char **argv)
 	C3D_Init(C3D_DEFAULT_CMDBUF_SIZE);
 	C2D_Init(C2D_DEFAULT_MAX_OBJECTS);
 	C2D_Prepare();
+	ui_init(); /* derives the type scale from the system font; needs C2D up */
 
 	tl_init(PHASE);
 
@@ -310,8 +312,10 @@ int main(int argc, char **argv)
 
 		/* Must come after link3dsStdio or the numbers only reach the SD log
 		 * and never the host. */
-		if (g_smoketest)
+		if (g_smoketest) {
 			artcache_probe();
+			ui_font_probe();
+		}
 	}
 
 	if (!net_up) {

@@ -1,6 +1,26 @@
 #include "touch.h"
 
 #include <3ds.h>
+#include <stdlib.h>
+
+void tb_reset(touch_builder *tb)
+{
+	tb->n = 0;
+}
+
+void tb_add(touch_builder *tb, float x, float y, float w, float h, int id)
+{
+	if (tb->n >= TOUCH_MAX_RECTS)
+		return; /* silently drop rather than corrupt: a missing hit area is a
+		         * far milder failure than an overrun */
+	tb->rects[tb->n++] = (touch_rect){x, y, w, h, id};
+}
+
+void tb_add_hit(touch_builder *tb, float cx, float cy, float min_size, int id)
+{
+	const float s = min_size < 44.0f ? 44.0f : min_size;
+	tb_add(tb, cx - s / 2.0f, cy - s / 2.0f, s, s, id);
+}
 
 int touch_hit(const touch_rect *rects, int nrects, int x, int y)
 {
@@ -22,6 +42,8 @@ void touch_update(touch_state *t, const touch_rect *rects, int nrects)
 	t->pressed  = false;
 	t->released = false;
 	t->clicked  = -1;
+	t->dx       = 0;
+	t->dy       = 0;
 
 	if (down) {
 		/* Only read coordinates while held: on the release frame the hardware
@@ -29,6 +51,10 @@ void touch_update(touch_state *t, const touch_rect *rects, int nrects)
 		touchPosition tp;
 		hidTouchRead(&tp);
 		if (tp.px || tp.py) {
+			if (!hit) {
+				t->dx = (int)tp.px - t->px;
+				t->dy = (int)tp.py - t->py;
+			}
 			t->px = tp.px;
 			t->py = tp.py;
 		}
@@ -37,7 +63,17 @@ void touch_update(touch_state *t, const touch_rect *rects, int nrects)
 	if (hit) {
 		t->down     = true;
 		t->pressed  = true;
+		t->dragging = false;
+		t->start_px = t->px;
+		t->start_py = t->py;
 		t->press_id = touch_hit(rects, nrects, t->px, t->py);
+	}
+
+	if (down && !t->dragging) {
+		const int mx = abs(t->px - t->start_px);
+		const int my = abs(t->py - t->start_py);
+		if (mx > TOUCH_SLOP || my > TOUCH_SLOP)
+			t->dragging = true;
 	}
 
 	if (up) {
@@ -45,10 +81,13 @@ void touch_update(touch_state *t, const touch_rect *rects, int nrects)
 		t->released = true;
 
 		/* Fire only if the release lands in the same rect as the press, so
-		 * sliding off cancels. */
-		const int rel = touch_hit(rects, nrects, t->px, t->py);
-		if (rel >= 0 && rel == t->press_id)
-			t->clicked = rel;
+		 * sliding off cancels - and never after a drag, or scrolling a list
+		 * would play whatever row the finger lifted over. */
+		if (!t->dragging) {
+			const int rel = touch_hit(rects, nrects, t->px, t->py);
+			if (rel >= 0 && rel == t->press_id)
+				t->clicked = rel;
+		}
 
 		t->press_id = -1;
 	}

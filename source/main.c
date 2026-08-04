@@ -42,16 +42,22 @@
 /* Button ids */
 enum { BTN_PREV = 0, BTN_PLAY, BTN_NEXT, BTN_SHUFFLE, BTN_SCRUB };
 
-/* Hit rects, deliberately larger than the drawn artwork: the screen is
- * resistive and pressed with a thumb. */
-static const touch_rect g_rects[] = {
-	{  50.0f,  76.0f,  60.0f, 60.0f, BTN_PREV    },
-	{ 124.0f,  66.0f,  72.0f, 80.0f, BTN_PLAY    },
-	{ 210.0f,  76.0f,  60.0f, 60.0f, BTN_NEXT    },
-	{ 132.0f, 200.0f,  56.0f, 40.0f, BTN_SHUFFLE },
-	{  16.0f, 156.0f, 288.0f, 40.0f, BTN_SCRUB   },
-};
-#define NRECTS ((int)(sizeof g_rects / sizeof g_rects[0]))
+/* Hit rects are registered per frame by the drawing code (see touch.h). This
+ * frame's set: */
+static touch_builder g_tb;
+
+/* Same geometry as the previous static table, rebuilt each frame. Registered
+ * centre-outward so the play button wins any pixel contested with its
+ * neighbours. */
+static void register_player_rects(touch_builder *tb)
+{
+	tb_reset(tb);
+	tb_add(tb, 124.0f,  66.0f,  72.0f, 80.0f, BTN_PLAY);
+	tb_add(tb,  50.0f,  76.0f,  60.0f, 60.0f, BTN_PREV);
+	tb_add(tb, 210.0f,  76.0f,  60.0f, 60.0f, BTN_NEXT);
+	tb_add(tb, 132.0f, 200.0f,  56.0f, 40.0f, BTN_SHUFFLE);
+	tb_add(tb,  16.0f, 156.0f, 288.0f, 40.0f, BTN_SCRUB);
+}
 
 /* Scrubber geometry (drawn, not the hit rect) */
 #define BAR_X 20.0f
@@ -345,7 +351,8 @@ int main(int argc, char **argv)
 		if (hidKeysDown() & KEY_START)
 			break;
 
-		touch_update(&touch, g_rects, NRECTS);
+		register_player_rects(&g_tb);
+		touch_update(&touch, g_tb.rects, g_tb.n);
 		worker_get(&snap);
 
 		/* Re-base the interpolation clock whenever a poll brings new data. */

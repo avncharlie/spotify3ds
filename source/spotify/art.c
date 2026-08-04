@@ -10,7 +10,6 @@
 #include "../net/http.h"
 #include "../testlog.h"
 
-#define ART_TEX_SIZE 256 /* power of two, >= decoded size */
 
 /* --- libjpeg error handling ---------------------------------------------
  * The default handler calls exit(), which would kill the app on a truncated
@@ -47,7 +46,7 @@ static inline u32 morton_offset(u32 x, u32 y)
 	return i;
 }
 
-static void tile_rgba(const u8 *src, int src_w, int src_h, u8 *dst, int dim)
+void art_tile_rgba(const u8 *src, int src_w, int src_h, u8 *dst, int dim)
 {
 	/* Transparent background so non-square art letterboxes cleanly. */
 	memset(dst, 0, (size_t)dim * dim * 4);
@@ -79,7 +78,7 @@ static void tile_rgba(const u8 *src, int src_w, int src_h, u8 *dst, int dim)
  * little. Very dark and blown-out pixels are skipped so black borders and
  * white backgrounds do not wash the result out.
  */
-static void extract_accent(const u8 *rgba, int w, int h, album_art *a)
+void art_accent_of(const u8 *rgba, int w, int h, album_art *a)
 {
 	u64 acc_r = 0, acc_g = 0, acc_b = 0, acc_w = 0;
 
@@ -272,7 +271,7 @@ bool art_upload(album_art *a, const unsigned char *rgba, int w, int h,
 	}
 
 	album_art staged = {0};
-	extract_accent(rgba, w, h, &staged);
+	art_accent_of(rgba, w, h, &staged);
 
 	u8 *tiled = linearAlloc((size_t)ART_TEX_SIZE * ART_TEX_SIZE * 4);
 	if (!tiled) {
@@ -280,7 +279,20 @@ bool art_upload(album_art *a, const unsigned char *rgba, int w, int h,
 		return false;
 	}
 
-	tile_rgba(rgba, w, h, tiled, ART_TEX_SIZE);
+	art_tile_rgba(rgba, w, h, tiled, ART_TEX_SIZE);
+
+	return art_upload_tiled(a, tiled, w, h, staged.accent_r, staged.accent_g,
+	                        staged.accent_b, url, err, errlen);
+}
+
+bool art_upload_tiled(album_art *a, u8 *tiled, int w, int h, u8 accent_r,
+                      u8 accent_g, u8 accent_b, const char *url, char *err,
+                      int errlen)
+{
+	if (!tiled) {
+		snprintf(err, errlen, "no texture data");
+		return false;
+	}
 
 	art_free(a); /* release any previous texture before replacing it */
 
@@ -310,9 +322,9 @@ bool art_upload(album_art *a, const unsigned char *rgba, int w, int h,
 	a->image.subtex = &a->sub;
 	a->src_w        = w;
 	a->src_h        = h;
-	a->accent_r     = staged.accent_r;
-	a->accent_g     = staged.accent_g;
-	a->accent_b     = staged.accent_b;
+	a->accent_r     = accent_r;
+	a->accent_g     = accent_g;
+	a->accent_b     = accent_b;
 	a->valid        = true;
 	snprintf(a->url, sizeof a->url, "%s", url);
 

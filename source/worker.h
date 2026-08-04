@@ -57,12 +57,25 @@ void worker_request_poll(void);
  * upload happens on the main thread, which is where it has to happen. */
 
 typedef struct {
-	unsigned char *rgba;   /* malloc'd, caller takes ownership */
-	int            w, h;
-	unsigned       fetch_ms;
-	unsigned       decode_ms;
-	char           url[256];
+	/* Exactly one of these is ever non-NULL, and they need different frees:
+	 * rgba is malloc'd (decoded, needs tiling), tiled is linearAlloc'd (from
+	 * the SD cache, ready for the GPU). Always release via art_payload_free
+	 * rather than freeing a field directly. */
+	unsigned char *rgba;
+	unsigned char *tiled;
+
+	int      w, h;
+	unsigned fetch_ms;
+	unsigned decode_ms;
+	unsigned cache_ms;
+	bool     from_cache;
+	unsigned char accent_r, accent_g, accent_b;
+	char     url[256];
 } art_payload;
+
+/* Release whichever buffer the payload holds and blank it. Safe on an empty
+ * payload, and safe to call twice. */
+void art_payload_free(art_payload *p);
 
 /* Queue a fetch. Ignored if that URL is already loaded or in flight. */
 void worker_request_art(const char *url);

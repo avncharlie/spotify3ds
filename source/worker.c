@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "spotify/art.h"
+#include "spotify/artcache.h"
 #include "spotify/auth.h"
 #include "testlog.h"
 
@@ -83,6 +84,14 @@ static void set_fatal(const char *what, const char *hint)
 }
 
 static void do_art(void);
+
+/* Short label for logs: the start of the URL's content hash is enough to
+ * correlate a hit with a miss without dumping a 70-char URL every time. */
+static const char *want_key8(const char *url)
+{
+	const char *slash = strrchr(url, '/');
+	return slash ? slash + 1 : url;
+}
 
 static bool pop_cmd(worker_cmd *cmd, long *arg)
 {
@@ -386,37 +395,99 @@ static void do_art(void)
 	snprintf(s_art_inflight, sizeof s_art_inflight, "%s", want);
 	LightLock_Unlock(&s_lock);
 
-	unsigned char *rgba = NULL;
-	int            w = 0, h = 0;
-	unsigned       fetch_ms = 0, decode_ms = 0;
-	char           err[128];
+	art_payload p;
+	memset(&p, 0, sizeof p);
+	snprintf(p.url, sizeof p.url, "%s", want);
 
-	const u64 t0 = osGetTime();
-	if (!art_fetch_decode(want, &rgba, &w, &h, &fetch_ms, &decode_ms, err,
-	                      sizeof err)) {
-		tl_log("art failed: %s", err);
-		return;
+	/* --- cache first -------------------------------------------------- */
+	u8      *tiled = NULL;
+	int      cw = 0, ch = 0;
+	u8       ar = 0, ag = 0, ab = 0;
+	unsigned read_ms = 0;
+
+	if (artcache_load(want, &tiled, &cw, &ch, &ar, &ag, &ab, &read_ms)) {
+		p.tiled      = tiled;
+		p.w          = cw;
+		p.h          = ch;
+		p.accent_r   = ar;
+		p.accent_g   = ag;
+		p.accent_b   = ab;
+		p.cache_ms   = read_ms;
+		p.from_cache = true;
+		tl_timing("art cache HIT key=%.8s read=%ums", want_key8(want), read_ms);
+	} else {
+		unsigned char *rgba = NULL;
+		int            w = 0, h = 0;
+		unsigned       fetch_ms = 0, decode_ms = 0;
+		char           err[128];
+
+		if (!art_fetch_decode(want, &rgba, &w, &h, &fetch_ms, &decode_ms, err,
+		                      sizeof err)) {
+			tl_log("art failed: %s", err);
+			return;
+		}
+
+		p.rgba      = rgba;
+		p.w         = w;
+		p.h         = h;
+		p.fetch_ms  = fetch_ms;
+		p.decode_ms = decode_ms;
+		tl_timing("art cache MISS key=%.8s fetch=%ums decode=%ums",
+		          want_key8(want), fetch_ms, decode_ms);
 	}
 
-	tl_timing("art fetch=%ums decode=%ums total=%lldms", fetch_ms, decode_ms,
-	          (long long)(osGetTime() - t0));
+	/* Keep our own copy of the pixels for the cache write. Once the payload is
+	 * published the render thread owns and may free it at any moment, so it
+	 * must not be read afterwards. */
+	unsigned char *to_store = NULL;
+	int            store_w = 0, store_h = 0;
+	if (!p.from_cache && p.rgba) {
+		const size_t n = (size_t)p.w * p.h * 4;
+		to_store       = malloc(n);
+		if (to_store) {
+			memcpy(to_store, p.rgba, n);
+			store_w = p.w;
+			store_h = p.h;
+		}
+	}
 
 	LightLock_Lock(&s_lock);
-	/* If the user skipped again while this was downloading, drop it. */
+	/* If the user skipped again while this was loading, drop it. */
 	if (strcmp(want, s_art_want) != 0) {
 		LightLock_Unlock(&s_lock);
-		free(rgba);
+		art_payload_free(&p);
+		free(to_store);
 		return;
 	}
-	free(s_art_ready.rgba); /* discard an unclaimed older payload */
-	s_art_ready.rgba      = rgba;
-	s_art_ready.w         = w;
-	s_art_ready.h         = h;
-	s_art_ready.fetch_ms  = fetch_ms;
-	s_art_ready.decode_ms = decode_ms;
-	snprintf(s_art_ready.url, sizeof s_art_ready.url, "%s", want);
-	s_art_have = true;
+	art_payload_free(&s_art_ready); /* discard an unclaimed older payload */
+	s_art_ready = p;
+	s_art_have  = true;
 	LightLock_Unlock(&s_lock);
+
+	/* Store only after publishing: a write costs ~140ms on hardware and must
+	 * not sit between the download completing and the cover appearing. */
+	if (to_store) {
+		album_art tmp;
+		memset(&tmp, 0, sizeof tmp);
+		art_accent_of(to_store, store_w, store_h, &tmp);
+
+		const u64 ts = osGetTime();
+		artcache_store(want, to_store, store_w, store_h, tmp.accent_r,
+		               tmp.accent_g, tmp.accent_b);
+		tl_timing("art cache store=%lldms", (long long)(osGetTime() - ts));
+		free(to_store);
+	}
+}
+
+void art_payload_free(art_payload *p)
+{
+	if (!p)
+		return;
+	free(p->rgba);
+	if (p->tiled)
+		linearFree(p->tiled);
+	p->rgba  = NULL;
+	p->tiled = NULL;
 }
 
 void worker_request_poll(void)

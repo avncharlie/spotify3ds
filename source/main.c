@@ -308,10 +308,8 @@ int main(int argc, char **argv)
 		int lfd = link3dsStdio();
 		emit_banner(lfd);
 
-		/* Art cache phase 1: measure SD throughput before building anything
-		 * that depends on it. Must come *after* link3dsStdio, or the numbers
-		 * only reach the SD log and never the host. Azahar reads from the host
-		 * filesystem, so only the hardware figures mean anything. */
+		/* Must come after link3dsStdio or the numbers only reach the SD log
+		 * and never the host. */
 		if (g_smoketest)
 			artcache_probe();
 	}
@@ -325,6 +323,7 @@ int main(int argc, char **argv)
 		 * "Nothing playing" state, which is what made this fail silently. */
 		worker_set_fatal("Internal error", err);
 	} else {
+		artcache_init();
 		tl_step("worker_start", 1, "network thread started");
 	}
 
@@ -433,20 +432,38 @@ int main(int argc, char **argv)
 			art_payload art;
 			if (worker_take_art(&art)) {
 				char aerr[128];
-				if (art_upload(&g_art, art.rgba, art.w, art.h, art.url, aerr,
-				               sizeof aerr)) {
-					g_art.decode_ms = art.decode_ms;
-					tl_timing("art visible: fetch=%ums decode=%ums "
-					          "cmd->visible=%lldms",
-					          art.fetch_ms, art.decode_ms,
+				bool ok;
+
+				if (art.from_cache) {
+					/* Already tiled on disk, so this skips the Morton pass and
+					 * the accent extraction as well as network and decode.
+					 * art_upload_tiled takes ownership of the buffer. */
+					ok = art_upload_tiled(&g_art, art.tiled, art.w, art.h,
+					                      art.accent_r, art.accent_g,
+					                      art.accent_b, art.url, aerr,
+					                      sizeof aerr);
+					if (ok)
+						art.tiled = NULL; /* consumed */
+				} else {
+					ok = art_upload(&g_art, art.rgba, art.w, art.h, art.url,
+					                aerr, sizeof aerr);
+					if (ok)
+						g_art.decode_ms = art.decode_ms;
+				}
+
+				if (ok)
+					tl_timing("art visible: source=%s fetch=%ums decode=%ums "
+					          "cache=%ums cmd->visible=%lldms",
+					          art.from_cache ? "cache" : "net", art.fetch_ms,
+					          art.decode_ms, art.cache_ms,
 					          g_cmd_sent
 					              ? (long long)(osGetTime() - g_cmd_sent)
 					              : -1);
-					g_cmd_sent = 0;
-				} else {
+				else
 					tl_log("art upload failed: %s", aerr);
-				}
-				free(art.rgba);
+
+				g_cmd_sent = 0;
+				art_payload_free(&art);
 			}
 		}
 

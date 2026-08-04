@@ -50,4 +50,8 @@ player_result player_repeat(repeat_mode mode, char *err, int errlen);
 /* Next state in the off -> context -> track -> off cycle. */
 repeat_mode repeat_next(repeat_mode m);
 
+/* Start playback from a context (album or playlist uri). */
+player_result player_play_context(const char *context_uri, char *err,
+                                  int errlen);
+
 const char *player_result_str(player_result r);

@@ -190,6 +190,25 @@ repeat_mode repeat_next(repeat_mode m)
 	}
 }
 
+player_result player_play_context(const char *context_uri, char *err,
+                                  int errlen)
+{
+	if (!context_uri || !context_uri[0]) {
+		snprintf(err, errlen, "no context uri");
+		return PLAYER_ERROR;
+	}
+
+	char body[192];
+	snprintf(body, sizeof body, "{\"context_uri\":\"%s\"}", context_uri);
+
+	http_response r;
+	const player_result pr = api_call("PUT", "/v1/me/player/play",
+	                                  "application/json", body, &r, err, errlen);
+	if (pr == PLAYER_OK || r.body)
+		http_free(&r);
+	return pr;
+}
+
 player_result player_repeat(repeat_mode mode, char *err, int errlen)
 {
 	const char *s = mode == REPEAT_TRACK     ? "track"

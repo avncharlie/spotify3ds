@@ -61,6 +61,8 @@ static bool s_poll_requested;
 
 /* Album art in flight. s_art_want is what the UI asked for; s_art_ready holds a
  * finished download waiting to be claimed. Guarded by s_lock. */
+static char        s_play_uri[128]; /* pending CMD_PLAY_CONTEXT target */
+
 static recent_list s_recents;
 static bool        s_recents_wanted = true; /* fetch once at startup */
 static u64         s_recents_at;            /* when last fetched */
@@ -164,6 +166,14 @@ static void do_cmd(worker_cmd cmd, long arg)
 		case CMD_SEEK:    pr = player_seek(arg, err, sizeof err); break;
 		case CMD_SHUFFLE: pr = player_shuffle(arg != 0, err, sizeof err); break;
 		case CMD_REPEAT:  pr = player_repeat((repeat_mode)arg, err, sizeof err); break;
+		case CMD_PLAY_CONTEXT: {
+			char uri[128];
+			LightLock_Lock(&s_lock);
+			snprintf(uri, sizeof uri, "%s", s_play_uri);
+			LightLock_Unlock(&s_lock);
+			pr = player_play_context(uri, err, sizeof err);
+			break;
+		}
 		default: return;
 	}
 
@@ -514,6 +524,18 @@ int worker_get_recents(recent_list *out)
 	const int n = s_recents.count;
 	LightLock_Unlock(&s_lock);
 	return n;
+}
+
+void worker_play_context(const char *context_uri)
+{
+	if (!context_uri || !context_uri[0])
+		return;
+
+	ensure_lock();
+	LightLock_Lock(&s_lock);
+	snprintf(s_play_uri, sizeof s_play_uri, "%s", context_uri);
+	LightLock_Unlock(&s_lock);
+	worker_post(CMD_PLAY_CONTEXT, 0);
 }
 
 void worker_request_recents(void)

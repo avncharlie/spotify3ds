@@ -11,6 +11,7 @@
 #include "spotify/auth.h"
 #include "spotify/player.h"
 #include "testlog.h"
+#include "ui/screen_list.h"
 #include "ui/screen_player.h"
 #include "ui/screen_top.h"
 #include "ui/touch.h"
@@ -74,6 +75,11 @@ static album_art g_art;
 /* KEY_Y hides the cover and switches the top screen to the large-title
  * layout. The top screen has no digitizer, so this has to be a button. */
 static bool g_art_hidden;
+
+/* Which view the bottom screen is showing. */
+typedef enum { VIEW_PLAYER = 0, VIEW_LIST } bottom_view;
+static bottom_view g_view;
+static float       g_list_scroll;
 
 /* True when running under the headless harness, which needs the app to quit by
  * itself. On a real console the app must stay up until the user exits. */
@@ -286,8 +292,17 @@ int main(int argc, char **argv)
 
 		/* Exercise the art-hidden layout headlessly too, so 2A cannot rot
 		 * unnoticed: flip it for a stretch in the middle of a smoketest. */
-		if (g_smoketest)
+		if (g_smoketest) {
 			g_art_hidden = (frames > 480 && frames < 600);
+			/* And the list view, so its draw path runs in every automated run
+			 * rather than only when someone taps ALL by hand. */
+			if (frames == 300)
+				g_view = VIEW_LIST;
+			if (frames == 420) {
+				tl_step("list_view", 1, "rendered %d frames", 120);
+				g_view = VIEW_PLAYER;
+			}
+		}
 
 		/* Hit rects come from the previous frame's draw, which is what the
 		 * user was actually looking at when they touched. */
@@ -319,7 +334,8 @@ int main(int argc, char **argv)
 		const long duration = snap.have_state ? snap.state.duration_ms : 0;
 
 		/* --- input ---------------------------------------------------- */
-		if (touch.pressed && touch.press_id == BTN_SCRUB && duration > 0)
+		if (g_view == VIEW_PLAYER && touch.pressed &&
+		    touch.press_id == BTN_SCRUB && duration > 0)
 			g_scrub = SCRUB_DRAGGING;
 
 		if (g_scrub == SCRUB_DRAGGING && touch.down && duration > 0) {
@@ -337,7 +353,54 @@ int main(int argc, char **argv)
 			g_scrub_until = osGetTime() + SCRUB_COMMIT_MS;
 		}
 
-		if (touch.clicked >= 0 && touch.clicked != BTN_SCRUB) {
+		/* --- list view input ------------------------------------------- */
+		if (g_view == VIEW_LIST) {
+			recent_list rl;
+			const int   n = worker_get_recents(&rl);
+
+			/* 1:1 drag while held. No momentum: four and a half visible rows
+			 * of a handful is a short list, and a flick would overshoot it. */
+			if (touch.down && touch.dragging)
+				g_list_scroll -= (float)touch.dy;
+
+			const float maxs = screen_list_max_scroll(n);
+			if (g_list_scroll < 0.0f)
+				g_list_scroll = 0.0f;
+			if (g_list_scroll > maxs)
+				g_list_scroll = maxs;
+
+			if (touch.clicked == LIST_BTN_BACK) {
+				g_view = VIEW_PLAYER;
+			} else if (touch.clicked >= LIST_ROW0 &&
+			           touch.clicked < LIST_ROW0 + n) {
+				const int idx = touch.clicked - LIST_ROW0;
+				tl_log("list: play %s", rl.items[idx].context_uri);
+				worker_play_context(rl.items[idx].context_uri);
+				/* Back to the player, where the result of the tap is visible. */
+				g_view = VIEW_PLAYER;
+				opt_set(&g_opt_play, 1);
+			}
+		}
+
+		if (g_view == VIEW_PLAYER && touch.clicked == BTN_SHELF_ALL) {
+			g_view        = VIEW_LIST;
+			g_list_scroll = 0.0f;
+		}
+
+		if (g_view == VIEW_PLAYER && touch.clicked >= BTN_SHELF0 &&
+		    touch.clicked < BTN_SHELF0 + SHELF_TILES) {
+			recent_list rl;
+			const int   n   = worker_get_recents(&rl);
+			const int   idx = touch.clicked - BTN_SHELF0;
+			if (idx < n) {
+				tl_log("shelf: play %s", rl.items[idx].context_uri);
+				worker_play_context(rl.items[idx].context_uri);
+				opt_set(&g_opt_play, 1);
+			}
+		}
+
+		if (g_view == VIEW_PLAYER && touch.clicked >= 0 &&
+		    touch.clicked != BTN_SCRUB) {
 			switch (touch.clicked) {
 				case BTN_PLAY:
 					opt_set(&g_opt_play, !playing);
@@ -527,7 +590,20 @@ int main(int argc, char **argv)
 		C2D_TargetClear(bottom, CLR_BOT_BG);
 		C2D_SceneBegin(bottom);
 
-		{
+		if (g_view == VIEW_LIST) {
+			recent_list rl;
+			worker_get_recents(&rl);
+
+			const screen_list_args la = {
+				.buf        = textbuf,
+				.tb         = &g_tb,
+				.items      = &rl,
+				.art        = NULL,
+				.scroll     = g_list_scroll,
+				.pressed_id = touch.down ? touch.press_id : -1,
+			};
+			screen_list_draw(&la);
+		} else {
 			screen_player_args pa = {
 				.buf         = textbuf,
 				.tb          = &g_tb,

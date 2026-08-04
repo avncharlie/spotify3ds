@@ -22,6 +22,7 @@ typedef enum {
 	CMD_SEEK,
 	CMD_SHUFFLE,
 	CMD_REPEAT,
+	CMD_PLAY_CONTEXT,
 } worker_cmd;
 
 typedef struct {
@@ -62,6 +63,10 @@ int worker_get_recents(recent_list *out);
 
 /* Ask for a refresh on the next worker tick. */
 void worker_request_recents(void);
+
+/* Start playback from a recents entry. The uri is copied, so the caller's
+ * buffer need not outlive the call. */
+void worker_play_context(const char *context_uri);
 
 /* --- album art -------------------------------------------------------
  * Fetching and decoding art costs ~1.5s, almost all of it network. Doing that

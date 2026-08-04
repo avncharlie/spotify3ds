@@ -73,32 +73,55 @@ static void draw_next(float cx, float cy, u32 clr)
 	C2D_DrawRectSolid(cx + 6.0f, cy - 8.0f, 0.0f, 3.0f, 16.0f, clr);
 }
 
-/* Two crossing arrows. At this size the crossing reads better as two straight
- * runs than as the mockup's curved SVG paths, which would need many segments
- * to avoid looking ragged. */
+/* Two paths that cross in the middle and exit right as arrows, like Spotify's.
+ *
+ * Each path is a short horizontal run on the left, a diagonal through the
+ * centre, then a short run out to its arrowhead - so the two strands visibly
+ * swap sides, which is what makes it read as "shuffle" rather than as an X.
+ * The earlier version ran the diagonals nearly parallel and lost that. */
 static void draw_shuffle_glyph(float cx, float cy, u32 clr)
 {
-	C2D_DrawLine(cx - 8.5f, cy - 4.0f, clr, cx + 4.0f, cy + 4.0f, clr, 1.8f,
-	             0.0f);
-	C2D_DrawLine(cx - 8.5f, cy + 4.0f, clr, cx + 4.0f, cy - 4.0f, clr, 1.8f,
-	             0.0f);
-	tri_right(cx + 3.0f, cy - 7.5f, 4.5f, 7.0f, clr);
-	tri_right(cx + 3.0f, cy + 0.5f, 4.5f, 7.0f, clr);
+	const float t   = 2.0f;  /* stroke */
+	const float x0  = cx - 10.0f;
+	const float x1  = cx - 5.0f;   /* diagonal starts */
+	const float x2  = cx + 4.0f;   /* diagonal ends */
+	const float x3  = cx + 7.0f;   /* arrowhead base */
+	const float dy  = 5.5f;
+
+	/* upper-left -> lower-right */
+	C2D_DrawRectSolid(x0, cy - dy - t / 2.0f, 0.0f, x1 - x0, t, clr);
+	C2D_DrawLine(x1, cy - dy, clr, x2, cy + dy, clr, t, 0.0f);
+	C2D_DrawRectSolid(x2, cy + dy - t / 2.0f, 0.0f, x3 - x2, t, clr);
+	tri_right(x3, cy + dy - 4.0f, 5.5f, 8.0f, clr);
+
+	/* lower-left -> upper-right */
+	C2D_DrawRectSolid(x0, cy + dy - t / 2.0f, 0.0f, x1 - x0, t, clr);
+	C2D_DrawLine(x1, cy + dy, clr, x2, cy - dy, clr, t, 0.0f);
+	C2D_DrawRectSolid(x2, cy - dy - t / 2.0f, 0.0f, x3 - x2, t, clr);
+	tri_right(x3, cy - dy - 4.0f, 5.5f, 8.0f, clr);
 }
 
-/* Rounded-rectangle loop with a return arrow. */
+/* A closed loop of uniform stroke, with one arrowhead sitting on the top edge.
+ *
+ * The previous version tried to hang a small tail off the corner, which at this
+ * size had too few pixels to read as anything and made the stroke look uneven.
+ * Every segment is now exactly `t` thick and the corners overlap rather than
+ * mitre, so the outline is continuous at any colour. */
 static void draw_repeat_glyph(float cx, float cy, u32 clr)
 {
-	const float w = 15.0f, h = 12.0f, t = 1.8f;
+	const float w = 17.0f, h = 13.0f, t = 2.0f;
 	const float x = cx - w / 2.0f, y = cy - h / 2.0f;
 
-	C2D_DrawRectSolid(x + 2.0f, y, 0.0f, w - 4.0f, t, clr);          /* top */
-	C2D_DrawRectSolid(x + 2.0f, y + h - t, 0.0f, w - 4.0f, t, clr);  /* bottom */
-	C2D_DrawRectSolid(x, y + 2.0f, 0.0f, t, h - 4.0f, clr);          /* left */
-	C2D_DrawRectSolid(x + w - t, y + 2.0f, 0.0f, t, h - 4.0f, clr);  /* right */
+	/* Horizontals span the full width; verticals fill between them. Drawing
+	 * them overlapping keeps the corners solid. */
+	C2D_DrawRectSolid(x, y, 0.0f, w, t, clr);                    /* top */
+	C2D_DrawRectSolid(x, y + h - t, 0.0f, w, t, clr);            /* bottom */
+	C2D_DrawRectSolid(x, y, 0.0f, t, h, clr);                    /* left */
+	C2D_DrawRectSolid(x + w - t, y, 0.0f, t, h, clr);            /* right */
 
-	/* Arrowhead where the loop restarts. */
-	tri_left(x + 1.0f, y - 2.5f, 5.0f, 6.0f, clr);
+	/* Arrowhead riding on the top edge, pointing the way the loop travels.
+	 * Sitting it on the stroke rather than off a corner gives it room. */
+	tri_right(x + w - 9.0f, y - 3.0f, 6.0f, 8.0f, clr);
 }
 
 static void draw_playpause(float cx, float cy, bool playing, bool pressed)
@@ -116,22 +139,33 @@ static void draw_playpause(float cx, float cy, bool playing, bool pressed)
 	}
 }
 
-/* Three bars plus ALL, the tile that opens the full list. */
+/* Three bars plus ALL, the tile that opens the full list.
+ *
+ * Centred by measuring the group rather than by hardcoded offsets, so it stays
+ * centred when the label size changes - which it already has twice. */
 static void draw_all_tile(C2D_TextBuf buf, float x, float y, bool pressed)
 {
 	C2D_DrawRectSolid(x, y, 0.0f, TILE, TILE,
 	                  pressed ? C2D_Color32(0x28, 0x28, 0x28, 0xFF) : CLR_TILE);
 
-	const float bx = x + (TILE - 18.0f) / 2.0f;
-	float       by = y + 14.0f;
+	const float bar_w = 18.0f, bar_h = 2.0f, bar_pitch = 5.0f;
+	const float bars_h = bar_pitch * 2.0f + bar_h; /* 3 bars */
+	const float gap    = 6.0f;
+	const float text_h = ui_px(TY_MICRO);
+
+	const float group_h = bars_h + gap + text_h;
+	const float top     = y + (TILE - group_h) / 2.0f;
+
+	float by = top;
 	for (int i = 0; i < 3; i++) {
-		C2D_DrawRectSolid(bx, by, 0.0f, 18.0f, 2.0f, CLR_BARS);
-		by += 5.0f;
+		C2D_DrawRectSolid(x + (TILE - bar_w) / 2.0f, by, 0.0f, bar_w, bar_h,
+		                  CLR_BARS);
+		by += bar_pitch;
 	}
 
 	const float tw = ui_text_width(buf, "ALL", TY_MICRO);
 	ui_text(buf, "ALL", x + (TILE - tw) / 2.0f,
-	        ui_baseline(y + TILE - 16.0f, TY_MICRO), TY_MICRO, TILE,
+	        ui_baseline(top + bars_h + gap, TY_MICRO), TY_MICRO, TILE,
 	        CLR_ALL_TXT);
 }
 

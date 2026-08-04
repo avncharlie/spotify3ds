@@ -23,8 +23,12 @@
 static const float s_role_px[TY_COUNT] = {
 	[TY_TITLE_L] = 34.0f, [TY_TITLE] = 21.0f,  [TY_ARTIST_L] = 19.0f,
 	[TY_ALBUM_L] = 15.0f, [TY_ARTIST] = 14.0f, [TY_ROW_NAME] = 11.0f,
-	[TY_ALBUM]   = 12.0f, [TY_ROW_SUB] = 8.0f, [TY_MICRO] = 7.0f,
+	[TY_ALBUM]   = 12.0f, [TY_ROW_SUB] = 10.0f, [TY_MICRO] = 7.0f,
 };
+/* TY_ROW_SUB carries the scrubber times and the list-row subtitles. The mockup
+ * puts it at 8px, which lands under the same legibility floor that forced the
+ * micro label up to 10: rendered, "1:23" was an unreadable smudge. 10px reads
+ * cleanly and still sits well below the row name. */
 
 static float s_scale[TY_COUNT];
 

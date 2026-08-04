@@ -11,6 +11,7 @@
 #include "spotify/auth.h"
 #include "spotify/player.h"
 #include "testlog.h"
+#include "ui/screen_player.h"
 #include "ui/screen_top.h"
 #include "ui/touch.h"
 #include "ui/ui.h"
@@ -40,30 +41,13 @@
 #define ART_Y 20.0f
 #define ART_D 200.0f
 
-/* Button ids */
-enum { BTN_PREV = 0, BTN_PLAY, BTN_NEXT, BTN_SHUFFLE, BTN_SCRUB };
-
 /* Hit rects are registered per frame by the drawing code (see touch.h). This
  * frame's set: */
 static touch_builder g_tb;
 
-/* Same geometry as the previous static table, rebuilt each frame. Registered
- * centre-outward so the play button wins any pixel contested with its
- * neighbours. */
-static void register_player_rects(touch_builder *tb)
-{
-	tb_reset(tb);
-	tb_add(tb, 124.0f,  66.0f,  72.0f, 80.0f, BTN_PLAY);
-	tb_add(tb,  50.0f,  76.0f,  60.0f, 60.0f, BTN_PREV);
-	tb_add(tb, 210.0f,  76.0f,  60.0f, 60.0f, BTN_NEXT);
-	tb_add(tb, 132.0f, 200.0f,  56.0f, 40.0f, BTN_SHUFFLE);
-	tb_add(tb,  16.0f, 156.0f, 288.0f, 40.0f, BTN_SCRUB);
-}
-
 /* Scrubber geometry (drawn, not the hit rect) */
-#define BAR_X 20.0f
-#define BAR_W 264.0f
-#define BAR_Y 178.0f
+/* Scrubber geometry comes from screen_player.h, so the bar the user drags is
+ * the bar that was drawn. */
 
 /* ---------------------------------------------------------------- state */
 
@@ -151,14 +135,6 @@ static void emit_banner(int link_fd)
 	}
 }
 
-static void fmt_time(long ms, char *out, int outlen)
-{
-	if (ms < 0)
-		ms = 0;
-	const long s = ms / 1000;
-	snprintf(out, outlen, "%ld:%02ld", s / 60, s % 60);
-}
-
 /* Effective progress: the drag position while scrubbing, otherwise the last
  * poll plus elapsed wall time. */
 static long effective_progress(const worker_snapshot *snap)
@@ -217,84 +193,6 @@ static repeat_mode effective_repeat(const worker_snapshot *snap)
 {
 	const long polled = snap->have_state ? (long)snap->state.repeat : REPEAT_OFF;
 	return (repeat_mode)opt_get(&g_opt_rep, polled);
-}
-
-/* ---------------------------------------------------------------- drawing */
-
-static void tri_right(float x, float y, float size, u32 clr)
-{
-	C2D_DrawTriangle(x, y, clr, x, y + size, clr, x + size * 0.85f,
-	                 y + size / 2, clr, 0.0f);
-}
-
-static void tri_left(float x, float y, float size, u32 clr)
-{
-	C2D_DrawTriangle(x + size * 0.85f, y, clr, x + size * 0.85f, y + size, clr,
-	                 x, y + size / 2, clr, 0.0f);
-}
-
-static void draw_prev(float cx, float cy, u32 clr)
-{
-	tri_left(cx - 11.0f, cy - 10.0f, 20.0f, clr);
-	C2D_DrawRectSolid(cx - 14.0f, cy - 10.0f, 0.0f, 3.0f, 20.0f, clr);
-}
-
-static void draw_next(float cx, float cy, u32 clr)
-{
-	tri_right(cx - 9.0f, cy - 10.0f, 20.0f, clr);
-	C2D_DrawRectSolid(cx + 11.0f, cy - 10.0f, 0.0f, 3.0f, 20.0f, clr);
-}
-
-static void draw_playpause(float cx, float cy, bool playing, u32 clr)
-{
-	if (playing) {
-		C2D_DrawRectSolid(cx - 9.0f, cy - 13.0f, 0.0f, 6.0f, 26.0f, clr);
-		C2D_DrawRectSolid(cx + 3.0f, cy - 13.0f, 0.0f, 6.0f, 26.0f, clr);
-	} else {
-		tri_right(cx - 9.0f, cy - 13.0f, 26.0f, clr);
-	}
-}
-
-/* Two interleaved arrows: enough to read as "shuffle" at this size. */
-static void draw_shuffle(float cx, float cy, u32 clr)
-{
-	C2D_DrawRectSolid(cx - 12.0f, cy - 6.0f, 0.0f, 18.0f, 2.5f, clr);
-	C2D_DrawRectSolid(cx - 12.0f, cy + 4.0f, 0.0f, 18.0f, 2.5f, clr);
-	tri_right(cx + 5.0f, cy - 10.0f, 9.0f, clr);
-	tri_right(cx + 5.0f, cy + 1.0f, 9.0f, clr);
-}
-
-/* Truncate with an ellipsis so long titles never overflow the panel. */
-static void draw_text_fit(C2D_TextBuf buf, const char *s, float x, float y,
-                          float scale, float maxw, u32 clr)
-{
-	if (!s || !s[0])
-		return;
-
-	char tmp[256];
-	snprintf(tmp, sizeof tmp, "%s", s);
-
-	C2D_Text t;
-	C2D_TextParse(&t, buf, tmp);
-	C2D_TextOptimize(&t);
-
-	float w = 0.0f, h = 0.0f;
-	C2D_TextGetDimensions(&t, scale, scale, &w, &h);
-
-	/* Trim a character at a time. Cheap for a handful of labels, and avoids
-	 * assuming a fixed glyph width in a proportional font. */
-	int len = (int)strlen(tmp);
-	while (w > maxw && len > 2) {
-		len--;
-		tmp[len - 1] = '.';
-		tmp[len]     = '.';
-		tmp[len + 1] = '\0';
-		C2D_TextParse(&t, buf, tmp);
-		C2D_TextOptimize(&t);
-		C2D_TextGetDimensions(&t, scale, scale, &w, &h);
-	}
-
-	C2D_DrawText(&t, C2D_WithColor, x, y, 0.0f, scale, scale, clr);
 }
 
 /* ---------------------------------------------------------------- main */
@@ -368,7 +266,6 @@ int main(int argc, char **argv)
 	touch_state     touch = {.press_id = -1, .clicked = -1};
 	worker_snapshot snap  = {0};
 	char            last_art[256] = "";
-	char            t_elapsed[16], t_total[16];
 
 	long last_seen_progress = -1;
 	int  frames             = 0;
@@ -391,8 +288,10 @@ int main(int argc, char **argv)
 		if (g_smoketest)
 			g_art_hidden = (frames > 480 && frames < 600);
 
-		register_player_rects(&g_tb);
+		/* Hit rects come from the previous frame's draw, which is what the
+		 * user was actually looking at when they touched. */
 		touch_update(&touch, g_tb.rects, g_tb.n);
+		tb_reset(&g_tb);
 		worker_get(&snap);
 
 		/* Re-base the interpolation clock whenever a poll brings new data. */
@@ -423,7 +322,7 @@ int main(int argc, char **argv)
 			g_scrub = SCRUB_DRAGGING;
 
 		if (g_scrub == SCRUB_DRAGGING && touch.down && duration > 0) {
-			float f = ((float)touch.px - BAR_X) / BAR_W;
+			float f = ((float)touch.px - SCRUB_BAR_X) / SCRUB_BAR_W;
 			if (f < 0.0f)
 				f = 0.0f;
 			if (f > 1.0f)
@@ -459,6 +358,17 @@ int main(int argc, char **argv)
 					opt_set(&g_opt_shuf, !shuffled);
 					worker_post(CMD_SHUFFLE, !shuffled);
 					break;
+				case BTN_REPEAT: {
+					/* Cycle all three states even though only two are drawn:
+					 * the setting is shared with the user's other clients, and
+					 * a two-state toggle would silently coerce a repeat-one
+					 * set elsewhere into repeat-all. */
+					const repeat_mode next =
+					    repeat_next(effective_repeat(&snap));
+					opt_set(&g_opt_rep, (long)next);
+					worker_post(CMD_REPEAT, (long)next);
+					break;
+				}
 				default:
 					break;
 			}
@@ -586,49 +496,19 @@ int main(int argc, char **argv)
 		C2D_TargetClear(bottom, CLR_BOT_BG);
 		C2D_SceneBegin(bottom);
 
-		const bool press_play = touch.down && touch.press_id == BTN_PLAY;
-		const bool press_prev = touch.down && touch.press_id == BTN_PREV;
-		const bool press_next = touch.down && touch.press_id == BTN_NEXT;
-		const bool press_shuf = touch.down && touch.press_id == BTN_SHUFFLE;
-
-		C2D_DrawRectSolid(50.0f, 76.0f, 0.0f, 60.0f, 60.0f,
-		                  press_prev ? CLR_BTN_ON : CLR_BTN);
-		C2D_DrawRectSolid(210.0f, 76.0f, 0.0f, 60.0f, 60.0f,
-		                  press_next ? CLR_BTN_ON : CLR_BTN);
-		C2D_DrawRectSolid(124.0f, 66.0f, 0.0f, 72.0f, 80.0f,
-		                  press_play ? CLR_BTN_ON : CLR_BTN);
-
-		draw_prev(80.0f, 106.0f, CLR_TEXT);
-		draw_next(240.0f, 106.0f, CLR_TEXT);
-		draw_playpause(160.0f, 106.0f, playing, CLR_GREEN);
-
-		/* Centred below the scrubber, clear of the time labels at either end. */
-		if (press_shuf)
-			C2D_DrawRectSolid(132.0f, 200.0f, 0.0f, 56.0f, 40.0f, CLR_BTN_ON);
-		draw_shuffle(160.0f, 220.0f, shuffled ? CLR_GREEN : CLR_FAINT);
-
-		/* Scrubber */
-		C2D_DrawRectSolid(BAR_X, BAR_Y, 0.0f, BAR_W, 5.0f, CLR_TRACK);
-		if (duration > 0) {
-			float f = (float)progress / (float)duration;
-			if (f < 0.0f)
-				f = 0.0f;
-			if (f > 1.0f)
-				f = 1.0f;
-
-			C2D_DrawRectSolid(BAR_X, BAR_Y, 0.0f, BAR_W * f, 5.0f, CLR_GREEN);
-
-			/* Handle grows while dragging, for feedback under a thumb. */
-			const float r = (g_scrub == SCRUB_DRAGGING) ? 10.0f : 6.0f;
-			C2D_DrawRectSolid(BAR_X + BAR_W * f - r / 2.0f,
-			                  BAR_Y + 2.5f - r / 2.0f, 0.0f, r, r, CLR_TEXT);
-
-			fmt_time(progress, t_elapsed, sizeof t_elapsed);
-			fmt_time(duration, t_total, sizeof t_total);
-			draw_text_fit(textbuf, t_elapsed, BAR_X, BAR_Y + 12.0f, 0.38f,
-			              80.0f, CLR_DIM);
-			draw_text_fit(textbuf, t_total, BAR_X + BAR_W - 38.0f,
-			              BAR_Y + 12.0f, 0.38f, 60.0f, CLR_DIM);
+		{
+			screen_player_args pa = {
+				.buf         = textbuf,
+				.tb          = &g_tb,
+				.playing     = playing,
+				.shuffle     = shuffled,
+				.repeat      = effective_repeat(&snap),
+				.progress_ms = progress,
+				.duration_ms = duration,
+				.pressed_id  = touch.down ? touch.press_id : -1,
+				.scrubbing   = g_scrub == SCRUB_DRAGGING,
+			};
+			screen_player_draw(&pa);
 		}
 
 		C3D_FrameEnd(0);

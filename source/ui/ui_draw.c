@@ -193,6 +193,9 @@ void ui_font_probe(void)
 	          (unsigned)fi->height, (unsigned)fi->ascent,
 	          (unsigned)(fi->height - fi->ascent), (unsigned)fi->lineFeed,
 	          (unsigned)fi->alterCharIndex);
+	const int middot = fontGlyphIndexFromCodePoint(NULL, 0x00B7);
+	tl_timing("font: U+00B7 glyph=%d available=%d", middot,
+	          middot != (int)fi->alterCharIndex);
 
 	C2D_TextBuf buf = C2D_TextBufNew(256);
 

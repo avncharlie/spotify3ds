@@ -69,6 +69,8 @@ static u64         s_recents_at;            /* when last fetched */
 
 static playlist_list s_playlists;
 static bool          s_playlists_wanted = true; /* fetch once at startup */
+static album_list    s_albums;
+static bool          s_albums_wanted = true; /* fetch once at startup */
 #define RECENTS_MIN_INTERVAL_MS 30000
 
 static char        s_art_want[256];
@@ -110,6 +112,7 @@ static void set_fatal(const char *what, const char *hint)
 static void do_art(void);
 static void do_recents(void);
 static void do_playlists(void);
+static void do_albums(void);
 static void do_thumbs(void);
 
 /* Short label for logs. Uses the *tail* of the content hash, not the head:
@@ -316,6 +319,7 @@ static void worker_main(void *arg)
 		 * shelf behind it. Playlists before recents so the name cache is warm
 		 * when recents_fetch needs to label a playlist context. */
 		do_playlists();
+		do_albums();
 		do_recents();
 
 		/* Thumbnails last of all: they are decoration, and a shelf full of
@@ -729,6 +733,54 @@ static void do_playlists(void)
 
 	if (pr != PLAYER_OK && pr != PLAYER_NOTHING_PLAYING)
 		tl_log("playlists: %s (%s)", player_result_str(pr), err);
+}
+
+int worker_get_albums(album_list *out)
+{
+	ensure_lock();
+	LightLock_Lock(&s_lock);
+	*out = s_albums;
+	const int n = s_albums.count;
+	LightLock_Unlock(&s_lock);
+	return n;
+}
+
+void worker_request_albums(void)
+{
+	ensure_lock();
+	LightLock_Lock(&s_lock);
+	s_albums_wanted = true;
+	LightLock_Unlock(&s_lock);
+}
+
+static void do_albums(void)
+{
+	LightLock_Lock(&s_lock);
+	const bool want = s_albums_wanted;
+	LightLock_Unlock(&s_lock);
+
+	if (!want)
+		return;
+
+	/* album_list is the same size class as playlist_list; keep it off the
+	 * worker's TLS-constrained stack. */
+	album_list *fresh = malloc(sizeof *fresh);
+	if (!fresh)
+		return;
+
+	char                err[256];
+	const player_result pr = albums_fetch(fresh, err, sizeof err);
+
+	LightLock_Lock(&s_lock);
+	s_albums_wanted = false;
+	if (pr == PLAYER_OK)
+		s_albums = *fresh;
+	LightLock_Unlock(&s_lock);
+
+	free(fresh);
+
+	if (pr != PLAYER_OK && pr != PLAYER_NOTHING_PLAYING)
+		tl_log("albums: %s (%s)", player_result_str(pr), err);
 }
 
 void worker_play_context(const char *context_uri)

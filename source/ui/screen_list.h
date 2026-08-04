@@ -6,31 +6,38 @@
 #include "../spotify/recents.h"
 #include "touch.h"
 
-/* Bottom screen, recently-played list (1C in the mockup).
+/* Bottom-screen Library (1C in the mockup).
  *
- * Opened from the shelf's ALL tile. 44px rows so a thumb can hit one on a
- * resistive panel, dragged vertically, tap to play.
+ * Recently played contains the full deduplicated history. The four-tile shelf
+ * is only a preview; those same entries remain available here.
  */
 
 enum {
 	LIST_BTN_BACK = 100, /* well clear of the player's ids */
-	LIST_ROW0,           /* .. LIST_ROW0 + RECENTS_MAX - 1 */
+	LIST_RECENT0,         /* .. LIST_RECENT0 + RECENTS_MAX - 1 */
+	LIST_PLAYLIST0 = 200, /* .. LIST_PLAYLIST0 + PLAYLISTS_MAX - 1 */
+	LIST_ARM_PLAY = 300,
+	LIST_ALBUM0 = 400, /* .. LIST_ALBUM0 + ALBUMS_MAX - 1 */
 };
 
-#define LIST_HEADER_H 34.0f
-#define LIST_ROW_H    44.0f
+#define LIST_HEADER_H 30.0f
+#define LIST_ROW_H    42.0f
+#define LIST_ARMED_ROW_H 48.0f
 
 typedef struct {
-	C2D_TextBuf        buf;
-	touch_builder     *tb;
-	const recent_list *items;
-	const C2D_Image  **art; /* per item, NULL where not loaded */
+	C2D_TextBuf          buf;
+	touch_builder       *tb;
+	const recent_list   *recents;
+	const playlist_list *playlists;
+	const album_list    *albums;
 
 	float scroll;     /* pixels scrolled down */
 	int   pressed_id; /* control under the finger, or -1 */
+	int   armed_id;   /* row awaiting PLAY confirmation, or -1 */
 } screen_list_args;
 
 void screen_list_draw(const screen_list_args *a);
 
-/* How far the list can scroll, given the item count. */
-float screen_list_max_scroll(int count);
+/* How far the combined document can scroll. */
+float screen_list_max_scroll(int recent_count, int playlist_count,
+                             int album_count, int armed_id);

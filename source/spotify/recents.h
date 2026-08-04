@@ -4,12 +4,12 @@
 
 #include "player.h"
 
-/* Collections the user can jump back into: recently played, and their own
- * playlist library.
+/* Collections the user can jump back into: recently played, playlists, and
+ * saved albums.
  *
  * Both feed the same row shape - art, name, subtitle - so they share a type.
- * The shelf on the player screen shows the first four recents; the Library
- * screen shows the rest plus every playlist.
+ * The shelf on the player screen previews the first four recents; the Library
+ * screen shows the full recent list plus playlists and saved albums.
  */
 
 /* Recently played, after dedupe. Spotify returns one entry per *track*, and a
@@ -22,7 +22,10 @@
  * further would cost a round trip per page for rows far below the fold. */
 #define PLAYLISTS_MAX 50
 
-/* Tiles on the player screen. The Library screen shows everything past these. */
+/* One page of /me/albums, matching the playlist section's bounded fetch. */
+#define ALBUMS_MAX 50
+
+/* Number of recent previews on the player screen. */
 #define SHELF_TILES 4
 
 typedef enum {
@@ -32,7 +35,7 @@ typedef enum {
 
 typedef struct {
 	char            name[128];     /* album or playlist name */
-	char            subtitle[128]; /* "Album - Artist" / "Playlist - Owner" */
+	char            subtitle[128]; /* "Album · Artist" / "Playlist · Owner" */
 	char            art_url[256];  /* empty when the collection has no image */
 	char            context_uri[128]; /* what to play when tapped */
 	collection_kind kind;
@@ -49,6 +52,12 @@ typedef struct {
 	int             total; /* what Spotify reports, which may exceed count */
 } playlist_list;
 
+typedef struct {
+	collection_item items[ALBUMS_MAX];
+	int             count;
+	int             total;
+} album_list;
+
 /* Kept for the existing call sites, which predate playlists sharing the type. */
 typedef collection_item recent_item;
 
@@ -64,3 +73,6 @@ player_result recents_fetch(recent_list *out, char *err, int errlen);
  * Uses `fields=` to drop the 60% of the response we never read - 52KB down to
  * 21KB measured - which this endpoint, unlike recently-played, honours. */
 player_result playlists_fetch(playlist_list *out, char *err, int errlen);
+
+/* GET /v1/me/albums?limit=50. Blocking; worker thread only. */
+player_result albums_fetch(album_list *out, char *err, int errlen);

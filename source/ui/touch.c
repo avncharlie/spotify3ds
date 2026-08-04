@@ -64,6 +64,8 @@ void touch_update(touch_state *t, const touch_rect *rects, int nrects)
 		t->down     = true;
 		t->pressed  = true;
 		t->dragging = false;
+		t->press_at = osGetTime();
+		t->tap_cancelled = false;
 		t->start_px = t->px;
 		t->start_py = t->py;
 		t->press_id = touch_hit(rects, nrects, t->px, t->py);
@@ -76,6 +78,11 @@ void touch_update(touch_state *t, const touch_rect *rects, int nrects)
 			t->dragging = true;
 	}
 
+	/* A held finger is usually waiting to scroll, not asking to activate a row.
+	 * Keep drag detection alive, but disarm the eventual release as a tap. */
+	if (down && osGetTime() - t->press_at > TOUCH_TAP_TIMEOUT_MS)
+		t->tap_cancelled = true;
+
 	if (up) {
 		t->down     = false;
 		t->released = true;
@@ -83,7 +90,7 @@ void touch_update(touch_state *t, const touch_rect *rects, int nrects)
 		/* Fire only if the release lands in the same rect as the press, so
 		 * sliding off cancels - and never after a drag, or scrolling a list
 		 * would play whatever row the finger lifted over. */
-		if (!t->dragging) {
+		if (!t->dragging && !t->tap_cancelled) {
 			const int rel = touch_hit(rects, nrects, t->px, t->py);
 			if (rel >= 0 && rel == t->press_id)
 				t->clicked = rel;

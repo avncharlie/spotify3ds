@@ -49,6 +49,7 @@ void tb_add_hit(touch_builder *tb, float cx, float cy, float min_size, int id);
  * 4-5px usual on capacitive screens. Tune on hardware: Azahar's mouse has none
  * of that jitter. */
 #define TOUCH_SLOP 8
+#define TOUCH_TAP_TIMEOUT_MS 300
 
 typedef struct {
 	bool down;     /* touch currently held */
@@ -58,6 +59,8 @@ typedef struct {
 	int  start_px, start_py; /* where the press began */
 	int  dx, dy;   /* movement since last frame, for dragging */
 	bool dragging; /* exceeded TOUCH_SLOP since the press */
+	unsigned long long press_at; /* osGetTime() when the touch began */
+	bool tap_cancelled;          /* held too long to still count as a tap */
 	int  press_id; /* rect the press started in, or -1 */
 	int  clicked;  /* rect activated this frame, or -1 */
 } touch_state;

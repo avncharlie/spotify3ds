@@ -74,6 +74,11 @@ int worker_get_playlists(playlist_list *out);
 /* Ask for a refresh on the next worker tick. */
 void worker_request_playlists(void);
 
+/* --- saved albums ------------------------------------------------------
+ * The current user's saved album library, fetched once at startup. */
+int  worker_get_albums(album_list *out);
+void worker_request_albums(void);
+
 /* Start playback from a recents entry. The uri is copied, so the caller's
  * buffer need not outlive the call. */
 void worker_play_context(const char *context_uri);

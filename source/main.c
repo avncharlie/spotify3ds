@@ -81,6 +81,17 @@ static bool g_art_hidden;
 typedef enum { VIEW_PLAYER = 0, VIEW_LIST } bottom_view;
 static bottom_view g_view;
 static float       g_list_scroll;
+static float       g_list_velocity;
+static int         g_list_armed = -1;
+static u64         g_list_arm_until;
+
+/* List momentum is measured in pixels per frame. Keep it deliberately short:
+ * this is a 240px resistive screen, so a phone-style multi-screen fling would
+ * make the rows harder rather than easier to control. */
+#define LIST_FLING_MAX      40.0f
+#define LIST_FLING_FRICTION 0.88f
+#define LIST_FLING_STOP     0.10f
+#define LIST_ARM_MS         4000
 
 /* True when running under the headless harness, which needs the app to quit by
  * itself. On a real console the app must stay up until the user exits. */
@@ -183,6 +194,7 @@ static opt_field g_opt_play, g_opt_shuf, g_opt_rep;
  * reader, so a single shared buffer is safe. */
 static recent_list   g_recents_buf;
 static playlist_list g_playlists_buf;
+static album_list    g_albums_buf;
 
 static void opt_set(opt_field *o, long v)
 {
@@ -289,6 +301,7 @@ int main(int argc, char **argv)
 	bool logged_first       = false;
 	bool logged_recents     = false;
 	bool logged_playlists   = false;
+	bool logged_albums      = false;
 	u64  repeat_probe_at    = 0;
 	repeat_mode repeat_probe_from = REPEAT_OFF;
 
@@ -310,9 +323,17 @@ int main(int argc, char **argv)
 			 * rather than only when someone taps ALL by hand. */
 			if (frames == 300)
 				g_view = VIEW_LIST;
+			/* Exercise the armed-row draw path during every automated run. */
+			if (frames == 340) {
+				g_list_armed = LIST_PLAYLIST0;
+				g_list_arm_until = osGetTime() + 1000;
+			}
+			if (frames == 390)
+				g_list_armed = -1;
 			if (frames == 420) {
 				tl_step("list_view", 1, "rendered %d frames", 120);
 				g_view = VIEW_PLAYER;
+				g_list_armed = -1;
 			}
 		}
 
@@ -367,36 +388,115 @@ int main(int argc, char **argv)
 
 		/* --- list view input ------------------------------------------- */
 		if (g_view == VIEW_LIST) {
-			recent_list *const rl = &g_recents_buf;
-			const int          n  = worker_get_recents(rl);
+			recent_list *const   rl = &g_recents_buf;
+			playlist_list *const pl = &g_playlists_buf;
+			album_list *const    al = &g_albums_buf;
+			const int            n  = worker_get_recents(rl);
+			const int            pn = worker_get_playlists(pl);
+			const int            an = worker_get_albums(al);
 
-			/* 1:1 drag while held. No momentum: four and a half visible rows
-			 * of a handful is a short list, and a flick would overshoot it. */
-			if (touch.down && touch.dragging)
-				g_list_scroll -= (float)touch.dy;
+			if (g_list_armed >= 0 && osGetTime() >= g_list_arm_until)
+				g_list_armed = -1;
 
-			const float maxs = screen_list_max_scroll(n);
-			if (g_list_scroll < 0.0f)
+			/* Drag 1:1 while held, then retain a filtered portion of the final
+			 * motion and decay it after release. A fresh touch always catches the
+			 * list immediately. */
+			if (touch.pressed)
+				g_list_velocity = 0.0f;
+
+			if (touch.down && touch.dragging) {
+				/* Dragging is an unambiguous cancellation of any pending play. */
+				g_list_armed = -1;
+				const float delta = -(float)touch.dy;
+				g_list_scroll += delta;
+				/* Weight the newest sample heavily so release speed determines the
+				 * fling: a slow lift coasts a few pixels, a fast flick travels farther. */
+				g_list_velocity = g_list_velocity * 0.25f + delta * 0.75f;
+				if (g_list_velocity > LIST_FLING_MAX)
+					g_list_velocity = LIST_FLING_MAX;
+				if (g_list_velocity < -LIST_FLING_MAX)
+					g_list_velocity = -LIST_FLING_MAX;
+			} else if (!touch.down) {
+				g_list_scroll += g_list_velocity;
+				g_list_velocity *= LIST_FLING_FRICTION;
+				if (g_list_velocity > -LIST_FLING_STOP &&
+				    g_list_velocity < LIST_FLING_STOP)
+					g_list_velocity = 0.0f;
+			}
+
+			const float maxs = screen_list_max_scroll(n, pn, an, g_list_armed);
+			if (g_list_scroll < 0.0f) {
 				g_list_scroll = 0.0f;
-			if (g_list_scroll > maxs)
+				g_list_velocity = 0.0f;
+			}
+			if (g_list_scroll > maxs) {
 				g_list_scroll = maxs;
+				g_list_velocity = 0.0f;
+			}
 
 			if (touch.clicked == LIST_BTN_BACK) {
 				g_view = VIEW_PLAYER;
-			} else if (touch.clicked >= LIST_ROW0 &&
-			           touch.clicked < LIST_ROW0 + n) {
-				const int idx = touch.clicked - LIST_ROW0;
-				tl_log("list: play %s", rl->items[idx].context_uri);
-				worker_play_context(rl->items[idx].context_uri);
-				/* Back to the player, where the result of the tap is visible. */
-				g_view = VIEW_PLAYER;
-				opt_set(&g_opt_play, 1);
+				g_list_armed = -1;
+			} else if (touch.clicked == LIST_ARM_PLAY) {
+				const collection_item *item = NULL;
+				if (g_list_armed >= LIST_RECENT0 &&
+				    g_list_armed < LIST_RECENT0 + n)
+					item = &rl->items[g_list_armed - LIST_RECENT0];
+				else if (g_list_armed >= LIST_PLAYLIST0 &&
+				         g_list_armed < LIST_PLAYLIST0 + pn)
+					item = &pl->items[g_list_armed - LIST_PLAYLIST0];
+				else if (g_list_armed >= LIST_ALBUM0 &&
+				         g_list_armed < LIST_ALBUM0 + an)
+					item = &al->items[g_list_armed - LIST_ALBUM0];
+
+				if (item) {
+					tl_log("list: confirmed play %s", item->context_uri);
+					worker_play_context(item->context_uri);
+					g_view = VIEW_PLAYER;
+					opt_set(&g_opt_play, 1);
+				}
+				g_list_armed = -1;
+			} else if (touch.clicked >= LIST_RECENT0 &&
+			           touch.clicked < LIST_RECENT0 + RECENTS_MAX) {
+				const int idx = touch.clicked - LIST_RECENT0;
+				if (idx < n) {
+					if (g_list_armed == touch.clicked) {
+						g_list_armed = -1;
+					} else {
+						g_list_armed = touch.clicked;
+						g_list_arm_until = osGetTime() + LIST_ARM_MS;
+					}
+				}
+			} else if (touch.clicked >= LIST_PLAYLIST0 &&
+			           touch.clicked < LIST_PLAYLIST0 + PLAYLISTS_MAX) {
+				const int idx = touch.clicked - LIST_PLAYLIST0;
+				if (idx < pn) {
+					if (g_list_armed == touch.clicked) {
+						g_list_armed = -1;
+					} else {
+						g_list_armed = touch.clicked;
+						g_list_arm_until = osGetTime() + LIST_ARM_MS;
+					}
+				}
+			} else if (touch.clicked >= LIST_ALBUM0 &&
+			           touch.clicked < LIST_ALBUM0 + ALBUMS_MAX) {
+				const int idx = touch.clicked - LIST_ALBUM0;
+				if (idx < an) {
+					if (g_list_armed == touch.clicked) {
+						g_list_armed = -1;
+					} else {
+						g_list_armed = touch.clicked;
+						g_list_arm_until = osGetTime() + LIST_ARM_MS;
+					}
+				}
 			}
 		}
 
 		if (g_view == VIEW_PLAYER && touch.clicked == BTN_SHELF_ALL) {
 			g_view        = VIEW_LIST;
 			g_list_scroll = 0.0f;
+			g_list_velocity = 0.0f;
+			g_list_armed = -1;
 		}
 
 		if (g_view == VIEW_PLAYER && touch.clicked >= BTN_SHELF0 &&
@@ -553,6 +653,22 @@ int main(int argc, char **argv)
 			}
 		}
 
+		if (!logged_albums) {
+			album_list *const al = &g_albums_buf;
+			if (worker_get_albums(al) > 0) {
+				logged_albums = true;
+				tl_step("albums", al->count > 0, "%d of %d total: %s | %s",
+				        al->count, al->total, al->items[0].name,
+				        al->count > 1 ? al->items[1].name : "-");
+				for (int i = 0; i < al->count && i < 3; i++)
+					tl_log("  album[%d] %s / %s", i, al->items[i].name,
+					       al->items[i].subtitle);
+			} else if (frames > 650) {
+				logged_albums = true;
+				tl_step("albums", 0, "no items after %d frames", frames);
+			}
+		}
+
 		if (!logged_first && snap.have_state) {
 			logged_first = true;
 			tl_step("first_poll", 1, "%s - %s", snap.state.track,
@@ -636,16 +752,22 @@ int main(int argc, char **argv)
 		C2D_SceneBegin(bottom);
 
 		if (g_view == VIEW_LIST) {
-			recent_list *const rl = &g_recents_buf;
+			recent_list *const   rl = &g_recents_buf;
+			playlist_list *const pl = &g_playlists_buf;
+			album_list *const    al = &g_albums_buf;
 			worker_get_recents(rl);
+			worker_get_playlists(pl);
+			worker_get_albums(al);
 
 			const screen_list_args la = {
 				.buf        = textbuf,
 				.tb         = &g_tb,
-				.items      = rl,
-				.art        = NULL,
+				.recents    = rl,
+				.playlists  = pl,
+				.albums     = al,
 				.scroll     = g_list_scroll,
 				.pressed_id = touch.down ? touch.press_id : -1,
+				.armed_id   = g_list_armed,
 			};
 			screen_list_draw(&la);
 		} else {

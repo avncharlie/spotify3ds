@@ -107,24 +107,47 @@ static void draw_shuffle_glyph(float cx, float cy, u32 clr)
  * size had too few pixels to read as anything and made the stroke look uneven.
  * Every segment is now exactly `t` thick and the corners overlap rather than
  * mitre, so the outline is continuous at any colour. */
-static void draw_repeat_glyph(float cx, float cy, u32 clr)
+static void draw_repeat_glyph(float cx, float cy, u32 clr, bool one)
 {
 	const float w = 17.0f, h = 13.0f, t = 2.0f;
 	const float x = cx - w / 2.0f, y = cy - h / 2.0f;
 	const float r = 3.5f; /* corner radius, measured to the stroke centre */
 
-	/* The loop opens on the bottom-right, where the arrow tip goes. The bottom
-	 * run stops short of it so there is clear space between stroke and head. */
-	const float gap      = 3.0f;
-	const float head_w   = 5.5f;
-	const float bottom_w = w - 2.0f * r - gap - head_w;
+	/* The loop opens on the bottom-left. The arrowhead points left - the
+	 * direction the loop travels - with its flat base joined to the bottom run
+	 * and the gap after its tip, so the head terminates the stroke rather than
+	 * floating detached from it. */
+	const float gap    = 3.5f;
+	const float head_w = 5.5f;
 
-	/* Straight runs, inset by the radius at both ends. */
-	C2D_DrawRectSolid(x + r, y, 0.0f, w - 2.0f * r, t, clr);          /* top */
-	C2D_DrawRectSolid(x + r, y + h - t, 0.0f, bottom_w, t, clr);      /* bottom */
-	C2D_DrawRectSolid(x, y + r, 0.0f, t, h - 2.0f * r, clr);          /* left */
-	/* Right edge stops above the opening rather than running into it. */
-	C2D_DrawRectSolid(x + w - t, y + r, 0.0f, t, h - r - t - 4.0f, clr);
+	/* Straight runs, inset by the radius at both ends. In repeat-one the top run
+	 * is broken by a notch and the digit sits astride the break, which is how
+	 * Spotify draws it - a "1" laid over an unbroken bar reads as struck
+	 * through. */
+	const float digit_w  = 5.0f;
+	const float digit_cx = cx + 1.0f; /* the flag hangs left, so nudging the stem
+	                                   * right centres the digit optically */
+
+	if (one) {
+		/* The flag makes the digit wider on the left, so the notch is not
+		 * symmetric - a smaller gap on the right keeps the two clearances
+		 * looking equal. */
+		const float notch_l = digit_cx - digit_w / 2.0f - 1.5f;
+		const float notch_r = digit_cx + digit_w / 2.0f + 1.0f;
+
+		C2D_DrawRectSolid(x + r, y, 0.0f, notch_l - (x + r), t, clr);
+		C2D_DrawRectSolid(notch_r, y, 0.0f, x + w - r - notch_r, t, clr);
+	} else {
+		C2D_DrawRectSolid(x + r, y, 0.0f, w - 2.0f * r, t, clr);  /* top */
+	}
+
+	/* Bottom run starts past the arrowhead, which sits inboard of the
+	 * bottom-left corner rather than replacing it. */
+	const float bottom_x = x + r + head_w + gap;
+	C2D_DrawRectSolid(bottom_x, y + h - t, 0.0f, x + w - r - bottom_x, t, clr);
+
+	C2D_DrawRectSolid(x, y + r, 0.0f, t, h - 2.0f * r, clr);         /* left */
+	C2D_DrawRectSolid(x + w - t, y + r, 0.0f, t, h - 2.0f * r, clr); /* right */
 
 	/* Corners as short arcs of line segments. An earlier attempt laid a
 	 * one-pixel disc on each corner, which is too small to round anything -
@@ -133,15 +156,16 @@ static void draw_repeat_glyph(float cx, float cy, u32 clr)
 	const float m  = t / 2.0f;
 	const float rr = r - m; /* radius of the stroke centreline */
 
-	/* Bottom-right is deliberately absent: that is where the loop opens for the
-	 * arrow, and arcing it would close the gap again. */
-	struct { float ox, oy, a0; } corners[3] = {
+	/* All four corners are drawn. The opening for the arrow sits along the
+	 * bottom edge past the corner, not at it. */
+	struct { float ox, oy, a0; } corners[4] = {
 		{x + r,     y + r,     180.0f}, /* top-left */
 		{x + w - r, y + r,     270.0f}, /* top-right */
+		{x + w - r, y + h - r,   0.0f}, /* bottom-right */
 		{x + r,     y + h - r,  90.0f}, /* bottom-left */
 	};
 
-	for (int c = 0; c < 3; c++) {
+	for (int c = 0; c < 4; c++) {
 		const int steps = 4;
 		float     px = 0.0f, py = 0.0f;
 		for (int i = 0; i <= steps; i++) {
@@ -156,11 +180,23 @@ static void draw_repeat_glyph(float cx, float cy, u32 clr)
 		}
 	}
 
-	/* Arrowhead on the bottom edge pointing right, as Spotify draws it, sitting
-	 * after the gap left above. Centred on the stroke so the tip lines up with
-	 * the run it continues. */
-	tri_right(x + r + bottom_w + gap, y + h - t / 2.0f - 4.0f, head_w, 8.0f,
-	          clr);
+	/* Arrowhead pointing left, its flat base flush against the start of the
+	 * bottom run so the stroke reads as continuing into the head. The gap is
+	 * beyond the tip. */
+	tri_left(bottom_x - head_w, y + h - t / 2.0f - 4.0f, head_w, 8.0f, clr);
+
+	/* The "1" straddles the notch in the top run: the system font has nothing
+	 * legible at this size, so it is stroked by hand as a stem plus a short
+	 * flag. Centred on the top edge rather than on the loop, so the notch reads
+	 * as the digit displacing the bar. */
+	if (one) {
+		const float dt  = 2.0f;
+		const float top = y - 3.0f;
+		const float sx  = digit_cx - dt / 2.0f;
+
+		C2D_DrawRectSolid(sx, top, 0.0f, dt, 8.0f, clr);
+		C2D_DrawLine(sx, top + 2.0f, clr, sx - 2.0f, top + 3.5f, clr, dt, 0.0f);
+	}
 }
 
 static void draw_playpause(float cx, float cy, bool playing, bool pressed)
@@ -278,15 +314,12 @@ void screen_player_draw(const screen_player_args *a)
 
 	const u32 rep_clr = a->repeat != REPEAT_OFF ? CLR_GREEN : CLR_IDLE;
 	draw_repeat_glyph(rep_x, ROW_Y,
-	                  press_clr(rep_clr, a->pressed_id == BTN_REPEAT));
-	if (a->repeat != REPEAT_OFF) {
+	                  press_clr(rep_clr, a->pressed_id == BTN_REPEAT),
+	                  a->repeat == REPEAT_TRACK);
+	/* One dot for either active state; repeat-one is told apart by the "1"
+	 * inside the loop, as Spotify does it. */
+	if (a->repeat != REPEAT_OFF)
 		ui_disc(rep_x, ROW_Y + 12.0f, 1.5f, CLR_GREEN);
-		/* Repeat-one gets a second dot. A "1" glyph inside the loop would be
-		 * the usual convention but is illegible at this size, and the state is
-		 * shared with the user's other clients so it must stay visible. */
-		if (a->repeat == REPEAT_TRACK)
-			ui_disc(rep_x + 5.0f, ROW_Y + 12.0f, 1.5f, CLR_GREEN);
-	}
 
 	/* --- scrubber ------------------------------------------------------ */
 	char elapsed[16], total[16];

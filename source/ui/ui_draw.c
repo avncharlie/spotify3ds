@@ -22,13 +22,18 @@
  * right, the weight was not, and there is no bold to lean on here. */
 static const float s_role_px[TY_COUNT] = {
 	[TY_TITLE_L] = 34.0f, [TY_TITLE] = 21.0f,  [TY_ARTIST_L] = 19.0f,
-	[TY_ALBUM_L] = 15.0f, [TY_ARTIST] = 14.0f, [TY_ROW_NAME] = 11.0f,
+	[TY_ALBUM_L] = 15.0f, [TY_ARTIST] = 14.0f, [TY_ROW_NAME] = 14.0f,
 	[TY_ALBUM]   = 12.0f, [TY_ROW_SUB] = 12.0f, [TY_MICRO] = 7.0f,
 };
 /* TY_ROW_SUB carries the scrubber times and the list-row subtitles. The mockup
  * puts it at 8px, which lands under the same legibility floor that forced the
  * micro label up: rendered, "1:23" was an unreadable smudge. 12px reads
- * comfortably at arm's length and still sits below the row name. */
+ * comfortably at arm's length and still sits below the row name.
+ *
+ * TY_ROW_NAME started at the mockup's 11px, which left it *smaller* than the
+ * subtitle it is supposed to dominate - the mockup gets that hierarchy from
+ * font weight, and the 3DS system font has only one weight, so size has to
+ * carry it. 14px restores the order and reads better on the Library rows. */
 
 static float s_scale[TY_COUNT];
 

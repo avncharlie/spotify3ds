@@ -23,21 +23,22 @@
 static const float s_role_px[TY_COUNT] = {
 	[TY_TITLE_L] = 34.0f, [TY_TITLE] = 21.0f,  [TY_ARTIST_L] = 19.0f,
 	[TY_ALBUM_L] = 15.0f, [TY_ARTIST] = 14.0f, [TY_ROW_NAME] = 11.0f,
-	[TY_ALBUM]   = 12.0f, [TY_ROW_SUB] = 10.0f, [TY_MICRO] = 7.0f,
+	[TY_ALBUM]   = 12.0f, [TY_ROW_SUB] = 12.0f, [TY_MICRO] = 7.0f,
 };
 /* TY_ROW_SUB carries the scrubber times and the list-row subtitles. The mockup
  * puts it at 8px, which lands under the same legibility floor that forced the
- * micro label up to 10: rendered, "1:23" was an unreadable smudge. 10px reads
- * cleanly and still sits well below the row name. */
+ * micro label up: rendered, "1:23" was an unreadable smudge. 12px reads
+ * comfortably at arm's length and still sits below the row name. */
 
 static float s_scale[TY_COUNT];
 
 /* The mockup asks for 7px here. Rendered and compared side by side: at 7px the
  * label is an unreadable smudge (the glyph atlas is minified ~4x and the
- * bilinear filter finishes it off), while at 10px "ALVBOOK" reads cleanly and
- * still carries the tracking that gives the mockup its character. 10px it is;
- * ui_set_micro_px keeps the choice adjustable. */
-static float s_micro_px = 10.0f;
+ * bilinear filter finishes it off). 10px was legible, 12px is comfortable at
+ * the distance a handheld is actually held, and the tracking that gives the
+ * mockup its character survives either way. ui_set_micro_px keeps it
+ * adjustable. */
+static float s_micro_px = 12.0f;
 static float s_em;              /* font em box at scale 1.0 */
 static float s_ascent;
 

@@ -33,15 +33,22 @@
 #define CLR_ALL_TXT C2D_Color32(0xB3, 0xB3, 0xB3, 0xFF)
 #define CLR_TIME    C2D_Color32(0xB3, 0xB3, 0xB3, 0xFF)
 
-/* A pressed control dims slightly. With the boxes gone there is no fill to
- * highlight, so the glyph itself has to carry the feedback. */
-static u32 dim_if(u32 clr, bool pressed)
+/* With the boxes gone there is no fill to highlight, so the glyph itself has
+ * to carry the press. Dimming alone proved far too subtle on the small white
+ * prev/next arrows, so a pressed control turns green - the accent already used
+ * for "active" everywhere else - and gets a soft halo behind it, which is what
+ * actually makes the tap feel like it landed. */
+#define CLR_PRESS_HALO C2D_Color32(0x1D, 0xB9, 0x54, 0x33)
+
+static u32 press_clr(u32 clr, bool pressed)
 {
-	if (!pressed)
-		return clr;
-	const u8 r = (clr >> 0) & 0xFF, g = (clr >> 8) & 0xFF, b = (clr >> 16) & 0xFF;
-	return C2D_Color32((u8)(r * 6 / 10), (u8)(g * 6 / 10), (u8)(b * 6 / 10),
-	                   0xFF);
+	return pressed ? CLR_GREEN : clr;
+}
+
+static void press_halo(float cx, float cy, bool pressed)
+{
+	if (pressed)
+		ui_disc(cx, cy, 19.0f, CLR_PRESS_HALO);
 }
 
 static void tri_right(float x, float y, float w, float h, u32 clr)
@@ -94,9 +101,11 @@ static void draw_repeat_glyph(float cx, float cy, u32 clr)
 	tri_left(x + 1.0f, y - 2.5f, 5.0f, 6.0f, clr);
 }
 
-static void draw_playpause(float cx, float cy, bool playing)
+static void draw_playpause(float cx, float cy, bool playing, bool pressed)
 {
-	ui_disc(cx, cy, PLAY_R, CLR_WHITE);
+	/* The disc is already the brightest thing on screen, so it presses by
+	 * tinting rather than by gaining a halo it would hide anyway. */
+	ui_disc(cx, cy, PLAY_R, pressed ? CLR_GREEN : CLR_WHITE);
 
 	if (playing) {
 		C2D_DrawRectSolid(cx - 6.0f, cy - 7.5f, 0.0f, 4.0f, 15.0f, CLR_DISC_FG);
@@ -178,19 +187,25 @@ void screen_player_draw(const screen_player_args *a)
 
 	/* Shuffle and repeat sit outside prev/next and turn green with a dot when
 	 * active, rather than changing shape. */
+	/* Halos first, so every glyph draws on top of its own. */
+	press_halo(shuf_x, ROW_Y, a->pressed_id == BTN_SHUFFLE);
+	press_halo(prev_x, ROW_Y, a->pressed_id == BTN_PREV);
+	press_halo(next_x, ROW_Y, a->pressed_id == BTN_NEXT);
+	press_halo(rep_x, ROW_Y, a->pressed_id == BTN_REPEAT);
+
 	const u32 shuf_clr = a->shuffle ? CLR_GREEN : CLR_IDLE;
 	draw_shuffle_glyph(shuf_x, ROW_Y,
-	                   dim_if(shuf_clr, a->pressed_id == BTN_SHUFFLE));
+	                   press_clr(shuf_clr, a->pressed_id == BTN_SHUFFLE));
 	if (a->shuffle)
 		ui_disc(shuf_x, ROW_Y + 12.0f, 1.5f, CLR_GREEN);
 
-	draw_prev(prev_x, ROW_Y, dim_if(CLR_WHITE, a->pressed_id == BTN_PREV));
-	draw_playpause(play_x, ROW_Y, a->playing);
-	draw_next(next_x, ROW_Y, dim_if(CLR_WHITE, a->pressed_id == BTN_NEXT));
+	draw_prev(prev_x, ROW_Y, press_clr(CLR_WHITE, a->pressed_id == BTN_PREV));
+	draw_playpause(play_x, ROW_Y, a->playing, a->pressed_id == BTN_PLAY);
+	draw_next(next_x, ROW_Y, press_clr(CLR_WHITE, a->pressed_id == BTN_NEXT));
 
 	const u32 rep_clr = a->repeat != REPEAT_OFF ? CLR_GREEN : CLR_IDLE;
 	draw_repeat_glyph(rep_x, ROW_Y,
-	                  dim_if(rep_clr, a->pressed_id == BTN_REPEAT));
+	                  press_clr(rep_clr, a->pressed_id == BTN_REPEAT));
 	if (a->repeat != REPEAT_OFF) {
 		ui_disc(rep_x, ROW_Y + 12.0f, 1.5f, CLR_GREEN);
 		/* Repeat-one gets a second dot. A "1" glyph inside the loop would be

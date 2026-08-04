@@ -16,10 +16,14 @@
 
 /* The mockup's CSS px per role. TY_MICRO is deliberately absent: it is
  * variable while the 7px-vs-legible question is being settled. */
+/* Artist and album run 2px above the mockup (14/12 rather than 12/10, and
+ * 19/15 rather than 17/13 in the art-off layout). At the mockup's sizes they
+ * read as too quiet against the title on the actual panel - the gaps were
+ * right, the weight was not, and there is no bold to lean on here. */
 static const float s_role_px[TY_COUNT] = {
-	[TY_TITLE_L] = 34.0f, [TY_TITLE] = 21.0f,  [TY_ARTIST_L] = 17.0f,
-	[TY_ALBUM_L] = 13.0f, [TY_ARTIST] = 12.0f, [TY_ROW_NAME] = 11.0f,
-	[TY_ALBUM]   = 10.0f, [TY_ROW_SUB] = 8.0f, [TY_MICRO] = 7.0f,
+	[TY_TITLE_L] = 34.0f, [TY_TITLE] = 21.0f,  [TY_ARTIST_L] = 19.0f,
+	[TY_ALBUM_L] = 15.0f, [TY_ARTIST] = 14.0f, [TY_ROW_NAME] = 11.0f,
+	[TY_ALBUM]   = 12.0f, [TY_ROW_SUB] = 8.0f, [TY_MICRO] = 7.0f,
 };
 
 static float s_scale[TY_COUNT];

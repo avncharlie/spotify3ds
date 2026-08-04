@@ -128,16 +128,15 @@ static void draw_repeat_glyph(float cx, float cy, u32 clr, bool one)
 	                                   * right centres the digit optically */
 
 	if (one) {
-		/* Asymmetric on purpose. The stem sits right of centre and the flag
-		 * hangs off its left, so the digit's ink already reaches into the left
-		 * clearance while nothing occupies the right. Measuring the notch from
-		 * the ink rather than from digit_cx is what makes the two gaps look
-		 * equal. */
+		/* Asymmetric on purpose, and the two clearances differ as well. The
+		 * flag is a diagonal, so only its lowest point reaches ink_l; level
+		 * with the bar its ink sits further right, which makes an equal
+		 * clearance look narrower on the left than on the right. The extra
+		 * pixel is measured off the screen, not derived. */
 		const float ink_l   = digit_cx - 3.0f; /* flag tip  */
 		const float ink_r   = digit_cx + 1.0f; /* stem edge */
-		const float clear   = 1.5f;
-		const float notch_l = ink_l - clear;
-		const float notch_r = ink_r + clear;
+		const float notch_l = ink_l - 2.5f;
+		const float notch_r = ink_r + 1.5f;
 
 		C2D_DrawRectSolid(x + r, y, 0.0f, notch_l - (x + r), t, clr);
 		C2D_DrawRectSolid(notch_r, y, 0.0f, x + w - r - notch_r, t, clr);

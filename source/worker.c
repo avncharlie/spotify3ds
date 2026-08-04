@@ -76,6 +76,19 @@ static char        s_art_inflight[256];
 static art_payload s_art_ready;
 static bool        s_art_have;
 
+/* Thumbnails for the shelf and the Library rows.
+ *
+ * A queue rather than the hero's single slot, because the UI asks for several
+ * at once and they are all wanted. They are fetched strictly after the hero -
+ * see the tick order in worker_main - so a shelf full of misses cannot delay
+ * the cover the user is actually looking at. */
+#define THUMB_QUEUE 16
+
+static char        s_thumb_q[THUMB_QUEUE][256];
+static int         s_thumb_n;
+static art_payload s_thumb_ready;
+static bool        s_thumb_have;
+
 static void set_status(const char *s)
 {
 	LightLock_Lock(&s_lock);
@@ -97,6 +110,7 @@ static void set_fatal(const char *what, const char *hint)
 static void do_art(void);
 static void do_recents(void);
 static void do_playlists(void);
+static void do_thumbs(void);
 
 /* Short label for logs. Uses the *tail* of the content hash, not the head:
  * every Spotify art URL begins "ab67616d0000b273...", so a leading prefix is
@@ -304,6 +318,11 @@ static void worker_main(void *arg)
 		do_playlists();
 		do_recents();
 
+		/* Thumbnails last of all: they are decoration, and a shelf full of
+		 * cache misses must never stand between a track change and the cover
+		 * appearing. */
+		do_thumbs();
+
 		LightLock_Lock(&s_lock);
 		s_busy = false;
 		LightLock_Unlock(&s_lock);
@@ -407,6 +426,128 @@ bool worker_take_art(art_payload *out)
 	}
 	LightLock_Unlock(&s_lock);
 	return have;
+}
+
+void worker_request_thumb(const char *url)
+{
+	if (!url || !url[0])
+		return;
+
+	ensure_lock();
+	LightLock_Lock(&s_lock);
+
+	/* Already queued, or already the one being worked on: do nothing. The UI
+	 * re-asks every frame it draws a missing tile, so this is the common
+	 * path. */
+	bool known = false;
+	for (int i = 0; i < s_thumb_n; i++) {
+		if (strcmp(s_thumb_q[i], url) == 0) {
+			known = true;
+			break;
+		}
+	}
+
+	if (!known && s_thumb_n < THUMB_QUEUE)
+		snprintf(s_thumb_q[s_thumb_n++], sizeof s_thumb_q[0], "%s", url);
+
+	LightLock_Unlock(&s_lock);
+}
+
+bool worker_take_thumb(art_payload *out)
+{
+	ensure_lock();
+	LightLock_Lock(&s_lock);
+	const bool have = s_thumb_have;
+	if (have) {
+		*out         = s_thumb_ready;
+		s_thumb_have = false;
+		memset(&s_thumb_ready, 0, sizeof s_thumb_ready);
+	}
+	LightLock_Unlock(&s_lock);
+	return have;
+}
+
+/* One thumbnail per tick, and only when the previous one has been claimed.
+ *
+ * Deliberately unhurried: thumbs are decoration next to the hero cover, and
+ * doing them one at a time keeps the worker responsive to a track change. */
+static void do_thumbs(void)
+{
+	char want[256];
+
+	LightLock_Lock(&s_lock);
+	const bool busy = s_thumb_have || s_thumb_n == 0;
+	int        left = 0;
+	if (!busy) {
+		snprintf(want, sizeof want, "%s", s_thumb_q[0]);
+		/* Pop the front now: a failure should not retry forever, and the UI
+		 * will re-queue it on a later frame if it still wants it. */
+		s_thumb_n--;
+		memmove(s_thumb_q[0], s_thumb_q[1],
+		        (size_t)s_thumb_n * sizeof s_thumb_q[0]);
+		left = s_thumb_n;
+	}
+	LightLock_Unlock(&s_lock);
+
+	if (busy)
+		return;
+
+	art_payload p;
+	memset(&p, 0, sizeof p);
+	snprintf(p.url, sizeof p.url, "%s", want);
+
+	u8      *tiled = NULL;
+	int      cw = 0, ch = 0, cdim = 0;
+	u8       ar = 0, ag = 0, ab = 0;
+	unsigned read_ms = 0;
+
+	if (artcache_load(want, &tiled, &cw, &ch, &cdim, &ar, &ag, &ab, &read_ms)) {
+		p.tiled      = tiled;
+		p.w          = cw;
+		p.h          = ch;
+		p.tex_dim    = cdim;
+		p.accent_r   = ar;
+		p.accent_g   = ag;
+		p.accent_b   = ab;
+		p.cache_ms   = read_ms;
+		p.from_cache = true;
+		tl_timing("thumb HIT %dx%d read=%ums (%d left)", cw, ch, read_ms, left);
+	} else {
+		unsigned char *rgba = NULL;
+		int            w = 0, h = 0;
+		unsigned       fetch_ms = 0, decode_ms = 0;
+		char           err[128];
+
+		if (!art_fetch_decode(want, ART_THUMB_PX, &rgba, &w, &h, &fetch_ms,
+		                      &decode_ms, err, sizeof err)) {
+			tl_log("thumb failed: %s", err);
+			return;
+		}
+
+		tl_timing("thumb MISS %dx%d fetch=%ums decode=%ums (%d left)", w, h,
+		          fetch_ms, decode_ms, left);
+
+		p.rgba      = rgba;
+		p.w         = w;
+		p.h         = h;
+		p.fetch_ms  = fetch_ms;
+		p.decode_ms = decode_ms;
+
+		/* Store before publishing, unlike the hero: nothing is waiting on a
+		 * thumb appearing this instant, and doing it here keeps the pixels
+		 * alive without a second copy. */
+		album_art tmp;
+		memset(&tmp, 0, sizeof tmp);
+		art_accent_of(rgba, w, h, &tmp);
+		artcache_store(want, rgba, w, h, tmp.accent_r, tmp.accent_g,
+		               tmp.accent_b);
+	}
+
+	LightLock_Lock(&s_lock);
+	art_payload_free(&s_thumb_ready);
+	s_thumb_ready = p;
+	s_thumb_have  = true;
+	LightLock_Unlock(&s_lock);
 }
 
 /* Runs on the worker thread: does the ~1.5s of network and JPEG work that used

@@ -36,18 +36,22 @@ static bool uri_id(const char *uri, char *out, int outlen)
 	return true;
 }
 
-/* GET /v1/playlists/{id}?fields=name,owner(display_name).
+/* GET /v1/playlists/{id}?fields=name,images,owner(display_name).
  *
- * recently-played gives a context uri but never its name, so this is the only
- * way to label a playlist correctly. Results go through namecache, so this runs
- * once per playlist rather than once per launch. */
-static bool playlist_name(const char *uri, char *name, int namelen, char *owner,
-                          int ownerlen)
+ * recently-played gives a context uri but never the playlist's name or artwork,
+ * so this is the only way to label one correctly. The art matters as much as
+ * the name: the enclosing item's images are the *album cover of the track that
+ * happened to be playing*, so using those showed a playlist under an unrelated
+ * cover. Results go through namecache, so this runs once per playlist rather
+ * than once per launch. */
+static bool playlist_meta(const char *uri, char *name, int namelen, char *owner,
+                          int ownerlen, char *art, int artlen)
 {
 	name[0]  = '\0';
 	owner[0] = '\0';
+	art[0]   = '\0';
 
-	if (namecache_get(uri, name, namelen, owner, ownerlen))
+	if (namecache_get(uri, name, namelen, owner, ownerlen, art, artlen))
 		return true;
 
 	char id[64];
@@ -63,7 +67,7 @@ static bool playlist_name(const char *uri, char *name, int namelen, char *owner,
 
 	char path[192];
 	snprintf(path, sizeof path,
-	         "/v1/playlists/%s?fields=name,owner(display_name)", id);
+	         "/v1/playlists/%s?fields=name,images,owner(display_name)", id);
 
 	char         err[128];
 	http_response r;
@@ -74,7 +78,7 @@ static bool playlist_name(const char *uri, char *name, int namelen, char *owner,
 	if (r.status != 200 || !r.body || r.body_len == 0) {
 		/* A playlist can be deleted or made private after being played, which
 		 * shows up as 404/403. Not an error worth failing the whole list over. */
-		tl_log("playlist name %s: http %d", id, r.status);
+		tl_log("playlist meta %s: http %d", id, r.status);
 		http_free(&r);
 		return false;
 	}
@@ -82,10 +86,16 @@ static bool playlist_name(const char *uri, char *name, int namelen, char *owner,
 	const bool ok = json_get_str(r.body, r.body_len, "name", name, (size_t)namelen);
 	json_get_str(r.body, r.body_len, "owner.display_name", owner,
 	             (size_t)ownerlen);
+
+	/* Mosaics come in 640/300/60; a plain uploaded cover may be a single entry.
+	 * Prefer the smallest, which at 60px is already larger than the 52px tile. */
+	if (!json_get_str(r.body, r.body_len, "images[2].url", art, (size_t)artlen))
+		json_get_str(r.body, r.body_len, "images[0].url", art, (size_t)artlen);
+
 	http_free(&r);
 
 	if (ok && name[0])
-		namecache_put(uri, name, owner);
+		namecache_put(uri, name, owner, art);
 
 	return ok && name[0];
 }
@@ -191,17 +201,25 @@ player_result recents_fetch(recent_list *out, char *err, int errlen)
 		collection_item *it = &out->items[out->count++];
 
 		if (is_playlist) {
-			char pname[128] = "", powner[128] = "";
+			char pname[128] = "", powner[128] = "", part[256] = "";
 
-			if (playlist_name(play_uri, pname, sizeof pname, powner,
-			                  sizeof powner)) {
+			if (playlist_meta(play_uri, pname, sizeof pname, powner,
+			                  sizeof powner, part, sizeof part)) {
 				snprintf(it->name, sizeof it->name, "%s", pname);
 				snprintf(it->subtitle, sizeof it->subtitle, "Playlist - %s",
 				         powner[0] ? powner : artist);
+
+				/* The playlist's own cover, not `art` - that is the album of
+				 * whichever track happened to be playing when the context was
+				 * recorded, which is a different picture entirely. */
+				if (part[0])
+					snprintf(art, sizeof art, "%s", part);
 			} else {
 				/* Naming failed (deleted, private, or offline). Label it by the
 				 * track it was reached through rather than claiming it is an
-				 * album, which would be plainly wrong about what tapping does. */
+				 * album, which would be plainly wrong about what tapping does.
+				 * The track's album art stays as a stand-in - a wrong-but-real
+				 * cover beats an empty tile when we know nothing else. */
 				snprintf(p, sizeof p, "items[%d].track.name", i);
 				char track[128] = "";
 				json_doc_str(d, p, track, sizeof track);
@@ -325,8 +343,10 @@ player_result playlists_fetch(playlist_list *out, char *err, int errlen)
 		it->kind = COLLECTION_PLAYLIST;
 
 		/* Seed the name cache: these are the same uris recently-played refers
-		 * to, so filling it here saves a request per playlist later. */
-		namecache_put(uri, name, owner);
+		 * to, so filling it here saves a request per playlist later - and the
+		 * art especially, since recents cannot otherwise see a playlist's own
+		 * cover without going and asking for it. */
+		namecache_put(uri, name, owner, art);
 	}
 
 	json_doc_free(d);

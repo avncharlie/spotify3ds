@@ -10,12 +10,13 @@
 
 #define NAMECACHE_PATH "sdmc:/spotify/names.txt"
 
-/* One line per entry: "<unix-seconds> <uri> <name>\t<owner>\n".
+/* One line per entry: "<unix-seconds> <uri> <name>\t<owner>\t<art-url>\n".
  *
- * Space-separated up to the name, which may itself contain spaces, so the owner
- * is split off by a tab - a character Spotify does not allow in either field.
- * Entries written before owners were cached simply have no tab, and read back
- * with an empty owner.
+ * Space-separated up to the name, which may itself contain spaces, so the
+ * later fields are split off by tabs - a character Spotify does not allow in
+ * any of them. Entries written before a field existed simply have fewer tabs
+ * and read back empty, so an older cache upgrades in place rather than needing
+ * to be discarded.
  *
  * A flat file rather than the sharded layout artcache uses: entries are tens of
  * bytes and there are dozens of them, so the whole thing is smaller than a
@@ -25,13 +26,18 @@
  */
 
 #define MAX_ENTRIES 128
-#define LINE_MAX    320
+
+/* Must exceed the widest possible line - uri + name + owner + art url plus
+ * separators - or fgets would split one entry across two reads and the second
+ * half would be discarded as malformed. Mosaic urls alone run to ~200 chars. */
+#define LINE_MAX 768
 
 typedef struct {
 	long when;
 	char uri[128];
 	char name[128];
 	char owner[128];
+	char art[256];
 } entry;
 
 /* Loaded lazily and kept in memory: the worker reads this once per playlist it
@@ -76,12 +82,19 @@ static void load(void)
 		const char *uri   = sp1 + 1;
 		char       *name  = sp2 + 1;
 		const char *owner = "";
+		const char *art   = "";
 
-		/* Owner is optional: entries written before it was cached have no tab. */
+		/* Both trailing fields are optional; older entries have fewer tabs. */
 		char *tab = strchr(name, '\t');
 		if (tab) {
 			*tab  = '\0';
 			owner = tab + 1;
+
+			char *tab2 = strchr(tab + 1, '\t');
+			if (tab2) {
+				*tab2 = '\0';
+				art   = tab2 + 1;
+			}
 		}
 
 		if (!uri[0] || !name[0])
@@ -92,6 +105,7 @@ static void load(void)
 		snprintf(e->uri, sizeof e->uri, "%s", uri);
 		snprintf(e->name, sizeof e->name, "%s", name);
 		snprintf(e->owner, sizeof e->owner, "%s", owner);
+		snprintf(e->art, sizeof e->art, "%s", art);
 	}
 
 	fclose(f);
@@ -106,14 +120,14 @@ static void save(void)
 	}
 
 	for (int i = 0; i < s_count; i++)
-		fprintf(f, "%ld %s %s\t%s\n", s_entries[i].when, s_entries[i].uri,
-		        s_entries[i].name, s_entries[i].owner);
+		fprintf(f, "%ld %s %s\t%s\t%s\n", s_entries[i].when, s_entries[i].uri,
+		        s_entries[i].name, s_entries[i].owner, s_entries[i].art);
 
 	fclose(f);
 }
 
 bool namecache_get(const char *uri, char *name, int namelen, char *owner,
-                   int ownerlen)
+                   int ownerlen, char *art, int artlen)
 {
 	if (!uri || !uri[0] || !name || namelen <= 0)
 		return false;
@@ -136,25 +150,30 @@ bool namecache_get(const char *uri, char *name, int namelen, char *owner,
 		snprintf(name, namelen, "%s", s_entries[i].name);
 		if (owner && ownerlen > 0)
 			snprintf(owner, ownerlen, "%s", s_entries[i].owner);
+		if (art && artlen > 0)
+			snprintf(art, artlen, "%s", s_entries[i].art);
 		return true;
 	}
 
 	return false;
 }
 
-void namecache_put(const char *uri, const char *name, const char *owner)
+void namecache_put(const char *uri, const char *name, const char *owner,
+                   const char *art)
 {
 	if (!uri || !uri[0] || !name || !name[0])
 		return;
 
 	if (!owner)
 		owner = "";
+	if (!art)
+		art = "";
 
 	/* A newline or tab would corrupt the line format, and a space in the uri
 	 * would break the field split. Reject rather than mangle: the cost is one
 	 * extra request next launch. */
 	if (strpbrk(name, "\n\t") || strpbrk(owner, "\n\t") ||
-	    strpbrk(uri, " \n\t"))
+	    strpbrk(art, "\n\t") || strpbrk(uri, " \n\t"))
 		return;
 
 	load();
@@ -163,6 +182,7 @@ void namecache_put(const char *uri, const char *name, const char *owner)
 		if (strcmp(s_entries[i].uri, uri) == 0) {
 			snprintf(s_entries[i].name, sizeof s_entries[i].name, "%s", name);
 			snprintf(s_entries[i].owner, sizeof s_entries[i].owner, "%s", owner);
+			snprintf(s_entries[i].art, sizeof s_entries[i].art, "%s", art);
 			s_entries[i].when = now_seconds();
 			save();
 			return;
@@ -186,5 +206,6 @@ void namecache_put(const char *uri, const char *name, const char *owner)
 	snprintf(e->uri, sizeof e->uri, "%s", uri);
 	snprintf(e->name, sizeof e->name, "%s", name);
 	snprintf(e->owner, sizeof e->owner, "%s", owner);
+	snprintf(e->art, sizeof e->art, "%s", art);
 	save();
 }

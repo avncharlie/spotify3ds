@@ -20,11 +20,13 @@
 
 /* Look up `uri`. Returns false on a miss or an expired entry.
  *
- * `owner` may be NULL when the caller only wants the name; it comes back empty
- * for entries cached before the owner was known. */
+ * `owner` and `art` may be NULL when the caller only wants the name; they come
+ * back empty for entries cached before those fields existed. */
 bool namecache_get(const char *uri, char *name, int namelen, char *owner,
-                   int ownerlen);
+                   int ownerlen, char *art, int artlen);
 
-/* Record a name (and owner, which may be NULL or empty) for `uri`.
- * Best-effort: a failure just means the next launch refetches. */
-void namecache_put(const char *uri, const char *name, const char *owner);
+/* Record a name for `uri`, with optional owner and artwork url (either may be
+ * NULL or empty). Best-effort: a failure just means the next launch
+ * refetches. */
+void namecache_put(const char *uri, const char *name, const char *owner,
+                   const char *art);

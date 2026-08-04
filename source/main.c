@@ -14,6 +14,7 @@
 #include "ui/screen_list.h"
 #include "ui/screen_player.h"
 #include "ui/screen_top.h"
+#include "ui/thumbs.h"
 #include "ui/touch.h"
 #include "ui/ui.h"
 #include "worker.h"
@@ -460,6 +461,9 @@ int main(int argc, char **argv)
 			snprintf(last_art, sizeof last_art, "%s", snap.state.art_url);
 		}
 
+		/* Same for thumbnails, which have their own queue behind the hero. */
+		thumbs_pump();
+
 		/* Claim a finished download. Only the GPU upload happens here, which is
 		 * cheap enough to sit in the frame. */
 		{
@@ -656,6 +660,14 @@ int main(int argc, char **argv)
 				.pressed_id  = touch.down ? touch.press_id : -1,
 				.scrubbing   = g_scrub == SCRUB_DRAGGING,
 			};
+
+			/* Asking every frame is the intended use: a hit is a short scan and
+			 * a miss queues the fetch once. */
+			recent_list *const rl = &g_recents_buf;
+			const int          rn = worker_get_recents(rl);
+			for (int i = 0; i < SHELF_TILES && i < rn; i++)
+				pa.shelf[i] = thumbs_get(rl->items[i].art_url);
+
 			screen_player_draw(&pa);
 		}
 
@@ -674,6 +686,7 @@ int main(int argc, char **argv)
 
 	worker_stop();
 	art_free(&g_art);
+	thumbs_free_all();
 	net_exit();
 	C2D_TextBufDelete(textbuf);
 	C2D_Fini();

@@ -113,3 +113,15 @@ void worker_request_art(const char *url);
 /* Claim a completed download, if any. Returns false when nothing is ready.
  * On true, the caller owns payload->rgba and must free() it. */
 bool worker_take_art(art_payload *out);
+
+/* --- thumbnails --------------------------------------------------------
+ * Shelf tiles and Library rows. Queued rather than single-slot, since the UI
+ * wants several at once, and always fetched after the hero cover so a shelf of
+ * misses cannot delay the art the user is looking at. */
+
+/* Queue a thumbnail fetch. Ignored when already queued; safe to call every
+ * frame for every missing tile, which is how the UI uses it. */
+void worker_request_thumb(const char *url);
+
+/* Claim one finished thumbnail. Same ownership rules as worker_take_art. */
+bool worker_take_thumb(art_payload *out);

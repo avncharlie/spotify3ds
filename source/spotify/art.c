@@ -216,18 +216,36 @@ bool art_fetch_decode(const char *url, int target, unsigned char **out_rgba,
 	 * size and resampling afterwards.
 	 *
 	 * The denominator is derived from the actual source size rather than fixed,
-	 * because the shelf asks for Spotify's 64px variant: a hardcoded /4 turned
-	 * those into unusable 16x16. Shrink only while the result still covers
-	 * `target`, so the 640px hero still lands on 160x160 as before. */
+	 * because the shelf asks for Spotify's small variants: a hardcoded /4 turned
+	 * a 64px thumb into an unusable 16x16.
+	 *
+	 * Two constraints, and the second is the hard one. Prefer a result that
+	 * still covers `target`, but never exceed the texture it will be tiled
+	 * into: playlist covers come in sizes we do not choose - a 300px mosaic at
+	 * /4 is 75px, which overflowed a 64px texture and failed the whole
+	 * decode. */
+	const unsigned cap_px = (unsigned)art_tex_dim_for(target);
+
 	cinfo.scale_num   = 1;
-	cinfo.scale_denom = 1;
-	for (unsigned d = 8; d >= 2; d /= 2) {
-		if (cinfo.image_width / d >= (unsigned)target &&
-		    cinfo.image_height / d >= (unsigned)target) {
+	cinfo.scale_denom = 8; /* fallback: smallest, so something always fits */
+
+	/* Largest scale whose result still fits the texture. Ascending d means
+	 * descending size, so the first one that fits is the biggest that fits -
+	 * take it and stop.
+	 *
+	 * Searching for one that also *covers* `target` was wrong: a source
+	 * already smaller than the target (Spotify's 60px mosaics against a 64px
+	 * tile) never covers at any scale, so the loop ran to the end and left the
+	 * smallest, decoding a 60px image down to 8x8. Upscaling slightly at draw
+	 * time is invisible; throwing away 7/8 of the pixels is not. */
+	for (unsigned d = 1; d <= 8; d *= 2) {
+		if (cinfo.image_width / d <= cap_px &&
+		    cinfo.image_height / d <= cap_px) {
 			cinfo.scale_denom = d;
 			break;
 		}
 	}
+
 	cinfo.out_color_space = JCS_EXT_RGBA;
 
 	jpeg_start_decompress(&cinfo);

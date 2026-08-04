@@ -124,6 +124,9 @@ void tl_step(const char *step, int pass, const char *fmt, ...)
 void tl_done(void)
 {
 	emit(s_result, "DONE");
+	/* Also to stdout: on hardware the host can only see the netload stream,
+	 * not sdmc:/testresult.txt, so this is the only completion signal it gets. */
+	emit_stdout("DONE");
 	tl_log("---- phase %d done ----", s_phase);
 
 	if (s_result) {

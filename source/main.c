@@ -291,11 +291,6 @@ int main(int argc, char **argv)
 	 * regressions remain measurable. */
 	tl_set_timing(g_smoketest);
 
-	/* Phase 1 of the art cache: measure SD throughput before building anything
-	 * that depends on it. Azahar reads from the host filesystem, so only the
-	 * hardware numbers mean anything here. */
-	if (g_smoketest)
-		artcache_probe();
 
 	C3D_RenderTarget *top    = C2D_CreateScreenTarget(GFX_TOP, GFX_LEFT);
 	C3D_RenderTarget *bottom = C2D_CreateScreenTarget(GFX_BOTTOM, GFX_LEFT);
@@ -312,6 +307,13 @@ int main(int argc, char **argv)
 	if (net_up) {
 		int lfd = link3dsStdio();
 		emit_banner(lfd);
+
+		/* Art cache phase 1: measure SD throughput before building anything
+		 * that depends on it. Must come *after* link3dsStdio, or the numbers
+		 * only reach the SD log and never the host. Azahar reads from the host
+		 * filesystem, so only the hardware figures mean anything. */
+		if (g_smoketest)
+			artcache_probe();
 	}
 
 	if (!net_up) {

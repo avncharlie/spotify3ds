@@ -10,6 +10,14 @@ A Spotify remote for the Nintendo 3DS / New 2DS XL.
 Audio keeps playing on your phone or desktop — this controls Spotify's
 *active device* via the official Web API. It is a remote, not a player.
 
+## Screenshots
+
+<p align="center">
+  <img src="assets/main-screen.png" alt="Spotify3DS Player screen" width="31%">
+  <img src="assets/library-screen.png" alt="Spotify3DS Library screen" width="31%">
+  <img src="assets/tracks-screen.png" alt="Spotify3DS Tracks screen" width="31%">
+</p>
+
 ## Installation
 
 You need Spotify Premium, a homebrew-enabled 3DS, Python 3 on your computer,
@@ -53,15 +61,15 @@ access at <https://spotify.com/account/apps> if the SD card or file is lost.
   return directly to Player with `B` or the top-left back control.
 - Library: tap a row's play icon to start it immediately, or its right chevron
   to open its tracks. The current playing row shows pause in the same cell.
-  D-pad up/down selects a collection, `A` plays the whole collection, `X` opens
-  its tracks,
+  D-pad up/down selects a collection, `A` starts it and then toggles play/pause,
+  `X` opens its tracks,
   D-pad left/right skips the previous/next song, `SELECT` toggles play/pause,
   `L/R` jumps sections, and `B` returns. Tap `FIND` to filter saved albums and
   playlists by name, artist, or owner using the system keyboard; tap the filter
   strip's `X` to clear it.
 - Tracks: tap a row's play icon to start it immediately; the current playing
   track shows pause in the same cell. D-pad up/down selects a song, `A` plays
-  it, `L/R` changes 50-track
+  it and then toggles play/pause, `L/R` changes 50-track
   pages, D-pad left/right skips the previous/next song, `SELECT` toggles
   play/pause, `X` queues the selected song, and `B` returns to the Library. Tap a
   row's right queue icon to queue it directly. Moving past a page boundary with

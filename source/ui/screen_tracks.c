@@ -272,7 +272,7 @@ void screen_tracks_draw(const screen_tracks_args *a)
 
 	ui_text(a->buf, a->collection_name ? a->collection_name : "Tracks", 96,
 	        ui_baseline((HEADER_H - ui_px(TY_ROW_NAME)) / 2, TY_ROW_NAME),
-	        TY_ROW_NAME, 126, CLR_NAME);
+	        TY_ROW_NAME, 96, CLR_NAME);
 
 	if (a->ready && a->page) {
 		const bool has_prev =
@@ -284,18 +284,25 @@ void screen_tracks_draw(const screen_tracks_args *a)
 		    (a->page->collection.kind == COLLECTION_PLAYLIST &&
 		     a->page->offset > 0 && a->page->total > a->page->count);
 		if (has_prev) {
-			ui_text(a->buf, "< L", 230,
+			ui_text(a->buf, "< L", 198,
 			        ui_baseline((HEADER_H - ui_px(TY_ROW_NAME)) / 2, TY_ROW_NAME),
-			        TY_ROW_NAME, 38,
+			        TY_ROW_NAME, 34,
 			        a->pressed_id == TRACK_BTN_PREV_PAGE ? CLR_GREEN : CLR_SUB);
-			tb_add(a->tb, 224, 0, 46, HEADER_H, TRACK_BTN_PREV_PAGE);
+			tb_add(a->tb, 194, 0, 40, HEADER_H, TRACK_BTN_PREV_PAGE);
 		}
 		if (has_next) {
-			ui_text(a->buf, "R >", 278,
+			ui_text(a->buf, "R >", 240,
 			        ui_baseline((HEADER_H - ui_px(TY_ROW_NAME)) / 2, TY_ROW_NAME),
-			        TY_ROW_NAME, 36,
+			        TY_ROW_NAME, 34,
 			        a->pressed_id == TRACK_BTN_NEXT_PAGE ? CLR_GREEN : CLR_SUB);
-			tb_add(a->tb, 272, 0, 48, HEADER_H, TRACK_BTN_NEXT_PAGE);
+			tb_add(a->tb, 236, 0, 40, HEADER_H, TRACK_BTN_NEXT_PAGE);
 		}
 	}
+
+	const bool collection_pressed =
+	    a->pressed_id == TRACK_BTN_PLAY_COLLECTION;
+	ui_disc(302, 15, 10, collection_pressed ? CLR_GREEN_PRESS : CLR_GREEN);
+	C2D_DrawTriangle(299, 10, CLR_ACTION, 299, 20, CLR_ACTION, 306, 15,
+	                 CLR_ACTION, 0);
+	tb_add(a->tb, 280, 0, 40, HEADER_H, TRACK_BTN_PLAY_COLLECTION);
 }

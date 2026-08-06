@@ -42,6 +42,7 @@ void touch_update(touch_state *t, const touch_rect *rects, int nrects)
 	t->pressed  = false;
 	t->released = false;
 	t->clicked  = -1;
+	t->long_pressed = -1;
 	t->dx       = 0;
 	t->dy       = 0;
 
@@ -66,6 +67,7 @@ void touch_update(touch_state *t, const touch_rect *rects, int nrects)
 		t->dragging = false;
 		t->press_at = osGetTime();
 		t->tap_cancelled = false;
+		t->long_fired = false;
 		t->start_px = t->px;
 		t->start_py = t->py;
 		t->press_id = touch_hit(rects, nrects, t->px, t->py);
@@ -82,6 +84,14 @@ void touch_update(touch_state *t, const touch_rect *rects, int nrects)
 	 * Keep drag detection alive, but disarm the eventual release as a tap. */
 	if (down && osGetTime() - t->press_at > TOUCH_TAP_TIMEOUT_MS)
 		t->tap_cancelled = true;
+
+	if (down && !t->dragging && !t->long_fired && t->press_id >= 0 &&
+	    osGetTime() - t->press_at >= TOUCH_LONG_PRESS_MS &&
+	    touch_hit(rects, nrects, t->px, t->py) == t->press_id) {
+		t->long_pressed = t->press_id;
+		t->long_fired = true;
+		t->tap_cancelled = true;
+	}
 
 	if (up) {
 		t->down     = false;

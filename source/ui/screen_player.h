@@ -45,6 +45,8 @@ typedef struct {
 
 	/* Shelf art, NULL where not yet loaded. */
 	const C2D_Image *shelf[SHELF_TILES];
+	bool             shelf_current[SHELF_TILES];
+	unsigned         animation_ms;
 } screen_player_args;
 
 void screen_player_draw(const screen_player_args *a);

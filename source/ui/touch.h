@@ -50,6 +50,7 @@ void tb_add_hit(touch_builder *tb, float cx, float cy, float min_size, int id);
  * of that jitter. */
 #define TOUCH_SLOP 8
 #define TOUCH_TAP_TIMEOUT_MS 300
+#define TOUCH_LONG_PRESS_MS 600
 
 typedef struct {
 	bool down;     /* touch currently held */
@@ -61,8 +62,10 @@ typedef struct {
 	bool dragging; /* exceeded TOUCH_SLOP since the press */
 	unsigned long long press_at; /* osGetTime() when the touch began */
 	bool tap_cancelled;          /* held too long to still count as a tap */
+	bool long_fired;             /* long press already emitted for this hold */
 	int  press_id; /* rect the press started in, or -1 */
 	int  clicked;  /* rect activated this frame, or -1 */
+	int  long_pressed; /* stationary rect held for TOUCH_LONG_PRESS_MS */
 } touch_state;
 
 /* Call once per frame, after hidScanInput(). */

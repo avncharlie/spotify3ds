@@ -27,6 +27,7 @@ typedef struct {
 	char album[192];
 	char art_url[256];
 	char track_uri[128];
+	char album_uri[128];
 	char context_uri[128];
 	char device_name[64];
 	char device_type[32];

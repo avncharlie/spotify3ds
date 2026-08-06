@@ -48,7 +48,8 @@ access at <https://spotify.com/account/apps> if the SD card or file is lost.
 ## Controls
 
 - Player: `A` play/pause, D-pad left/right previous/next, `X` Library, and `Y`
-  show/hide cover art.
+  show/hide cover art. Tap a Recently Played tile to open its tracks; hold it
+  for 600 ms to start the collection immediately.
 - Library: tap a row's right chevron to open its tracks directly. D-pad up/down
   selects a collection, `A` plays the whole collection, `X` opens its tracks,
   D-pad left/right skips the previous/next song, `SELECT` toggles play/pause,
@@ -61,11 +62,13 @@ access at <https://spotify.com/account/apps> if the SD card or file is lost.
   row's right queue icon to queue it directly. Moving past a page boundary with
   D-pad up/down also loads the adjacent page automatically. Playlist pagination
   wraps: `L`/Up on the first page opens the last page, and `R`/Down on the last
-  page opens the first page.
+  page opens the first page. The play icon at the right of the header starts
+  the whole album or playlist without leaving Tracks.
 
 Library and Tracks mark Spotify's current context or song with a green title,
 edge, row tint, and an equalizer over its artwork. The bars animate while
-playing and remain fixed while paused.
+playing and remain fixed while paused. The same equalizer marks the current
+collection on the Player shelf, which is always pinned to the leftmost tile.
 
 Only the current 50-track page is kept in RAM, so playlists with thousands of
 songs use the same bounded memory as small playlists. Track ordering is always

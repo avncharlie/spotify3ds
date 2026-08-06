@@ -46,8 +46,8 @@ static bool uri_id(const char *uri, char *out, int outlen)
  * happened to be playing*, so using those showed a playlist under an unrelated
  * cover. Results go through namecache, so this runs once per playlist rather
  * than once per launch. */
-static bool playlist_meta(const char *uri, char *name, int namelen, char *owner,
-                          int ownerlen, char *art, int artlen)
+bool playlist_metadata(const char *uri, char *name, int namelen, char *owner,
+                       int ownerlen, char *art, int artlen)
 {
 	name[0]  = '\0';
 	owner[0] = '\0';
@@ -220,8 +220,8 @@ player_result recents_fetch(recent_list *out, char *err, int errlen)
 		if (is_playlist) {
 			char pname[128] = "", powner[128] = "", part[256] = "";
 
-			if (playlist_meta(play_uri, pname, sizeof pname, powner,
-			                  sizeof powner, part, sizeof part)) {
+			if (playlist_metadata(play_uri, pname, sizeof pname, powner,
+			                      sizeof powner, part, sizeof part)) {
 				snprintf(it->name, sizeof it->name, "%s", pname);
 				snprintf(it->subtitle, sizeof it->subtitle, "Playlist" SUB_SEP "%s",
 				         powner[0] ? powner : artist);

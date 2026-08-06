@@ -386,6 +386,16 @@ static bool track_page_offsets_valid(const track_page *page)
 	return true;
 }
 
+static bool recent_contexts_unique(const recent_list *list)
+{
+	for (int i = 0; i < list->count; i++)
+		for (int j = i + 1; j < list->count; j++)
+			if (strcmp(list->items[i].context_uri,
+			           list->items[j].context_uri) == 0)
+				return false;
+	return true;
+}
+
 static int list_id_at(int pos, int recent_count, int playlist_count,
                       int album_count)
 {
@@ -453,6 +463,16 @@ static repeat_mode effective_repeat(const worker_snapshot *snap)
 {
 	const long polled = snap->have_state ? (long)snap->state.repeat : REPEAT_OFF;
 	return (repeat_mode)opt_get(&g_opt_rep, polled);
+}
+
+static const char *current_collection_uri(const player_state *state)
+{
+	if (strncmp(state->context_uri, "spotify:playlist:", 17) == 0 ||
+	    strncmp(state->context_uri, "spotify:album:", 14) == 0)
+		return state->context_uri;
+	return strncmp(state->album_uri, "spotify:album:", 14) == 0
+	           ? state->album_uri
+	           : "";
 }
 
 /* ---------------------------------------------------------------- main */
@@ -866,6 +886,11 @@ int main(int argc, char **argv)
 				g_view = VIEW_LIST;
 				g_tracks_armed = -1;
 				g_tracks_cursor = -1;
+			} else if (touch.clicked == TRACK_BTN_PLAY_COLLECTION) {
+				tl_log("tracks: play collection %s",
+				       g_tracks_collection.context_uri);
+				worker_play_context(g_tracks_collection.context_uri);
+				opt_set(&g_opt_play, 1);
 			} else if ((touch.clicked == TRACK_BTN_RETRY ||
 			            (keys_down & KEY_X)) &&
 			           g_tracks_buf.state == TRACKS_ERROR) {
@@ -1026,7 +1051,18 @@ int main(int argc, char **argv)
 			const int          n   = worker_get_recents(rl);
 			const int          idx = touch.clicked - BTN_SHELF0;
 			if (idx < n) {
-				tl_log("shelf: play %s", rl->items[idx].context_uri);
+				tl_log("shelf: open %s", rl->items[idx].context_uri);
+				tracks_open(&rl->items[idx]);
+			}
+		}
+
+		if (input_view == VIEW_PLAYER && touch.long_pressed >= BTN_SHELF0 &&
+		    touch.long_pressed < BTN_SHELF0 + SHELF_TILES) {
+			recent_list *const rl = &g_recents_buf;
+			const int n = worker_get_recents(rl);
+			const int idx = touch.long_pressed - BTN_SHELF0;
+			if (idx < n) {
+				tl_log("shelf: long-play %s", rl->items[idx].context_uri);
 				worker_play_context(rl->items[idx].context_uri);
 				opt_set(&g_opt_play, 1);
 			}
@@ -1138,6 +1174,16 @@ int main(int argc, char **argv)
 				for (int i = 0; i < rl->count && i < 4; i++)
 					tl_log("  recent[%d] %s / %s -> %s", i, rl->items[i].name,
 					       rl->items[i].subtitle, rl->items[i].context_uri);
+				const char *current = snap.have_state
+				                          ? current_collection_uri(&snap.state)
+				                          : "";
+				tl_step("recents_current",
+				        recent_contexts_unique(rl) &&
+				            (!current[0] ||
+				             strcmp(rl->items[0].context_uri, current) == 0),
+				        "current=%s first=%s unique=%d",
+				        current[0] ? current : "-", rl->items[0].context_uri,
+				        (int)recent_contexts_unique(rl));
 			} else if (frames > 600) {
 				logged_recents = true;
 				tl_step("recents", 0, "no items after %d frames", frames);
@@ -1521,14 +1567,20 @@ int main(int argc, char **argv)
 				.duration_ms = duration,
 				.pressed_id  = touch.down ? touch.press_id : -1,
 				.scrubbing   = g_scrub == SCRUB_DRAGGING,
+				.animation_ms = (unsigned)osGetTime(),
 			};
 
 			/* Asking every frame is the intended use: a hit is a short scan and
 			 * a miss queues the fetch once. */
 			recent_list *const rl = &g_recents_buf;
 			const int          rn = worker_get_recents(rl);
-			for (int i = 0; i < SHELF_TILES && i < rn; i++)
+			for (int i = 0; i < SHELF_TILES && i < rn; i++) {
 				pa.shelf[i] = thumbs_get(rl->items[i].art_url);
+				pa.shelf_current[i] =
+				    snap.have_state &&
+				    strcmp(rl->items[i].context_uri,
+				           current_collection_uri(&snap.state)) == 0;
+			}
 
 			screen_player_draw(&pa);
 		}

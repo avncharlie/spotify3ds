@@ -254,8 +254,6 @@ void ui_now_playing_badge(float x, float y, float size, bool playing,
 		{12, 10, 18, 8}, {8, 14, 15, 10}, {11, 17, 8, 14}, {9, 13, 11, 18},
 	};
 	static const unsigned char paused_heights[4] = {8, 16, 10, 14};
-	const unsigned char *heights =
-	    playing ? active_heights[(animation_ms / 180) % 8] : paused_heights;
 	const float scale = size / 30.0f;
 	const float bar_w = 3.0f * scale;
 	const float gap = 2.0f * scale;
@@ -266,7 +264,24 @@ void ui_now_playing_badge(float x, float y, float size, bool playing,
 	C2D_DrawRectSolid(x, y, 0.0f, size, size,
 	                  C2D_Color32(0x00, 0x00, 0x00, 0x8C));
 	for (int i = 0; i < 4; i++) {
-		const float h = (float)heights[i] * scale;
+		float height = paused_heights[i];
+		if (playing) {
+			const unsigned frame = (animation_ms / 180) % 8;
+			const float t = (float)(animation_ms % 180) / 180.0f;
+			const float t2 = t * t;
+			const float t3 = t2 * t;
+			const float p0 = active_heights[(frame + 7) % 8][i];
+			const float p1 = active_heights[frame][i];
+			const float p2 = active_heights[(frame + 1) % 8][i];
+			const float p3 = active_heights[(frame + 2) % 8][i];
+
+			/* Cyclic Catmull-Rom interpolation keeps both height and velocity
+			 * continuous as each keyframe passes. */
+			height = 0.5f * (2.0f * p1 + (-p0 + p2) * t +
+			                 (2.0f * p0 - 5.0f * p1 + 4.0f * p2 - p3) * t2 +
+			                 (-p0 + 3.0f * p1 - 3.0f * p2 + p3) * t3);
+		}
+		const float h = height * scale;
 		C2D_DrawRectSolid(bx + (bar_w + gap) * i, base - h, 0.0f, bar_w, h,
 		                  C2D_Color32(0x1D, 0xB9, 0x54, 0xFF));
 	}

@@ -270,6 +270,9 @@ void screen_player_draw(const screen_player_args *a)
 		} else {
 			C2D_DrawRectSolid(x, SHELF_Y, 0.0f, TILE, TILE, CLR_TILE_BG);
 		}
+		if (a->shelf_current[i])
+			ui_now_playing_badge(x, SHELF_Y, TILE, a->playing,
+			                     a->animation_ms);
 		tb_add(a->tb, x, SHELF_Y, TILE, TILE, BTN_SHELF0 + i);
 	}
 

@@ -68,6 +68,11 @@ typedef collection_item recent_item;
  * resolved through the SD-backed name cache, so a repeat launch is free. */
 player_result recents_fetch(recent_list *out, char *err, int errlen);
 
+/* Resolve one playlist's display metadata through the name cache, fetching it
+ * from Spotify only on a miss. Blocking; worker thread only. */
+bool playlist_metadata(const char *uri, char *name, int namelen, char *owner,
+                       int ownerlen, char *art, int artlen);
+
 /* GET /v1/me/playlists?limit=50. Blocking; worker thread only.
  *
  * Uses `fields=` to drop the 60% of the response we never read - 52KB down to

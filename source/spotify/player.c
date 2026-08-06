@@ -101,6 +101,8 @@ player_result player_poll(player_state *out, char *err, int errlen)
 	json_get_str(j, n, "item.album.images[0].url", out->art_url,
 	             sizeof out->art_url);
 	json_get_str(j, n, "item.uri", out->track_uri, sizeof out->track_uri);
+	json_get_str(j, n, "item.album.uri", out->album_uri,
+	             sizeof out->album_uri);
 	json_get_str(j, n, "context.uri", out->context_uri,
 	             sizeof out->context_uri);
 	json_get_int(j, n, "progress_ms", &out->progress_ms);

@@ -27,6 +27,7 @@
  * ~750ms round trip, so this is a short window, not a busy loop. */
 #define SETTLE_RETRIES  3
 #define SETTLE_RETRY_MS 250
+#define SUB_SEP " \xC2\xB7 "
 
 static Thread    s_thread;
 static LightLock s_lock;
@@ -72,6 +73,9 @@ static recent_list s_recents;
 static bool        s_recents_wanted = true; /* fetch once at startup */
 static u64         s_recents_at;            /* last successful fetch */
 static u64         s_recents_attempt_at;    /* retry backoff after failures */
+static bool        s_current_meta_pending;
+static char        s_current_meta_attempted[128];
+static bool        s_current_fallback;
 
 static playlist_list s_playlists;
 static bool          s_playlists_wanted = true; /* fetch once at startup */
@@ -133,6 +137,7 @@ static void do_playlists(void);
 static void do_albums(void);
 static void do_tracks(void);
 static void do_thumbs(void);
+static void do_current_metadata(void);
 
 /* Short label for logs. Uses the *tail* of the content hash, not the head:
  * every Spotify art URL begins "ab67616d0000b273...", so a leading prefix is
@@ -144,6 +149,112 @@ static const char *want_key8(const char *url)
 	const char *seg   = slash ? slash + 1 : url;
 	const size_t n    = strlen(seg);
 	return n > 8 ? seg + n - 8 : seg;
+}
+
+static bool uri_is(const char *uri, const char *prefix)
+{
+	return uri && strncmp(uri, prefix, strlen(prefix)) == 0;
+}
+
+static const char *playback_collection_uri(const player_state *st,
+	                                       bool *is_playlist)
+{
+	*is_playlist = uri_is(st->context_uri, "spotify:playlist:");
+	if (*is_playlist)
+		return st->context_uri;
+	if (uri_is(st->context_uri, "spotify:album:"))
+		return st->context_uri;
+	return uri_is(st->album_uri, "spotify:album:") ? st->album_uri : NULL;
+}
+
+static void pin_recent_locked(const collection_item *item)
+{
+	int kept = 0;
+	for (int i = 0; i < s_recents.count; i++) {
+		if (strcmp(s_recents.items[i].context_uri, item->context_uri) != 0)
+			s_recents.items[kept++] = s_recents.items[i];
+	}
+	if (kept >= RECENTS_MAX)
+		kept = RECENTS_MAX - 1;
+	memmove(&s_recents.items[1], &s_recents.items[0],
+	        (size_t)kept * sizeof s_recents.items[0]);
+	s_recents.items[0] = *item;
+	s_recents.count = kept + 1;
+}
+
+/* Build and pin immediately from data already in memory. A playlist missing
+ * from both loaded lists still gets a correct URI and temporary tile; metadata
+ * is enriched later without delaying the poll/art critical path. */
+static bool pin_current_locked(const player_state *st, bool use_recent_meta)
+{
+	bool is_playlist = false;
+	const char *uri = playback_collection_uri(st, &is_playlist);
+	if (!uri)
+		return true;
+
+	collection_item item;
+	memset(&item, 0, sizeof item);
+	bool resolved = false;
+	if (is_playlist) {
+		for (int i = 0; i < s_playlists.count; i++) {
+			if (strcmp(s_playlists.items[i].context_uri, uri) == 0) {
+				item = s_playlists.items[i];
+				resolved = true;
+				break;
+			}
+		}
+		if (!resolved && use_recent_meta) {
+			for (int i = 0; i < s_recents.count; i++) {
+				if (strcmp(s_recents.items[i].context_uri, uri) == 0 &&
+				    !(s_current_fallback && i == 0)) {
+					item = s_recents.items[i];
+					resolved = true;
+					break;
+				}
+			}
+		}
+		if (!resolved) {
+			snprintf(item.name, sizeof item.name, "%.127s",
+			         st->track[0] ? st->track : "Current playlist");
+			snprintf(item.subtitle, sizeof item.subtitle,
+			         "Playlist" SUB_SEP "%.115s",
+			         st->artist);
+			snprintf(item.art_url, sizeof item.art_url, "%s", st->art_url);
+			snprintf(item.context_uri, sizeof item.context_uri, "%s", uri);
+			item.kind = COLLECTION_PLAYLIST;
+		}
+	} else {
+		for (int i = 0; i < s_albums.count; i++) {
+			if (strcmp(s_albums.items[i].context_uri, uri) == 0) {
+				item = s_albums.items[i];
+				resolved = true;
+				break;
+			}
+		}
+		if (!resolved) {
+			snprintf(item.name, sizeof item.name, "%.127s", st->album);
+			snprintf(item.subtitle, sizeof item.subtitle,
+			         "Album" SUB_SEP "%.118s",
+			         st->artist);
+			snprintf(item.art_url, sizeof item.art_url, "%s", st->art_url);
+			snprintf(item.context_uri, sizeof item.context_uri, "%s", uri);
+			item.kind = COLLECTION_ALBUM;
+			resolved = true;
+		}
+	}
+
+	pin_recent_locked(&item);
+	s_current_fallback = is_playlist && !resolved;
+	return resolved;
+}
+
+static void update_current_meta_pending_locked(const player_state *st,
+	                                           bool resolved)
+{
+	bool is_playlist = false;
+	const char *uri = playback_collection_uri(st, &is_playlist);
+	s_current_meta_pending = !resolved && is_playlist && uri &&
+	                         strcmp(uri, s_current_meta_attempted) != 0;
 }
 
 static bool pop_cmd(queued_cmd *out)
@@ -174,6 +285,7 @@ static void do_poll(void)
 		s_state      = st;
 		s_have_state = true;
 		s_status[0]  = '\0';
+		update_current_meta_pending_locked(&st, pin_current_locked(&st, true));
 	} else {
 		if (pr == PLAYER_NOTHING_PLAYING)
 			s_have_state = false;
@@ -346,6 +458,7 @@ static void worker_main(void *arg)
 		do_playlists();
 		do_albums();
 		do_recents();
+		do_current_metadata();
 
 		/* Thumbnails last of all: they are decoration, and a shelf full of
 		 * cache misses must never stand between a track change and the cover
@@ -763,8 +876,12 @@ static void do_playlists(void)
 
 	LightLock_Lock(&s_lock);
 	s_playlists_wanted = false;
-	if (pr == PLAYER_OK)
+	if (pr == PLAYER_OK) {
 		s_playlists = *fresh;
+		if (s_have_state)
+			update_current_meta_pending_locked(
+			    &s_state, pin_current_locked(&s_state, true));
+	}
 	LightLock_Unlock(&s_lock);
 
 	free(fresh);
@@ -811,8 +928,12 @@ static void do_albums(void)
 
 	LightLock_Lock(&s_lock);
 	s_albums_wanted = false;
-	if (pr == PLAYER_OK)
+	if (pr == PLAYER_OK) {
 		s_albums = *fresh;
+		if (s_have_state)
+			update_current_meta_pending_locked(
+			    &s_state, pin_current_locked(&s_state, true));
+	}
 	LightLock_Unlock(&s_lock);
 
 	free(fresh);
@@ -1004,6 +1125,10 @@ static void do_recents(void)
 	s_recents_attempt_at = osGetTime();
 	if (pr == PLAYER_OK) {
 		s_recents = *fresh;
+		s_current_fallback = false;
+		if (s_have_state)
+			update_current_meta_pending_locked(
+			    &s_state, pin_current_locked(&s_state, true));
 		s_recents_at = s_recents_attempt_at;
 	}
 	LightLock_Unlock(&s_lock);
@@ -1012,6 +1137,54 @@ static void do_recents(void)
 
 	if (pr != PLAYER_OK && pr != PLAYER_NOTHING_PLAYING)
 		tl_log("recents: %s (%s)", player_result_str(pr), err);
+}
+
+static void do_current_metadata(void)
+{
+	player_state st;
+	LightLock_Lock(&s_lock);
+	const bool pending = s_current_meta_pending && s_have_state;
+	if (pending)
+		st = s_state;
+	LightLock_Unlock(&s_lock);
+	if (!pending)
+		return;
+
+	bool is_playlist = false;
+	const char *uri = playback_collection_uri(&st, &is_playlist);
+	if (!uri || !is_playlist) {
+		LightLock_Lock(&s_lock);
+		s_current_meta_pending = false;
+		LightLock_Unlock(&s_lock);
+		return;
+	}
+
+	collection_item item;
+	memset(&item, 0, sizeof item);
+	char owner[128] = "";
+	const bool ok = playlist_metadata(uri, item.name, sizeof item.name, owner,
+	                                  sizeof owner, item.art_url,
+	                                  sizeof item.art_url);
+	if (ok) {
+		snprintf(item.subtitle, sizeof item.subtitle,
+		         "Playlist" SUB_SEP "%.115s",
+		         owner[0] ? owner : st.artist);
+		snprintf(item.context_uri, sizeof item.context_uri, "%s", uri);
+		item.kind = COLLECTION_PLAYLIST;
+	}
+
+	LightLock_Lock(&s_lock);
+	bool still_playlist = false;
+	const char *current =
+	    s_have_state ? playback_collection_uri(&s_state, &still_playlist) : NULL;
+	if (current && still_playlist && strcmp(current, uri) == 0 && ok) {
+		pin_recent_locked(&item);
+		s_current_fallback = false;
+	}
+	snprintf(s_current_meta_attempted, sizeof s_current_meta_attempted, "%s",
+	         uri);
+	s_current_meta_pending = false;
+	LightLock_Unlock(&s_lock);
 }
 
 void worker_request_poll(void)

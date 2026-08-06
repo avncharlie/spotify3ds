@@ -10,6 +10,8 @@ A Spotify remote for the Nintendo 3DS / New 2DS XL.
 Audio keeps playing on your phone or desktop — this controls Spotify's
 *active device* via the official Web API. It is a remote, not a player.
 
+https://github.com/user-attachments/assets/de96f312-1107-42eb-a012-5f5bdfdea7f2
+
 ## Screenshots
 
 <p align="center">

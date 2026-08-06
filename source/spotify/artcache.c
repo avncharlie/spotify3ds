@@ -16,8 +16,9 @@
 
 #define ARTCACHE_MAGIC 0x43334100u /* "\0A3C" */
 
-/* Entries are fixed-size, so the 2GB budget is just a count. */
-#define ARTCACHE_MAX_BYTES (2ull * 1024 * 1024 * 1024)
+/* Bound by the worst-case 160x160 payload. Thumbnails are smaller, so actual
+ * payload usage is normally well below this conservative 5 GiB ceiling. */
+#define ARTCACHE_MAX_BYTES (5ull * 1024 * 1024 * 1024)
 
 /* A 160x160 image inside a 256x256 texture occupies 20x20 tiles of 8x8. The
  * tiles are laid out row-major across the *full* 32-tile-wide texture, so the
@@ -41,12 +42,9 @@ typedef struct __attribute__((packed)) {
 	u32 payload_len;
 	u32 crc32;
 
-	/* Recency, for eviction. The obvious choice would be the file's mtime, but
-	 * the 3DS filesystem layer leaves st_mtime as 0 for every entry and utime()
-	 * is inert, so LRU by mtime silently evicts arbitrary files. Instead each
-	 * entry carries a counter stamped on write and refreshed on every hit; the
-	 * sweep evicts the lowest. Wraparound is not a practical concern at a few
-	 * hundred track changes a day. */
+	/* Retained for compatibility with version-3 cache files. Global LRU required
+	 * opening every entry at startup, which is prohibitively slow on 3DS SD
+	 * storage; eviction is now FIFO within independently bounded hash shards. */
 	u32 use_seq;
 	u32 reserved;
 } artcache_hdr;
@@ -55,9 +53,6 @@ typedef struct __attribute__((packed)) {
  * trusting a comment. Packed, the fields total exactly 33 bytes. */
 _Static_assert(sizeof(artcache_hdr) == 33, "artcache header layout changed - "
                                            "bump ARTCACHE_VERSION");
-
-/* Highest use_seq seen this session, so refreshes keep climbing across runs. */
-static u32 s_use_seq;
 
 static bool s_writes_disabled;
 
@@ -137,129 +132,111 @@ static void artcache_paths(const char *key, char *dir, int dirlen, char *file,
 		snprintf(tmp, tmplen, "%s/%s.tmp", dir, key);
 }
 
-/* Entries are all the same size, so the byte budget is really a count. */
+/* Use the largest possible payload so the logical cache size cannot exceed the
+ * budget even if every entry is hero-sized. Distribute the remainder across
+ * the first shards: 187 shards hold 205 files and 69 hold 204. */
 #define ARTCACHE_MAX_ENTRIES \
 	((int)(ARTCACHE_MAX_BYTES / (sizeof(artcache_hdr) + 102400)))
+#define ARTCACHE_SHARDS 256
+#define ARTCACHE_SHARD_BASE (ARTCACHE_MAX_ENTRIES / ARTCACHE_SHARDS)
+#define ARTCACHE_SHARD_EXTRA (ARTCACHE_MAX_ENTRIES % ARTCACHE_SHARDS)
 
-typedef struct {
-	char path[192];
-	u32  use_seq;
-} sweep_entry;
+static u16  s_shard_count[ARTCACHE_SHARDS];
+static bool s_shard_known[ARTCACHE_SHARDS];
 
-static int sweep_cmp(const void *a, const void *b)
+static int hex_value(char c)
 {
-	const u32 ta = ((const sweep_entry *)a)->use_seq;
-	const u32 tb = ((const sweep_entry *)b)->use_seq;
-	return (ta > tb) - (ta < tb); /* least recently used first */
+	if (c >= '0' && c <= '9')
+		return c - '0';
+	return c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1;
 }
 
-void artcache_init(void)
+static int shard_index(const char *key)
 {
-	mkdir(CACHE_ROOT, 0777);
-	/* Shard directories are created lazily on first write: one mkdir costs
-	 * ~80ms on hardware, so creating all 256 up front would stall startup for
-	 * roughly twenty seconds. */
+	const int hi = hex_value(key[0]);
+	const int lo = hex_value(key[1]);
+	return hi < 0 || lo < 0 ? -1 : hi * 16 + lo;
+}
 
-	const u64 t0 = osGetTime();
+static int shard_quota(int shard)
+{
+	return ARTCACHE_SHARD_BASE + (shard < ARTCACHE_SHARD_EXTRA ? 1 : 0);
+}
 
-	DIR *root = opendir(CACHE_ROOT);
-	if (!root)
+static bool cache_filename(const char *name, const char *extension)
+{
+	const size_t len = strlen(name);
+	return len >= 5 && len <= 68 &&
+	       strcmp(name + len - 4, extension) == 0;
+}
+
+/* Directory order on FAT follows insertion order closely enough for FIFO.
+ * Unlike exact LRU, this needs no per-hit write and never touches another
+ * shard. It is called only when a known shard is already at its quota. */
+static bool evict_one(const char *dir)
+{
+	DIR *d = opendir(dir);
+	if (!d)
+		return false;
+
+	bool removed = false;
+	struct dirent *e;
+	while ((e = readdir(d))) {
+		if (e->d_name[0] == '.')
+			continue;
+		char path[256];
+		snprintf(path, sizeof path, "%s/%.68s", dir, e->d_name);
+		if (cache_filename(e->d_name, ".tmp")) {
+			unlink(path);
+			continue;
+		}
+		if (cache_filename(e->d_name, ".a3c") && unlink(path) == 0) {
+			removed = true;
+			break;
+		}
+	}
+	closedir(d);
+	return removed;
+}
+
+/* Discover one shard lazily on its first write. Merely counting directory
+ * entries avoids the expensive fopen/fread per file that caused minute-long
+ * startup. Overfull legacy shards are pruned in directory (FIFO) order. */
+static void prepare_shard(const char *dir, int shard)
+{
+	if (s_shard_known[shard])
 		return;
 
-	/* Collect entries, deleting .tmp orphans as we go. A .tmp at startup is by
-	 * definition abandoned - nothing survives a reboot mid-write. */
-	sweep_entry *ents = NULL;
-	int          n = 0, cap = 0, orphans = 0;
-
-	struct dirent *shard;
-	while ((shard = readdir(root))) {
-		if (shard->d_name[0] == '.')
-			continue;
-
-		/* Shard names are two hex chars; anything longer is not ours. */
-		if (strlen(shard->d_name) != 2)
-			continue;
-
-		char shard_path[64];
-		snprintf(shard_path, sizeof shard_path, CACHE_ROOT "/%.2s",
-		         shard->d_name);
-
-		DIR *d = opendir(shard_path);
-		if (!d)
-			continue;
-
+	int count = 0;
+	DIR *d = opendir(dir);
+	if (d) {
 		struct dirent *e;
 		while ((e = readdir(d))) {
 			if (e->d_name[0] == '.')
 				continue;
-
-			/* Entry names are "<hash>.a3c" or "<hash>.tmp"; a hash is at most
-			 * 64 hex chars, so anything longer is not ours. Bounding the copy
-			 * also keeps the path within `full`. */
-			const size_t len = strlen(e->d_name);
-			if (len < 5 || len > 68)
-				continue;
-
-			char full[192];
-			snprintf(full, sizeof full, "%s/%.68s", shard_path, e->d_name);
-
-			if (strcmp(e->d_name + len - 4, ".tmp") == 0) {
-				unlink(full);
-				orphans++;
-				continue;
-			}
-
-			if (n == cap) {
-				const int ncap = cap ? cap * 2 : 64;
-				sweep_entry *p = realloc(ents, (size_t)ncap * sizeof *ents);
-				if (!p)
-					break; /* out of memory: sweep what we have */
-				ents = p;
-				cap  = ncap;
-			}
-
-			/* Read just the header for its use counter. Cheap next to the
-			 * 100KB payload, and the only recency signal available. */
-			u32 seq = 0;
-			{
-				FILE *hf = fopen(full, "rb");
-				if (hf) {
-					artcache_hdr h;
-					if (fread(&h, 1, sizeof h, hf) == sizeof h &&
-					    h.magic == ARTCACHE_MAGIC)
-						seq = h.use_seq;
-					fclose(hf);
-				}
-			}
-
-			snprintf(ents[n].path, sizeof ents[n].path, "%s", full);
-			ents[n].use_seq = seq;
-			/* Resume the counter above the highest already on disk, so
-			 * refreshes keep climbing across runs instead of restarting at 1
-			 * and making old entries look newer than recent ones. */
-			if (seq > s_use_seq)
-				s_use_seq = seq;
-			n++;
+			char path[256];
+			snprintf(path, sizeof path, "%s/%.68s", dir, e->d_name);
+			if (cache_filename(e->d_name, ".tmp"))
+				unlink(path);
+			else if (cache_filename(e->d_name, ".a3c"))
+				count++;
 		}
 		closedir(d);
 	}
-	closedir(root);
 
-	int evicted = 0;
-	if (n > ARTCACHE_MAX_ENTRIES && ents) {
-		qsort(ents, (size_t)n, sizeof *ents, sweep_cmp);
-		const int to_drop = n - ARTCACHE_MAX_ENTRIES;
-		for (int i = 0; i < to_drop; i++) {
-			unlink(ents[i].path);
-			evicted++;
-		}
-	}
+	const int quota = shard_quota(shard);
+	while (count >= quota && evict_one(dir))
+		count--;
+	s_shard_count[shard] = (u16)count;
+	s_shard_known[shard] = true;
+}
 
-	free(ents);
-
-	if (orphans || evicted || n)
-		tl_timing("artcache sweep: scanned=%d evicted=%d orphans=%d took=%lldms",
-		          n, evicted, orphans, (long long)(osGetTime() - t0));
+void artcache_init(void)
+{
+	/* Deliberately no filesystem work. Even opening every 33-byte cache header
+	 * took almost a minute with a large cache on real hardware. */
+	memset(s_shard_count, 0, sizeof s_shard_count);
+	memset(s_shard_known, 0, sizeof s_shard_known);
 }
 
 bool artcache_load(const char *url, u8 **out_tiled, int *out_w, int *out_h,
@@ -339,18 +316,6 @@ bool artcache_load(const char *url, u8 **out_tiled, int *out_w, int *out_h,
 
 	free(rowbuf);
 
-	/* Refresh the use counter in place so eviction reflects last use, not last
-	 * write. Only the header is rewritten, not the payload, and a
-	 * failure here is harmless: the entry simply looks older than it is. */
-	{
-		FILE *uf = fopen(file, "r+b");
-		if (uf) {
-			h.use_seq = ++s_use_seq;
-			fwrite(&h, 1, sizeof h, uf);
-			fclose(uf);
-		}
-	}
-
 	*out_tiled = tiled;
 	*out_w     = h.src_w;
 	*out_h     = h.src_h;
@@ -378,6 +343,23 @@ void artcache_store(const char *url, const u8 *rgba, int w, int h, u8 accent_r,
 
 	char dir[160], file[256], tmp[256];
 	artcache_paths(key, dir, sizeof dir, file, sizeof file, tmp, sizeof tmp);
+	const int shard = shard_index(key);
+	if (shard < 0)
+		return;
+
+	/* No cache path is touched during startup. Create and account for only the
+	 * shard receiving this new entry, then reserve one slot before doing the
+	 * tiling/allocation work below. */
+	mkdir(CACHE_ROOT, 0777);
+	mkdir(dir, 0777);
+	prepare_shard(dir, shard);
+	if (s_shard_count[shard] >= shard_quota(shard)) {
+		if (!evict_one(dir)) {
+			tl_log("artcache: full shard %.2s could not evict", key);
+			return;
+		}
+		s_shard_count[shard]--;
+	}
 
 	/* Tile into a full texture, then keep only the populated rows. The texture
 	 * is sized to this image, so a 64px thumb is stored as a 64px entry rather
@@ -422,13 +404,12 @@ void artcache_store(const char *url, const u8 *rgba, int w, int h, u8 accent_r,
 	hdr.accent_b    = accent_b;
 	hdr.payload_len = len;
 	hdr.crc32       = crc32_buf(rowbuf, len);
-	hdr.use_seq     = ++s_use_seq;
+	hdr.use_seq     = 0; /* legacy field; FIFO eviction uses directory order */
 	memcpy(hdr_and_rows, &hdr, sizeof hdr);
 
-	mkdir(dir, 0777); /* lazy: only the shards actually used ever exist */
-
 	/* Write to .tmp and rename, so a power loss can never leave a half-written
-	 * entry under the real name. Orphaned .tmp files are swept at startup. */
+	 * entry under the real name. Orphans are removed when this shard is next
+	 * prepared or considered for eviction. */
 	FILE *f = fopen(tmp, "wb");
 	if (!f) {
 		tl_log("artcache: cannot write (%s) - caching disabled this session",
@@ -457,6 +438,8 @@ void artcache_store(const char *url, const u8 *rgba, int w, int h, u8 accent_r,
 	if (rename(tmp, file) != 0) {
 		unlink(tmp);
 		tl_log("artcache: rename failed for %s", key);
+	} else {
+		s_shard_count[shard]++;
 	}
 }
 

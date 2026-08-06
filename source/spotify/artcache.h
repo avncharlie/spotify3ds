@@ -29,8 +29,8 @@
  * pixel byte order changes: entries with a different version are discarded. */
 #define ARTCACHE_VERSION 3
 
-/* Create the cache root and drop any .tmp files orphaned by a power loss.
- * Cheap: does not scan entries. */
+/* Reset session bookkeeping. Performs no filesystem work: the cache root,
+ * shard discovery, orphan cleanup and FIFO eviction are all lazy on writes. */
 void artcache_init(void);
 
 /* Look up art for `url`.

@@ -49,14 +49,19 @@ access at <https://spotify.com/account/apps> if the SD card or file is lost.
 
 - Player: `A` play/pause, D-pad left/right previous/next, `X` Library, and `Y`
   show/hide cover art. Tap a Recently Played tile to open its tracks; hold it
-  for 600 ms to start the collection immediately.
-- Library: tap a row's right chevron to open its tracks directly. D-pad up/down
-  selects a collection, `A` plays the whole collection, `X` opens its tracks,
+  for 600 ms to start the collection immediately. Tracks opened from this shelf
+  return directly to Player with `B` or the top-left back control.
+- Library: tap a row's play icon to start it immediately, or its right chevron
+  to open its tracks. The current playing row shows pause in the same cell.
+  D-pad up/down selects a collection, `A` plays the whole collection, `X` opens
+  its tracks,
   D-pad left/right skips the previous/next song, `SELECT` toggles play/pause,
   `L/R` jumps sections, and `B` returns. Tap `FIND` to filter saved albums and
   playlists by name, artist, or owner using the system keyboard; tap the filter
   strip's `X` to clear it.
-- Tracks: D-pad up/down selects a song, `A` plays it, `L/R` changes 50-track
+- Tracks: tap a row's play icon to start it immediately; the current playing
+  track shows pause in the same cell. D-pad up/down selects a song, `A` plays
+  it, `L/R` changes 50-track
   pages, D-pad left/right skips the previous/next song, `SELECT` toggles
   play/pause, `X` queues the selected song, and `B` returns to the Library. Tap a
   row's right queue icon to queue it directly. Moving past a page boundary with

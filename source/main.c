@@ -83,6 +83,7 @@ static bool g_art_hidden;
 /* Which view the bottom screen is showing. */
 typedef enum { VIEW_PLAYER = 0, VIEW_LIST, VIEW_TRACKS } bottom_view;
 static bottom_view g_view;
+static bottom_view g_tracks_return_view = VIEW_LIST;
 static float       g_list_scroll;
 static float       g_list_velocity;
 static int         g_list_armed = -1;
@@ -338,6 +339,20 @@ static const collection_item *list_chevron_item(int id, const recent_list *rl,
 	return NULL;
 }
 
+static const collection_item *list_play_item(int id, const recent_list *rl,
+	                                         const playlist_list *pl,
+	                                         const album_list *al)
+{
+	if (id >= LIST_PLAY_RECENT0 && id < LIST_PLAY_RECENT0 + rl->count)
+		return &rl->items[id - LIST_PLAY_RECENT0];
+	if (id >= LIST_PLAY_PLAYLIST0 &&
+	    id < LIST_PLAY_PLAYLIST0 + pl->count)
+		return &pl->items[id - LIST_PLAY_PLAYLIST0];
+	if (id >= LIST_PLAY_ALBUM0 && id < LIST_PLAY_ALBUM0 + al->count)
+		return &al->items[id - LIST_PLAY_ALBUM0];
+	return NULL;
+}
+
 static void tracks_request_page(int offset, int select_on_load)
 {
 	g_tracks_scroll = 0.0f;
@@ -352,6 +367,7 @@ static void tracks_open(const collection_item *item)
 {
 	if (!item)
 		return;
+	g_tracks_return_view = g_view == VIEW_PLAYER ? VIEW_PLAYER : VIEW_LIST;
 	g_tracks_collection = *item;
 	g_view = VIEW_TRACKS;
 	g_tracks_applied_generation = 0;
@@ -820,12 +836,30 @@ int main(int argc, char **argv)
 			    list_selected_item(g_list_armed, rl, pl, al);
 			const collection_item *drilldown =
 			    list_chevron_item(touch.clicked, rl, pl, al);
+			const collection_item *direct_play =
+			    list_play_item(touch.clicked, rl, pl, al);
 			if (touch.clicked == LIST_BTN_FIND) {
 				library_edit_search();
 			} else if (touch.clicked == LIST_BTN_CLEAR_SEARCH) {
 				g_list_search[0] = '\0';
 				g_filter_query[0] = '\0';
 				library_reset_position();
+			} else if (direct_play) {
+				const bool current =
+				    snap.have_state &&
+				    strcmp(direct_play->context_uri,
+				           current_collection_uri(&snap.state)) == 0;
+				if (current) {
+					tl_log("list: %s current %s", playing ? "pause" : "resume",
+					       direct_play->context_uri);
+					opt_set(&g_opt_play, !playing);
+					worker_post(playing ? CMD_PAUSE : CMD_PLAY, 0);
+				} else {
+					tl_log("list: play %s", direct_play->context_uri);
+					worker_play_context(direct_play->context_uri);
+					opt_set(&g_opt_play, 1);
+				}
+				g_list_armed = -1;
 			} else if (drilldown) {
 				tracks_open(drilldown);
 			} else if ((keys_down & KEY_X) && selected) {
@@ -833,7 +867,7 @@ int main(int argc, char **argv)
 			} else if (touch.clicked == LIST_BTN_BACK || (keys_down & KEY_B)) {
 				g_view = VIEW_PLAYER;
 				g_list_armed = -1;
-			} else if (touch.clicked == LIST_ARM_PLAY || (keys_down & KEY_A)) {
+			} else if (keys_down & KEY_A) {
 				if (selected) {
 					tl_log("list: confirmed play %s", selected->context_uri);
 					worker_play_context(selected->context_uri);
@@ -883,7 +917,7 @@ int main(int argc, char **argv)
 
 			if (touch.clicked == TRACK_BTN_BACK || (keys_down & KEY_B)) {
 				worker_cancel_tracks();
-				g_view = VIEW_LIST;
+				g_view = g_tracks_return_view;
 				g_tracks_armed = -1;
 				g_tracks_cursor = -1;
 			} else if (touch.clicked == TRACK_BTN_PLAY_COLLECTION) {
@@ -998,18 +1032,42 @@ int main(int argc, char **argv)
 					}
 
 					const int idx = g_tracks_armed - TRACK_ROW0;
+					const int play_idx = touch.clicked - TRACK_PLAY0;
 					int queue_idx = touch.clicked - TRACK_QUEUE0;
 					if ((queue_idx < 0 || queue_idx >= page->count) &&
 					    (keys_down & KEY_X))
 						queue_idx = idx;
-					if (queue_idx >= 0 && queue_idx < page->count &&
+					if (play_idx >= 0 && play_idx < page->count &&
+					    page->items[play_idx].playable) {
+						const bool current =
+						    snap.have_state &&
+						    strcmp(page->items[play_idx].uri,
+						           snap.state.track_uri) == 0;
+						if (current) {
+							tl_log("track: %s current %s",
+							       playing ? "pause" : "resume",
+							       page->items[play_idx].uri);
+							opt_set(&g_opt_play, !playing);
+							worker_post(playing ? CMD_PAUSE : CMD_PLAY, 0);
+						} else {
+							tl_log("track: play context=%s item=%s position=%d name=%s",
+							       g_tracks_collection.context_uri,
+							       page->items[play_idx].uri,
+							       page->items[play_idx].source_index,
+							       page->items[play_idx].name);
+							if (worker_play_context_item(
+							        g_tracks_collection.context_uri,
+							        page->items[play_idx].uri))
+								opt_set(&g_opt_play, 1);
+						}
+						g_tracks_armed = -1;
+					} else if (queue_idx >= 0 && queue_idx < page->count &&
 					    page->items[queue_idx].playable) {
 						tl_log("track: queue item=%s name=%s",
 						       page->items[queue_idx].uri,
 						       page->items[queue_idx].name);
 						worker_queue_item(page->items[queue_idx].uri);
-					} else if ((touch.clicked == TRACK_ARM_PLAY ||
-					     (keys_down & KEY_A)) &&
+					} else if ((keys_down & KEY_A) &&
 					    idx >= 0 && idx < page->count && page->items[idx].playable) {
 						tl_log("track: play context=%s item=%s position=%d name=%s",
 						       g_tracks_collection.context_uri,
@@ -1526,8 +1584,9 @@ int main(int argc, char **argv)
 				.recents    = rl,
 				.playlists  = pl,
 				.albums     = al,
-				.current_context_uri =
-				    snap.have_state ? snap.state.context_uri : "",
+				.current_context_uri = snap.have_state
+				                           ? current_collection_uri(&snap.state)
+				                           : "",
 				.search_query = g_list_search,
 				.search_matches = pl->count + al->count,
 				.playing     = playing,
@@ -1544,6 +1603,8 @@ int main(int argc, char **argv)
 				.tb = &g_tb,
 				.page = &g_tracks_buf.page,
 				.collection_name = g_tracks_collection.name,
+				.back_label = g_tracks_return_view == VIEW_PLAYER ? "Player"
+				                                                  : "Library",
 				.current_track_uri =
 				    snap.have_state ? snap.state.track_uri : "",
 				.error = g_tracks_buf.error,

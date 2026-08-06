@@ -13,10 +13,9 @@
 #define THUMB    30.0f
 #define THUMB_GAP 10.0f
 
-/* Armed-row confirmation action. */
-#define PLAY_X       214.0f
-#define PLAY_W       60.0f
-#define PLAY_H       36.0f
+/* Permanent play action immediately before the navigation gutter. */
+#define PLAY_X 246.0f
+#define PLAY_W 34.0f
 
 /* Permanent navigation column. The scroll indicator starts exactly where this
  * ends, so every collection row presents the same harmless drill-down target. */
@@ -49,7 +48,8 @@
 #define CLR_DIVIDER  C2D_Color32(0x26, 0x26, 0x26, 0xFF)
 #define CLR_IND_TRK  C2D_Color32(0x26, 0x26, 0x26, 0xFF)
 #define CLR_IND_THMB C2D_Color32(0x7A, 0x7A, 0x7A, 0xFF)
-#define CLR_GUTTER   C2D_Color32(0x16, 0x16, 0x16, 0xFF)
+#define CLR_PLAY_CELL C2D_Color32(0x16, 0x16, 0x16, 0xFF)
+#define CLR_GUTTER   C2D_Color32(0x10, 0x10, 0x10, 0xFF)
 #define CLR_GUTTER_PRESS C2D_Color32(0x20, 0x20, 0x20, 0xFF)
 #define CLR_CHEVRON  C2D_Color32(0x8A, 0x8A, 0x8A, 0xFF)
 
@@ -314,6 +314,17 @@ static int chevron_id_for_row(int id)
 	return -1;
 }
 
+static int play_id_for_row(int id)
+{
+	if (id >= LIST_RECENT0 && id < LIST_RECENT0 + RECENTS_MAX)
+		return LIST_PLAY_RECENT0 + id - LIST_RECENT0;
+	if (id >= LIST_PLAYLIST0 && id < LIST_PLAYLIST0 + PLAYLISTS_MAX)
+		return LIST_PLAY_PLAYLIST0 + id - LIST_PLAYLIST0;
+	if (id >= LIST_ALBUM0 && id < LIST_ALBUM0 + ALBUMS_MAX)
+		return LIST_PLAY_ALBUM0 + id - LIST_ALBUM0;
+	return -1;
+}
+
 static void draw_caption(const screen_list_args *a, float y, const char *label,
                          int count)
 {
@@ -350,7 +361,9 @@ static void draw_row(const screen_list_args *a, const collection_item *item,
 
 	const bool pressed = a->pressed_id == id;
 	const int chevron_id = chevron_id_for_row(id);
+	const int play_id = play_id_for_row(id);
 	const bool chevron_pressed = a->pressed_id == chevron_id;
+	const bool play_pressed = a->pressed_id == play_id;
 	if (current) {
 		C2D_DrawRectSolid(0.0f, y, 0.0f, BOT_W, h, CLR_NOW_BG);
 	} else if (armed) {
@@ -360,6 +373,21 @@ static void draw_row(const screen_list_args *a, const collection_item *item,
 	}
 	if (current || armed)
 		C2D_DrawRectSolid(0.0f, y, 0.0f, 3.0f, h, CLR_GREEN);
+	C2D_DrawRectSolid(PLAY_X, y, 0.0f, PLAY_W, h,
+	                  play_pressed ? CLR_GUTTER_PRESS : CLR_PLAY_CELL);
+	const float pcx = PLAY_X + PLAY_W / 2.0f;
+	const float pcy = y + h / 2.0f;
+	const u32 play_clr = play_pressed ? CLR_GREEN_PRESS : CLR_GREEN;
+	if (current && a->playing) {
+		C2D_DrawRectSolid(pcx - 5.0f, pcy - 6.0f, 0.0f, 3.0f, 12.0f,
+		                  play_clr);
+		C2D_DrawRectSolid(pcx + 2.0f, pcy - 6.0f, 0.0f, 3.0f, 12.0f,
+		                  play_clr);
+	} else {
+		C2D_DrawTriangle(pcx - 4.0f, pcy - 6.0f, play_clr,
+		                 pcx - 4.0f, pcy + 6.0f, play_clr,
+		                 pcx + 5.0f, pcy, play_clr, 0.0f);
+	}
 
 	C2D_DrawRectSolid(CHEVRON_X, y, 0.0f, CHEVRON_W, h,
 	                  chevron_pressed ? CLR_GUTTER_PRESS : CLR_GUTTER);
@@ -385,7 +413,7 @@ static void draw_row(const screen_list_args *a, const collection_item *item,
 		ui_now_playing_badge(PAD_X, ty, thumb, a->playing, a->animation_ms);
 
 	const float tx = PAD_X + thumb + THUMB_GAP;
-	const float tw = armed ? PLAY_X - tx - 7.0f : CHEVRON_X - tx - 7.0f;
+	const float tw = PLAY_X - tx - 7.0f;
 	const float name_h = ui_px(TY_ROW_NAME);
 	const float sub_h  = ui_px(TY_ROW_SUB);
 	const float gap    = 2.0f;
@@ -398,31 +426,12 @@ static void draw_row(const screen_list_args *a, const collection_item *item,
 	                  ui_baseline(top + name_h + gap, TY_ROW_SUB), TY_ROW_SUB,
 	                  tw, CLR_SUB, CLR_GREEN);
 
-	if (armed) {
-		const float ay = y + (h - PLAY_H) / 2.0f;
-		const bool play_pressed = a->pressed_id == LIST_ARM_PLAY;
-		rounded_rect(PLAY_X, ay, PLAY_W, PLAY_H, 7.0f,
-		             play_pressed ? CLR_GREEN_PRESS : CLR_GREEN);
-
-		/* Play triangle and label. */
-		const float cy = y + h / 2.0f;
-		C2D_DrawTriangle(PLAY_X + 8.0f, cy - 5.0f, CLR_ACTION,
-		                 PLAY_X + 8.0f, cy + 5.0f, CLR_ACTION,
-		                 PLAY_X + 15.0f, cy, CLR_ACTION, 0.0f);
-		ui_text(a->buf, "PLAY", PLAY_X + 20.0f,
-		        ui_baseline(cy - ui_px(TY_ROW_NAME) / 2.0f, TY_ROW_NAME),
-		        TY_ROW_NAME, PLAY_W - 22.0f, CLR_ACTION);
-
-		/* Register actions first: touch_hit returns the first overlapping rect. */
-		add_clipped_hit(a->tb, PLAY_X, ay, PLAY_W, PLAY_H, LIST_ARM_PLAY,
-		                document_top(filtering));
-	}
-
-	/* Register the drill-down before the row body, and keep the zones disjoint:
-	 * a near-edge tap can only navigate, never arm or play music. */
+	/* Keep all three zones disjoint: row body, immediate play, and drill-down. */
+	add_clipped_hit(a->tb, PLAY_X, y, PLAY_W, h, play_id,
+	                document_top(filtering));
 	add_clipped_hit(a->tb, CHEVRON_X, y, CHEVRON_W, h, chevron_id,
 	                document_top(filtering));
-	add_clipped_hit(a->tb, 0.0f, y, CHEVRON_X, h, id,
+	add_clipped_hit(a->tb, 0.0f, y, PLAY_X, h, id,
 	                document_top(filtering));
 }
 

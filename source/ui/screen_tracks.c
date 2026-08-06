@@ -16,9 +16,8 @@
 #define PAD_X 16.0f
 #define THUMB 30.0f
 #define THUMB_GAP 10.0f
-#define PLAY_X 210.0f
-#define PLAY_W 64.0f
-#define PLAY_H 34.0f
+#define PLAY_X 246.0f
+#define PLAY_W 34.0f
 #define QUEUE_X 280.0f
 #define QUEUE_W 34.0f
 #define IND_X 314.0f
@@ -42,7 +41,8 @@
 #define CLR_IND_THMB C2D_Color32(0x7A, 0x7A, 0x7A, 0xFF)
 #define CLR_ERROR C2D_Color32(0xFF, 0x6B, 0x5B, 0xFF)
 #define CLR_THUMB_BG C2D_Color32(0x22, 0x22, 0x2A, 0xFF)
-#define CLR_GUTTER C2D_Color32(0x16, 0x16, 0x16, 0xFF)
+#define CLR_PLAY_CELL C2D_Color32(0x16, 0x16, 0x16, 0xFF)
+#define CLR_GUTTER C2D_Color32(0x10, 0x10, 0x10, 0xFF)
 #define CLR_GUTTER_PRESS C2D_Color32(0x20, 0x20, 0x20, 0xFF)
 
 static float row_h(int id, int armed_id)
@@ -121,7 +121,9 @@ static void draw_row(const screen_tracks_args *a, const track_item *item,
 	const bool armed = id == a->armed_id;
 	const bool current = a->current_track_uri && a->current_track_uri[0] &&
 	                     strcmp(item->uri, a->current_track_uri) == 0;
+	const int play_id = TRACK_PLAY0 + id - TRACK_ROW0;
 	const int queue_id = TRACK_QUEUE0 + id - TRACK_ROW0;
+	const bool play_pressed = a->pressed_id == play_id;
 	const bool queue_pressed = a->pressed_id == queue_id;
 	const float h = row_h(id, a->armed_id);
 	if (y >= BOT_H || y + h <= HEADER_H)
@@ -136,6 +138,23 @@ static void draw_row(const screen_tracks_args *a, const track_item *item,
 	}
 	if (current || armed)
 		C2D_DrawRectSolid(0, y, 0, 3, h, CLR_GREEN);
+	C2D_DrawRectSolid(PLAY_X, y, 0.0f, PLAY_W, h,
+	                  play_pressed ? CLR_GUTTER_PRESS : CLR_PLAY_CELL);
+	const float pcx = PLAY_X + PLAY_W / 2.0f;
+	const float pcy = y + h / 2.0f;
+	const u32 play_clr = !item->playable ? CLR_DISABLED
+	                     : play_pressed  ? CLR_GREEN_PRESS
+	                                      : CLR_GREEN;
+	if (current && a->playing) {
+		C2D_DrawRectSolid(pcx - 5.0f, pcy - 6.0f, 0.0f, 3.0f, 12.0f,
+		                  play_clr);
+		C2D_DrawRectSolid(pcx + 2.0f, pcy - 6.0f, 0.0f, 3.0f, 12.0f,
+		                  play_clr);
+	} else {
+		C2D_DrawTriangle(pcx - 4.0f, pcy - 6.0f, play_clr,
+		                 pcx - 4.0f, pcy + 6.0f, play_clr,
+		                 pcx + 5.0f, pcy, play_clr, 0.0f);
+	}
 	C2D_DrawRectSolid(QUEUE_X, y, 0.0f, QUEUE_W, h,
 	                  queue_pressed ? CLR_GUTTER_PRESS : CLR_GUTTER);
 	const u32 queue_clr = !item->playable ? CLR_DISABLED
@@ -160,8 +179,7 @@ static void draw_row(const screen_tracks_args *a, const track_item *item,
 		                     a->animation_ms);
 
 	const float tx = PAD_X + thumb + THUMB_GAP;
-	const float tw = armed && item->playable ? PLAY_X - tx - 7.0f
-	                                        : QUEUE_X - tx - 7.0f;
+	const float tw = PLAY_X - tx - 7.0f;
 	const float name_h = ui_px(TY_ROW_NAME);
 	const float sub_h = ui_px(TY_ROW_SUB);
 	const float top = y + (h - name_h - sub_h - 2.0f) / 2.0f;
@@ -179,23 +197,11 @@ static void draw_row(const screen_tracks_args *a, const track_item *item,
 	        ui_baseline(top + name_h + 2.0f, TY_ROW_SUB), TY_ROW_SUB, tw,
 	        item->playable ? CLR_SUB : CLR_DISABLED);
 
-	if (armed && item->playable) {
-		const float ay = y + (h - PLAY_H) / 2.0f;
-		const bool pressed = a->pressed_id == TRACK_ARM_PLAY;
-		rounded_rect(PLAY_X, ay, PLAY_W, PLAY_H, 7.0f,
-		             pressed ? CLR_GREEN_PRESS : CLR_GREEN);
-		const float cy = y + h / 2.0f;
-		C2D_DrawTriangle(PLAY_X + 8, cy - 5, CLR_ACTION,
-		                 PLAY_X + 8, cy + 5, CLR_ACTION,
-		                 PLAY_X + 15, cy, CLR_ACTION, 0);
-		ui_text(a->buf, "PLAY", PLAY_X + 20,
-		        ui_baseline(cy - ui_px(TY_ROW_NAME) / 2, TY_ROW_NAME),
-		        TY_ROW_NAME, PLAY_W - 22, CLR_ACTION);
-		clipped_hit(a->tb, PLAY_X, ay, PLAY_W, PLAY_H, TRACK_ARM_PLAY);
-	}
+	if (item->playable)
+		clipped_hit(a->tb, PLAY_X, y, PLAY_W, h, play_id);
 	if (item->playable)
 		clipped_hit(a->tb, QUEUE_X, y, QUEUE_W, h, queue_id);
-	clipped_hit(a->tb, 0, y, QUEUE_X, h, id);
+	clipped_hit(a->tb, 0, y, PLAY_X, h, id);
 }
 
 void screen_tracks_draw(const screen_tracks_args *a)
@@ -265,7 +271,7 @@ void screen_tracks_draw(const screen_tracks_args *a)
 	const u32 back_clr = back_pressed ? CLR_GREEN : CLR_NAME;
 	C2D_DrawTriangle(PAD_X, 15, back_clr, PAD_X + 7, 10, back_clr,
 	                 PAD_X + 7, 20, back_clr, 0);
-	ui_text(a->buf, "Library", PAD_X + 17,
+	ui_text(a->buf, a->back_label ? a->back_label : "Library", PAD_X + 17,
 	        ui_baseline((HEADER_H - ui_px(TY_ROW_NAME)) / 2, TY_ROW_NAME),
 	        TY_ROW_NAME, 70, back_clr);
 	tb_add(a->tb, 0, 0, 90, HEADER_H, TRACK_BTN_BACK);

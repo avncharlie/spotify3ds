@@ -200,6 +200,13 @@ typedef struct {
 
 static opt_field g_opt_play, g_opt_shuf, g_opt_rep;
 
+typedef struct {
+	char uri[128];
+	u64  until;
+} opt_target;
+
+static opt_target g_opt_context, g_opt_track;
+
 /* Scratch for the worker's list snapshots.
  *
  * File scope rather than locals because these are large - recent_list is ~10KB
@@ -489,6 +496,60 @@ static const char *current_collection_uri(const player_state *state)
 	return strncmp(state->album_uri, "spotify:album:", 14) == 0
 	           ? state->album_uri
 	           : "";
+}
+
+static bool target_matches(const opt_target *target, const char *uri)
+{
+	return uri && uri[0] && osGetTime() < target->until &&
+	       strcmp(target->uri, uri) == 0;
+}
+
+static void target_set(opt_target *target, const char *uri)
+{
+	snprintf(target->uri, sizeof target->uri, "%s", uri);
+	target->until = osGetTime() + OPTIMISTIC_MS;
+}
+
+static void activate_collection(const collection_item *item,
+	                            const worker_snapshot *snap, bool playing)
+{
+	const bool current =
+	    (snap->have_state &&
+	     strcmp(item->context_uri, current_collection_uri(&snap->state)) == 0) ||
+	    target_matches(&g_opt_context, item->context_uri);
+	if (current) {
+		tl_log("list: %s current %s", playing ? "pause" : "resume",
+		       item->context_uri);
+		opt_set(&g_opt_play, !playing);
+		worker_post(playing ? CMD_PAUSE : CMD_PLAY, 0);
+	} else {
+		tl_log("list: play %s", item->context_uri);
+		worker_play_context(item->context_uri);
+		target_set(&g_opt_context, item->context_uri);
+		opt_set(&g_opt_play, 1);
+	}
+}
+
+static void activate_track(const track_item *item,
+	                       const worker_snapshot *snap, bool playing)
+{
+	const bool current =
+	    (snap->have_state && strcmp(item->uri, snap->state.track_uri) == 0) ||
+	    target_matches(&g_opt_track, item->uri);
+	if (current) {
+		tl_log("track: %s current %s", playing ? "pause" : "resume",
+		       item->uri);
+		opt_set(&g_opt_play, !playing);
+		worker_post(playing ? CMD_PAUSE : CMD_PLAY, 0);
+	} else {
+		tl_log("track: play context=%s item=%s position=%d name=%s",
+		       g_tracks_collection.context_uri, item->uri, item->source_index,
+		       item->name);
+		if (worker_play_context_item(g_tracks_collection.context_uri, item->uri)) {
+			target_set(&g_opt_track, item->uri);
+			opt_set(&g_opt_play, 1);
+		}
+	}
 }
 
 /* ---------------------------------------------------------------- main */
@@ -845,20 +906,7 @@ int main(int argc, char **argv)
 				g_filter_query[0] = '\0';
 				library_reset_position();
 			} else if (direct_play) {
-				const bool current =
-				    snap.have_state &&
-				    strcmp(direct_play->context_uri,
-				           current_collection_uri(&snap.state)) == 0;
-				if (current) {
-					tl_log("list: %s current %s", playing ? "pause" : "resume",
-					       direct_play->context_uri);
-					opt_set(&g_opt_play, !playing);
-					worker_post(playing ? CMD_PAUSE : CMD_PLAY, 0);
-				} else {
-					tl_log("list: play %s", direct_play->context_uri);
-					worker_play_context(direct_play->context_uri);
-					opt_set(&g_opt_play, 1);
-				}
+				activate_collection(direct_play, &snap, playing);
 				g_list_armed = -1;
 			} else if (drilldown) {
 				tracks_open(drilldown);
@@ -869,11 +917,9 @@ int main(int argc, char **argv)
 				g_list_armed = -1;
 			} else if (keys_down & KEY_A) {
 				if (selected) {
-					tl_log("list: confirmed play %s", selected->context_uri);
-					worker_play_context(selected->context_uri);
-					opt_set(&g_opt_play, 1);
+					activate_collection(selected, &snap, playing);
+					g_list_arm_until = osGetTime() + LIST_ARM_MS;
 				}
-				g_list_armed = -1;
 			} else if (touch.clicked >= LIST_RECENT0 &&
 			           touch.clicked < LIST_RECENT0 + RECENTS_MAX) {
 				const int idx = touch.clicked - LIST_RECENT0;
@@ -1039,27 +1085,7 @@ int main(int argc, char **argv)
 						queue_idx = idx;
 					if (play_idx >= 0 && play_idx < page->count &&
 					    page->items[play_idx].playable) {
-						const bool current =
-						    snap.have_state &&
-						    strcmp(page->items[play_idx].uri,
-						           snap.state.track_uri) == 0;
-						if (current) {
-							tl_log("track: %s current %s",
-							       playing ? "pause" : "resume",
-							       page->items[play_idx].uri);
-							opt_set(&g_opt_play, !playing);
-							worker_post(playing ? CMD_PAUSE : CMD_PLAY, 0);
-						} else {
-							tl_log("track: play context=%s item=%s position=%d name=%s",
-							       g_tracks_collection.context_uri,
-							       page->items[play_idx].uri,
-							       page->items[play_idx].source_index,
-							       page->items[play_idx].name);
-							if (worker_play_context_item(
-							        g_tracks_collection.context_uri,
-							        page->items[play_idx].uri))
-								opt_set(&g_opt_play, 1);
-						}
+						activate_track(&page->items[play_idx], &snap, playing);
 						g_tracks_armed = -1;
 					} else if (queue_idx >= 0 && queue_idx < page->count &&
 					    page->items[queue_idx].playable) {
@@ -1069,15 +1095,8 @@ int main(int argc, char **argv)
 						worker_queue_item(page->items[queue_idx].uri);
 					} else if ((keys_down & KEY_A) &&
 					    idx >= 0 && idx < page->count && page->items[idx].playable) {
-						tl_log("track: play context=%s item=%s position=%d name=%s",
-						       g_tracks_collection.context_uri,
-						       page->items[idx].uri,
-						       page->items[idx].source_index, page->items[idx].name);
-						if (worker_play_context_item(g_tracks_collection.context_uri,
-						                             page->items[idx].uri)) {
-							opt_set(&g_opt_play, 1);
-						}
-						g_tracks_armed = -1;
+						activate_track(&page->items[idx], &snap, playing);
+						g_tracks_arm_until = osGetTime() + LIST_ARM_MS;
 					} else if (touch.clicked >= TRACK_ROW0 &&
 					           touch.clicked < TRACK_ROW0 + page->count) {
 						g_tracks_cursor = touch.clicked;

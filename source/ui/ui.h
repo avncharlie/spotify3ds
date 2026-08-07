@@ -29,6 +29,7 @@ typedef enum {
 
 /* Call once after C2D_Init. */
 void ui_init(void);
+void ui_exit(void);
 
 /* Scale multiplier for a role, and the CSS px it was derived from. */
 float ui_scale(type_role r);

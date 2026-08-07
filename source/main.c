@@ -107,6 +107,7 @@ static int                   g_tracks_select_on_load = -2;
 #define LIST_FLING_FRICTION 0.88f
 #define LIST_FLING_STOP     0.10f
 #define LIST_ARM_MS         4000
+#define TEXTBUF_GLYPHS      4096
 
 /* True when running under the headless harness, which needs the app to quit by
  * itself. On a real console the app must stay up until the user exits. */
@@ -588,7 +589,7 @@ int main(int argc, char **argv)
 	C3D_RenderTarget *top    = C2D_CreateScreenTarget(GFX_TOP, GFX_LEFT);
 	C3D_RenderTarget *bottom = C2D_CreateScreenTarget(GFX_BOTTOM, GFX_LEFT);
 
-	C2D_TextBuf textbuf = C2D_TextBufNew(4096);
+	C2D_TextBuf textbuf = C2D_TextBufNew(TEXTBUF_GLYPHS);
 
 	char err[256];
 	bool net_up = net_init(err, sizeof err);
@@ -627,6 +628,7 @@ int main(int argc, char **argv)
 
 	long last_seen_progress = -1;
 	int  frames             = 0;
+	size_t max_text_glyphs  = 0;
 	bool logged_first       = false;
 	bool logged_recents     = false;
 	bool logged_playlists   = false;
@@ -1665,6 +1667,9 @@ int main(int argc, char **argv)
 			screen_player_draw(&pa);
 		}
 
+		const size_t text_glyphs = C2D_TextBufGetNumGlyphs(textbuf);
+		if (text_glyphs > max_text_glyphs)
+			max_text_glyphs = text_glyphs;
 		C3D_FrameEnd(0);
 
 		/* The headless harness needs the app to exit on its own; a real console
@@ -1676,6 +1681,9 @@ int main(int argc, char **argv)
 		     frames == 1800)) {
 			if (frames == 1800 && tracks_probe_stage != 99)
 				tl_step("tracks_timeout", 0, "stage=%d", tracks_probe_stage);
+			tl_step("text_buffer", max_text_glyphs < TEXTBUF_GLYPHS,
+			        "peak=%u/%d glyphs", (unsigned)max_text_glyphs,
+			        TEXTBUF_GLYPHS);
 			tl_step("ui_loop", 1, "%d frames, art=%d", frames,
 			        (int)g_art.valid);
 			tl_done();
@@ -1688,6 +1696,7 @@ int main(int argc, char **argv)
 	thumbs_free_all();
 	net_exit();
 	C2D_TextBufDelete(textbuf);
+	ui_exit();
 	C2D_Fini();
 	C3D_Fini();
 	gfxExit();

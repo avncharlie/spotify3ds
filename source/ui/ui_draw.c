@@ -47,6 +47,7 @@ static float s_scale[TY_COUNT];
 static float s_micro_px = 12.0f;
 static float s_em;              /* font em box at scale 1.0 */
 static float s_ascent;
+static C2D_TextBuf s_measure_buf;
 
 void ui_init(void)
 {
@@ -60,6 +61,18 @@ void ui_init(void)
 
 	for (int i = 0; i < TY_COUNT; i++)
 		s_scale[i] = s_role_px[i] / s_em;
+
+	/* Width probes and ellipsis fitting must not consume the frame's text arena.
+	 * C2D_TextParse appends on every call, even when the result is only measured. */
+	s_measure_buf = C2D_TextBufNew(1024);
+}
+
+void ui_exit(void)
+{
+	if (s_measure_buf) {
+		C2D_TextBufDelete(s_measure_buf);
+		s_measure_buf = NULL;
+	}
 }
 
 float ui_scale(type_role r)
@@ -89,19 +102,55 @@ float ui_baseline(float top, type_role r)
 	return top + s_ascent * ui_scale(r);
 }
 
-float ui_text_width(C2D_TextBuf buf, const char *s, type_role r)
+static float measure_width(C2D_TextBuf fallback, const char *s, type_role r)
 {
-	if (!s || !s[0])
-		return 0.0f;
+	C2D_TextBuf buf = s_measure_buf ? s_measure_buf : fallback;
+	if (s_measure_buf)
+		C2D_TextBufClear(s_measure_buf);
 
 	C2D_Text t;
 	C2D_TextParse(&t, buf, s);
 	C2D_TextOptimize(&t);
-
 	const float sc = ui_scale(r);
-	float       w = 0.0f, h = 0.0f;
+	float w = 0.0f, h = 0.0f;
 	C2D_TextGetDimensions(&t, sc, sc, &w, &h);
 	return w;
+}
+
+static int utf8_previous(const char *s, int len)
+{
+	if (len <= 0)
+		return 0;
+	len--;
+	while (len > 0 && ((unsigned char)s[len] & 0xC0) == 0x80)
+		len--;
+	return len;
+}
+
+static void fit_text(C2D_TextBuf fallback, char *s, size_t cap, type_role r,
+	                 float maxw)
+{
+	if (maxw <= 0.0f || measure_width(fallback, s, r) <= maxw)
+		return;
+
+	int content_len = (int)strlen(s);
+	while (content_len > 0) {
+		content_len = utf8_previous(s, content_len);
+		while ((size_t)content_len + 3 > cap)
+			content_len = utf8_previous(s, content_len);
+		s[content_len] = '.';
+		s[content_len + 1] = '.';
+		s[content_len + 2] = '\0';
+		if (measure_width(fallback, s, r) <= maxw)
+			return;
+	}
+}
+
+float ui_text_width(C2D_TextBuf buf, const char *s, type_role r)
+{
+	if (!s || !s[0])
+		return 0.0f;
+	return measure_width(buf, s, r);
 }
 
 void ui_text(C2D_TextBuf buf, const char *s, float x, float y, type_role r,
@@ -112,28 +161,13 @@ void ui_text(C2D_TextBuf buf, const char *s, float x, float y, type_role r,
 
 	char tmp[256];
 	snprintf(tmp, sizeof tmp, "%s", s);
+	fit_text(buf, tmp, sizeof tmp, r, maxw);
 
 	const float sc = ui_scale(r);
 
 	C2D_Text t;
 	C2D_TextParse(&t, buf, tmp);
 	C2D_TextOptimize(&t);
-
-	float w = 0.0f, h = 0.0f;
-	C2D_TextGetDimensions(&t, sc, sc, &w, &h);
-
-	/* Trim a character at a time rather than assuming a glyph width: the
-	 * system font is proportional. */
-	int len = (int)strlen(tmp);
-	while (maxw > 0.0f && w > maxw && len > 2) {
-		len--;
-		tmp[len - 1] = '.';
-		tmp[len]     = '.';
-		tmp[len + 1] = '\0';
-		C2D_TextParse(&t, buf, tmp);
-		C2D_TextOptimize(&t);
-		C2D_TextGetDimensions(&t, sc, sc, &w, &h);
-	}
 
 	C2D_DrawText(&t, C2D_WithColor | C2D_AtBaseline, x, y, 0.0f, sc, sc, clr);
 }
@@ -174,13 +208,7 @@ void ui_text_highlight(C2D_TextBuf buf, const char *s, const char *needle,
 
 	/* Keep the same ellipsis behaviour as ui_text before splitting the colour
 	 * runs. A truncated-away match simply renders as ordinary text. */
-	int len = (int)strlen(tmp);
-	while (maxw > 0.0f && ui_text_width(buf, tmp, r) > maxw && len > 2) {
-		len--;
-		tmp[len - 1] = '.';
-		tmp[len] = '.';
-		tmp[len + 1] = '\0';
-	}
+	fit_text(buf, tmp, sizeof tmp, r, maxw);
 	match = find_ci(tmp, needle);
 	if (!match) {
 		ui_text(buf, tmp, x, y, r, maxw, clr);

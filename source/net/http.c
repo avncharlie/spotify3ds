@@ -16,8 +16,11 @@ static bool http_exchange(const char *host, const char *method,
                           http_response *out, bool *out_reused,
                           bool *retryable, char *err, int errlen);
 
-/* Spotify JSON responses are a few KB; album art is ~41KB. */
-#define MAX_RESPONSE (256 * 1024)
+/* Spotify JSON responses are a few KB, but detailed covers can be much larger.
+ * Allocation grows on demand, so this ceiling costs nothing for normal replies;
+ * it only prevents a broken or hostile peer from exhausting all application
+ * memory. 8 MiB is over six times the raw RGB size of a 640x640 cover. */
+#define MAX_RESPONSE (8 * 1024 * 1024)
 #define READ_CHUNK   2048
 
 typedef struct {

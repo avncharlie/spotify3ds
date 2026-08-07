@@ -2,6 +2,7 @@
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "net/http.h"
@@ -16,6 +17,7 @@ struct tls_conn {
 
 static const char *s_response;
 static int s_takes;
+static size_t s_read_limit = 3;
 static struct tls_conn s_conn;
 
 tls_conn *pool_take(const char *host, int port, bool *reused, char *err,
@@ -53,8 +55,8 @@ int tls_read(tls_conn *conn, void *buf, size_t len)
 {
 	if (conn->pos == conn->len)
 		return 0;
-	if (len > 3)
-		len = 3; /* split headers, lengths and chunk framing across reads */
+	if (len > s_read_limit)
+		len = s_read_limit;
 	if (len > conn->len - conn->pos)
 		len = conn->len - conn->pos;
 	memcpy(buf, conn->data + conn->pos, len);
@@ -114,6 +116,25 @@ int main(void)
 	                &out, err, sizeof err));
 	assert(s_takes == 1); /* do not duplicate a fresh non-idempotent request */
 
-	puts("http framing: complete bodies accepted; truncation rejected/retried");
+	/* Regression: detailed Spotify covers can be larger than the old 256KB
+	 * response cap (Currents is ~333KB; Cherry Bomb is ~411KB). */
+	const size_t large_len = 6 * 1024 * 1024;
+	char header[96];
+	const int header_len = snprintf(header, sizeof header,
+	                                "HTTP/1.1 200 OK\r\nContent-Length: %zu\r\n\r\n",
+	                                large_len);
+	char *large = malloc((size_t)header_len + large_len + 1);
+	assert(large);
+	memcpy(large, header, (size_t)header_len);
+	memset(large + header_len, 'x', large_len);
+	large[header_len + large_len] = '\0';
+	s_read_limit = 2048;
+	assert(request("GET", large, &out, err, sizeof err));
+	assert(out.body_len == large_len);
+	assert(out.body[0] == 'x' && out.body[large_len - 1] == 'x');
+	http_free(&out);
+	free(large);
+
+	puts("http framing: complete 6MiB bodies accepted; truncation rejected/retried");
 	return 0;
 }

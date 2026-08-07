@@ -28,7 +28,7 @@ static void jerr_exit(j_common_ptr cinfo)
 
 static void jerr_silent(j_common_ptr cinfo)
 {
-	(void)cinfo; /* swallow warnings; Spotify JPEGs are well-formed */
+	(void)cinfo; /* num_warnings still records recoverable decode damage */
 }
 
 /* --- GPU tiling ----------------------------------------------------------
@@ -281,8 +281,14 @@ bool art_fetch_decode(const char *url, int target, unsigned char **out_rgba,
 	}
 
 	jpeg_finish_decompress(&cinfo);
+	const bool damaged = jerr.pub.num_warnings != 0;
 	jpeg_destroy_decompress(&cinfo);
 	http_free(&r);
+	if (damaged) {
+		free(linear);
+		snprintf(err, errlen, "jpeg was truncated or damaged");
+		return false;
+	}
 
 	if (decode_ms)
 		*decode_ms = (unsigned)(osGetTime() - t0);

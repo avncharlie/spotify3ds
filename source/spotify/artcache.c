@@ -11,6 +11,7 @@
 #include "../testlog.h"
 
 #include "art.h"
+#include "artcache_path.h"
 
 #define CACHE_ROOT "sdmc:/spotify/artcache"
 
@@ -42,7 +43,7 @@ typedef struct __attribute__((packed)) {
 	u32 payload_len;
 	u32 crc32;
 
-	/* Retained for compatibility with version-3 cache files. Global LRU required
+	/* Retained to keep the compact header layout stable. Global LRU required
 	 * opening every entry at startup, which is prohibitively slow on 3DS SD
 	 * storage; eviction is now FIFO within independently bounded hash shards. */
 	u32 use_seq;
@@ -117,7 +118,11 @@ static bool artcache_key(const char *url, char *out, int outlen)
 	return true;
 }
 
-/* sdmc:/spotify/artcache/<first two hex>/<key>.a3c
+/* sdmc:/spotify/artcache/<last two hex>/<key>.a3c
+ *
+ * Spotify's IDs start with a size/type prefix shared by nearly every image, so
+ * the first two characters are always "ab". The content-hash tail is uniform
+ * and actually distributes entries across the 256 shards.
  *
  * FAT32 scans directory entries linearly and long filenames consume several
  * 32-byte slots each, so a flat directory of thousands of covers would be
@@ -125,7 +130,9 @@ static bool artcache_key(const char *url, char *out, int outlen)
 static void artcache_paths(const char *key, char *dir, int dirlen, char *file,
                            int filelen, char *tmp, int tmplen)
 {
-	snprintf(dir, dirlen, CACHE_ROOT "/%c%c", key[0], key[1]);
+	char suffix[3];
+	artcache_shard_for_key(key, suffix, NULL);
+	snprintf(dir, dirlen, CACHE_ROOT "/%s", suffix);
 	if (file)
 		snprintf(file, filelen, "%s/%s.a3c", dir, key);
 	if (tmp)
@@ -138,29 +145,28 @@ static void artcache_paths(const char *key, char *dir, int dirlen, char *file,
 #define ARTCACHE_MAX_ENTRIES \
 	((int)(ARTCACHE_MAX_BYTES / (sizeof(artcache_hdr) + 102400)))
 #define ARTCACHE_SHARDS 256
-#define ARTCACHE_SHARD_BASE (ARTCACHE_MAX_ENTRIES / ARTCACHE_SHARDS)
-#define ARTCACHE_SHARD_EXTRA (ARTCACHE_MAX_ENTRIES % ARTCACHE_SHARDS)
 
 static u16  s_shard_count[ARTCACHE_SHARDS];
 static bool s_shard_known[ARTCACHE_SHARDS];
 
-static int hex_value(char c)
-{
-	if (c >= '0' && c <= '9')
-		return c - '0';
-	return c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1;
-}
-
 static int shard_index(const char *key)
 {
-	const int hi = hex_value(key[0]);
-	const int lo = hex_value(key[1]);
-	return hi < 0 || lo < 0 ? -1 : hi * 16 + lo;
+	int shard = -1;
+	return artcache_shard_for_key(key, NULL, &shard) ? shard : -1;
 }
 
 static int shard_quota(int shard)
 {
-	return ARTCACHE_SHARD_BASE + (shard < ARTCACHE_SHARD_EXTRA ? 1 : 0);
+	return artcache_shard_quota_for(shard, ARTCACHE_MAX_ENTRIES);
+}
+
+static void discard_entry(const char *key, const char *file)
+{
+	if (unlink(file) != 0)
+		return;
+	const int shard = shard_index(key);
+	if (shard >= 0 && s_shard_known[shard] && s_shard_count[shard] > 0)
+		s_shard_count[shard]--;
 }
 
 static bool cache_filename(const char *name, const char *extension)
@@ -261,7 +267,7 @@ bool artcache_load(const char *url, u8 **out_tiled, int *out_w, int *out_h,
 	artcache_hdr h;
 	if (fread(&h, 1, sizeof h, f) != sizeof h) {
 		fclose(f);
-		unlink(file);
+		discard_entry(key, file);
 		return false;
 	}
 
@@ -279,7 +285,7 @@ bool artcache_load(const char *url, u8 **out_tiled, int *out_w, int *out_h,
 	    want_len == 0) {
 		/* Stale format or nonsense: drop it and refetch. */
 		fclose(f);
-		unlink(file);
+		discard_entry(key, file);
 		return false;
 	}
 
@@ -296,7 +302,7 @@ bool artcache_load(const char *url, u8 **out_tiled, int *out_w, int *out_h,
 		/* Truncated or corrupt. Deleting makes this self-healing: the next
 		 * request refetches and rewrites. */
 		free(rowbuf);
-		unlink(file);
+		discard_entry(key, file);
 		tl_log("artcache: corrupt entry %s, discarded", key);
 		return false;
 	}

@@ -27,7 +27,7 @@
 
 /* Bump when the payload layout, ART_TEX_SIZE, the JPEG scale factor or the
  * pixel byte order changes: entries with a different version are discarded. */
-#define ARTCACHE_VERSION 3
+#define ARTCACHE_VERSION 4
 
 /* Reset session bookkeeping. Performs no filesystem work: the cache root,
  * shard discovery, orphan cleanup and FIFO eviction are all lazy on writes. */

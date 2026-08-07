@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "../testlog.h"
 #include "httppool.h"
@@ -152,10 +153,13 @@ bool http_request(const char *host, const char *method, const char *path,
 		                  &retryable, err, errlen))
 			return true;
 
-		if (!(reused && retryable))
+		/* GET is idempotent, so a truncated fresh response is also safe to retry.
+		 * Commands retain the old rule: only retry a reused connection that was
+		 * already stale before the request could complete. */
+		if (!retryable || (!reused && strcmp(method, "GET") != 0))
 			return false;
 
-		tl_log("pooled connection to %s was stale, redialling", host);
+		tl_log("request to %s failed, redialling (%s)", host, err);
 	}
 
 	return false;
@@ -268,6 +272,7 @@ static bool http_exchange(const char *host, const char *method,
 		if (!decode_chunked(c, &raw, body_start, &out_body)) {
 			free(out_body.buf);
 			snprintf(err, errlen, "bad chunked body");
+			*retryable = true;
 			goto fail;
 		}
 	} else if (cl) {
@@ -280,8 +285,12 @@ static bool http_exchange(const char *host, const char *method,
 				break;
 		}
 		size_t have = raw.len > body_start ? raw.len - body_start : 0;
-		if (have < want)
-			keep = false; /* truncated: stream position is unknown */
+		if (have < want) {
+			snprintf(err, errlen, "truncated body (%u/%u bytes)",
+			         (unsigned)have, (unsigned)want);
+			*retryable = true;
+			goto fail;
+		}
 		if (have > want)
 			have = want;
 		if (have)

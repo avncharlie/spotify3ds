@@ -132,6 +132,7 @@ sudo dkp-pacman -S 3ds-zlib 3ds-mbedtls 3ds-libjpeg-turbo
 ./dev.sh          # build, run in Azahar, print pass/fail
 ./dev.sh --build  # build only
 ./dev.sh --log    # also dump the guest debug log
+./tests/run_host_tests.sh  # deterministic cache-shard and HTTP framing tests
 ```
 
 ### Emulator auth (one time)
@@ -188,4 +189,5 @@ source/
   spotify/        auth, API calls, JSON
   ui/             screens, touch hit-testing
 tools/            host-side PKCE bootstrap
+tests/            host-side cache and HTTP framing tests
 ```

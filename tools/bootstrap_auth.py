@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""One-time Spotify auth bootstrap for spotify3ds.
+"""Spotify authorization bootstrap for spotify3ds.
 
 Runs the Authorization Code + PKCE flow in your browser and writes the
-resulting refresh token to creds.cfg. Run this once on your computer; the 3DS
-then only ever performs refresh_token grants.
+resulting refresh token to creds.cfg. Run this on your computer during setup and
+again when Spotify's six-month refresh-token lifetime requires reauthorization;
+the 3DS otherwise only performs refresh_token grants.
 
 PKCE needs no client_secret, so no secret ever reaches the console or the repo.
 Your password goes to Spotify's own login page — this script never sees it. The

@@ -112,8 +112,12 @@ player_result player_poll(player_state *out, char *err, int errlen)
 
 	/* Which device the audio is actually coming out of. Already in this
 	 * response, so the UI's device line costs no extra request. */
+	json_get_str(j, n, "device.id", out->device_id, sizeof out->device_id);
 	json_get_str(j, n, "device.name", out->device_name, sizeof out->device_name);
 	json_get_str(j, n, "device.type", out->device_type, sizeof out->device_type);
+	out->volume_known = json_get_int(j, n, "device.volume_percent",
+	                                 &out->volume_percent);
+	json_get_bool(j, n, "device.supports_volume", &out->supports_volume);
 
 	char rep[16] = "";
 	if (json_get_str(j, n, "repeat_state", rep, sizeof rep)) {
@@ -201,6 +205,47 @@ player_result player_seek(long position_ms, char *err, int errlen)
 	char path[96];
 	snprintf(path, sizeof path, "/v1/me/player/seek?position_ms=%ld",
 	         position_ms);
+	return simple_cmd("PUT", path, err, errlen);
+}
+
+player_result player_set_volume(int volume_percent, const char *device_id,
+                                char *err, int errlen)
+{
+	if (volume_percent < 0 || volume_percent > 100) {
+		snprintf(err, errlen, "invalid volume %d", volume_percent);
+		return PLAYER_ERROR;
+	}
+
+	char path[512];
+	if (device_id && device_id[0]) {
+		char encoded[sizeof ((player_state *)0)->device_id * 3];
+		char *dst = encoded;
+		const char *const end = encoded + sizeof encoded - 1;
+		static const char hex[] = "0123456789ABCDEF";
+		for (const unsigned char *src = (const unsigned char *)device_id;
+		     *src && dst < end; src++) {
+			const bool plain = (*src >= 'a' && *src <= 'z') ||
+			                   (*src >= 'A' && *src <= 'Z') ||
+			                   (*src >= '0' && *src <= '9') || *src == '-' ||
+			                   *src == '_' || *src == '.' || *src == '~';
+			if (plain) {
+				*dst++ = (char)*src;
+			} else {
+				if (end - dst < 3)
+					break;
+				*dst++ = '%';
+				*dst++ = hex[*src >> 4];
+				*dst++ = hex[*src & 15];
+			}
+		}
+		*dst = '\0';
+		snprintf(path, sizeof path,
+		         "/v1/me/player/volume?volume_percent=%d&device_id=%s",
+		         volume_percent, encoded);
+	} else {
+		snprintf(path, sizeof path,
+		         "/v1/me/player/volume?volume_percent=%d", volume_percent);
+	}
 	return simple_cmd("PUT", path, err, errlen);
 }
 

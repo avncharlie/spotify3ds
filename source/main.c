@@ -20,6 +20,7 @@
 #include "ui/thumbs.h"
 #include "ui/touch.h"
 #include "ui/ui.h"
+#include "ui/volume_overlay.h"
 #include "worker.h"
 
 #define PHASE 6
@@ -108,6 +109,9 @@ static int                   g_tracks_select_on_load = -2;
 #define LIST_FLING_STOP     0.10f
 #define LIST_ARM_MS         4000
 #define TEXTBUF_GLYPHS      4096
+#define VOLUME_STEP         5
+#define VOLUME_OVERLAY_MS   1100
+#define VOLUME_OPT_MS       12000
 
 /* True when running under the headless harness, which needs the app to quit by
  * itself. On a real console the app must stay up until the user exits. */
@@ -199,7 +203,10 @@ typedef struct {
 	u64  until;
 } opt_field;
 
-static opt_field g_opt_play, g_opt_shuf, g_opt_rep;
+static opt_field g_opt_play, g_opt_shuf, g_opt_rep, g_opt_volume;
+static char      g_opt_volume_device[128];
+static char      g_seen_device[128];
+static u64       g_volume_overlay_until;
 
 typedef struct {
 	char uri[128];
@@ -467,6 +474,12 @@ static void opt_set(opt_field *o, long v)
 	o->until = osGetTime() + OPTIMISTIC_MS;
 }
 
+static void opt_set_for(opt_field *o, long v, u64 duration_ms)
+{
+	o->value = v;
+	o->until = osGetTime() + duration_ms;
+}
+
 static long opt_get(const opt_field *o, long polled)
 {
 	return osGetTime() < o->until ? o->value : polled;
@@ -476,6 +489,15 @@ static bool effective_playing(const worker_snapshot *snap)
 {
 	return opt_get(&g_opt_play,
 	               snap->have_state && snap->state.is_playing) != 0;
+}
+
+static int effective_volume(const worker_snapshot *snap)
+{
+	if (!snap->have_state || !snap->state.volume_known)
+		return 0;
+	if (strcmp(g_opt_volume_device, snap->state.device_id) == 0)
+		return (int)opt_get(&g_opt_volume, snap->state.volume_percent);
+	return (int)snap->state.volume_percent;
 }
 
 static bool effective_shuffle(const worker_snapshot *snap)
@@ -633,6 +655,9 @@ int main(int argc, char **argv)
 	bool logged_recents     = false;
 	bool logged_playlists   = false;
 	bool logged_albums      = false;
+	bool volume_overlay_supported_drawn = false;
+	bool volume_overlay_zero_drawn = false;
+	bool volume_overlay_unsupported_drawn = false;
 	u64  repeat_probe_at    = 0;
 	repeat_mode repeat_probe_from = REPEAT_OFF;
 	int      tracks_probe_stage = 0;
@@ -677,13 +702,6 @@ int main(int argc, char **argv)
 			if (frames == 390)
 				g_list_armed = -1;
 			if (frames == 420) {
-				tl_step("list_search",
-				        g_search_recents.count == 0 &&
-				            g_search_albums.count > 0,
-				        "query=%s playlists=%d albums=%d", g_list_search,
-				        g_search_playlists.count, g_search_albums.count);
-				g_list_search[0] = '\0';
-				g_filter_query[0] = '\0';
 				tl_step("list_view", 1, "rendered %d frames", 120);
 				g_view = VIEW_PLAYER;
 				g_list_armed = -1;
@@ -695,6 +713,19 @@ int main(int argc, char **argv)
 		touch_update(&touch, g_tb.rects, g_tb.n);
 		tb_reset(&g_tb);
 		worker_get(&snap);
+		if (snap.have_state &&
+		    strcmp(g_seen_device, snap.state.device_id) != 0) {
+			snprintf(g_seen_device, sizeof g_seen_device, "%s",
+			         snap.state.device_id);
+			g_opt_volume.until = 0;
+			g_opt_volume_device[0] = '\0';
+		}
+		if (snap.have_state && g_opt_volume.until && snap.state.volume_known &&
+		    strcmp(g_opt_volume_device, snap.state.device_id) == 0 &&
+		    snap.state.volume_percent == g_opt_volume.value) {
+			g_opt_volume.until = 0;
+			g_opt_volume_device[0] = '\0';
+		}
 
 		/* Re-base the interpolation clock whenever a poll brings new data. */
 		if (snap.have_state && snap.state.progress_ms != last_seen_progress) {
@@ -719,6 +750,31 @@ int main(int argc, char **argv)
 		const long progress = effective_progress(&snap);
 		const long duration = snap.have_state ? snap.state.duration_ms : 0;
 		const bottom_view input_view = g_view;
+
+		const u32 volume_keys = keys_repeat & (KEY_L | KEY_R);
+		if (volume_keys) {
+			g_volume_overlay_until = osGetTime() + VOLUME_OVERLAY_MS;
+			const bool supported = snap.have_state &&
+			                       snap.state.supports_volume &&
+			                       snap.state.volume_known &&
+			                       snap.state.device_id[0];
+			if (supported && volume_keys != (KEY_L | KEY_R)) {
+				const int current = effective_volume(&snap);
+				int target = current + ((volume_keys & KEY_R) ? VOLUME_STEP
+				                                              : -VOLUME_STEP);
+				if (target < 0)
+					target = 0;
+				if (target > 100)
+					target = 100;
+				if (target != current &&
+				    worker_set_volume(target, snap.state.device_id)) {
+					opt_set_for(&g_opt_volume, target, VOLUME_OPT_MS);
+					snprintf(g_opt_volume_device,
+					         sizeof g_opt_volume_device, "%s",
+					         snap.state.device_id);
+				}
+			}
+		}
 
 		if (input_view == VIEW_TRACKS) {
 			worker_get_tracks(&g_tracks_buf);
@@ -850,8 +906,8 @@ int main(int argc, char **argv)
 				}
 			}
 
-			if (keys_down & (KEY_L | KEY_R)) {
-				const int direction = (keys_down & KEY_L) ? -1 : 1;
+			if (keys_down & (KEY_ZL | KEY_ZR)) {
+				const int direction = (keys_down & KEY_ZL) ? -1 : 1;
 				g_list_armed = -1;
 				g_list_velocity = 0.0f;
 				g_list_scroll = screen_list_jump_section(
@@ -982,9 +1038,9 @@ int main(int argc, char **argv)
 					g_tracks_armed = -1;
 
 				const bool prev_page =
-				    touch.clicked == TRACK_BTN_PREV_PAGE || (keys_down & KEY_L);
+				    touch.clicked == TRACK_BTN_PREV_PAGE || (keys_down & KEY_ZL);
 				const bool next_page =
-				    touch.clicked == TRACK_BTN_NEXT_PAGE || (keys_down & KEY_R);
+				    touch.clicked == TRACK_BTN_NEXT_PAGE || (keys_down & KEY_ZR);
 				if (prev_page && page->offset > 0) {
 					tracks_request_page(page->offset - TRACK_PAGE_MAX, -2);
 				} else if (prev_page &&
@@ -1315,6 +1371,24 @@ int main(int argc, char **argv)
 			}
 		}
 
+		/* Album loading can finish after the fixed list-view rendering window.
+		 * Keep the search fixture alive until both source lists can be filtered. */
+		if (g_smoketest && frames >= 420 && g_list_search[0]) {
+			recent_list *search_recents;
+			playlist_list *search_playlists;
+			album_list *search_albums;
+			library_get_lists(&search_recents, &search_playlists, &search_albums);
+			if (g_albums_buf.count > 0 || frames > 650) {
+				tl_step("list_search",
+				        g_albums_buf.count > 0 && search_recents->count == 0 &&
+				            search_albums->count > 0,
+				        "query=%s playlists=%d albums=%d", g_list_search,
+				        search_playlists->count, search_albums->count);
+				g_list_search[0] = '\0';
+				g_filter_query[0] = '\0';
+			}
+		}
+
 		/* Named live fixtures exercise the track browser against both extremes:
 		 * Good music is intentionally enormous, while LUX picks is small enough
 		 * to validate ordinary one-page use. Every transition goes through the
@@ -1521,6 +1595,15 @@ int main(int argc, char **argv)
 			tl_step("device_parsed", snap.state.device_name[0] != '\0',
 			        "name=%s type=%s", snap.state.device_name,
 			        snap.state.device_type);
+			tl_step("volume_state",
+			        snap.state.device_id[0] &&
+			            (!snap.state.supports_volume ||
+			             (snap.state.volume_known &&
+			              snap.state.volume_percent >= 0 &&
+			              snap.state.volume_percent <= 100)),
+			        "known=%d volume=%ld supported=%d",
+			        (int)snap.state.volume_known, snap.state.volume_percent,
+			        (int)snap.state.supports_volume);
 			tl_step("repeat_parsed", 1, "mode=%d effective=%d",
 			        (int)snap.state.repeat, (int)effective_repeat(&snap));
 
@@ -1667,6 +1750,56 @@ int main(int argc, char **argv)
 			screen_player_draw(&pa);
 		}
 
+		const u64 volume_now = osGetTime();
+		if (volume_now < g_volume_overlay_until) {
+			const u64 remaining = g_volume_overlay_until - volume_now;
+			const u8 alpha = remaining >= 350
+			                     ? 255
+			                     : (u8)(remaining * 255 / 350);
+			const bool volume_supported =
+			    snap.have_state && snap.state.supports_volume &&
+			    snap.state.volume_known && snap.state.device_id[0];
+			const volume_overlay_args va = {
+				.buf = textbuf,
+				.supported = volume_supported,
+				.volume_percent = volume_supported ? effective_volume(&snap) : 0,
+				.device_name = snap.have_state ? snap.state.device_name : NULL,
+				.alpha = alpha,
+			};
+			volume_overlay_draw(&va);
+		}
+		if (g_smoketest && frames >= 300 && frames < 360) {
+			const volume_overlay_args va = {
+				.buf = textbuf,
+				.supported = true,
+				.volume_percent = 62,
+				.device_name = "Test device",
+				.alpha = 255,
+			};
+			volume_overlay_draw(&va);
+			volume_overlay_supported_drawn = true;
+		} else if (g_smoketest && frames >= 360 && frames < 420) {
+			const volume_overlay_args va = {
+				.buf = textbuf,
+				.supported = true,
+				.volume_percent = 0,
+				.device_name = "Test device",
+				.alpha = 255,
+			};
+			volume_overlay_draw(&va);
+			volume_overlay_zero_drawn = true;
+		} else if (g_smoketest && frames >= 420 && frames < 480) {
+			const volume_overlay_args va = {
+				.buf = textbuf,
+				.supported = false,
+				.volume_percent = 0,
+				.device_name = "iPhone",
+				.alpha = 255,
+			};
+			volume_overlay_draw(&va);
+			volume_overlay_unsupported_drawn = true;
+		}
+
 		const size_t text_glyphs = C2D_TextBufGetNumGlyphs(textbuf);
 		if (text_glyphs > max_text_glyphs)
 			max_text_glyphs = text_glyphs;
@@ -1681,6 +1814,14 @@ int main(int argc, char **argv)
 		     frames == 1800)) {
 			if (frames == 1800 && tracks_probe_stage != 99)
 				tl_step("tracks_timeout", 0, "stage=%d", tracks_probe_stage);
+			tl_step("volume_overlay",
+			        volume_overlay_supported_drawn &&
+			            volume_overlay_zero_drawn &&
+			            volume_overlay_unsupported_drawn,
+			        "supported=%d zero=%d unsupported=%d",
+			        (int)volume_overlay_supported_drawn,
+			        (int)volume_overlay_zero_drawn,
+			        (int)volume_overlay_unsupported_drawn);
 			tl_step("text_buffer", max_text_glyphs < TEXTBUF_GLYPHS,
 			        "peak=%u/%d glyphs", (unsigned)max_text_glyphs,
 			        TEXTBUF_GLYPHS);

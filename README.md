@@ -15,9 +15,10 @@ https://github.com/user-attachments/assets/de96f312-1107-42eb-a012-5f5bdfdea7f2
 ## Screenshots
 
 <p align="center">
-  <img src="assets/main-screen.png" alt="Spotify3DS Player screen" width="31%">
-  <img src="assets/library-screen.png" alt="Spotify3DS Library screen" width="31%">
-  <img src="assets/tracks-screen.png" alt="Spotify3DS Tracks screen" width="31%">
+  <img src="assets/main-screen.png" alt="Spotify3DS Player screen" width="23%">
+  <img src="assets/library-screen.png" alt="Spotify3DS Library screen" width="23%">
+  <img src="assets/tracks-screen.png" alt="Spotify3DS Tracks screen" width="23%">
+  <img src="assets/volume-overlay.png" alt="Spotify3DS volume overlay" width="23%">
 </p>
 
 ## Installation
@@ -31,6 +32,9 @@ You can also scan this QR code in FBI under **Remote Install → Scan QR Code**
 to install the latest CIA directly:
 
 <a href="https://github.com/avncharlie/spotify3ds/releases/latest/download/Spotify3DS.cia"><img src="assets/latest-release-qr.png" alt="QR code for the latest Spotify3DS CIA" width="240"></a>
+
+To update an existing installation, re-scan the same QR code in FBI. It always
+points to the CIA from the latest release.
 
 1. Create an app in the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard).
    Select **Web API**, add `http://127.0.0.1:8888/callback` as a redirect URI,
@@ -57,8 +61,11 @@ access at <https://spotify.com/account/apps> if the SD card or file is lost.
 
 ## Controls
 
-- Player: `A` play/pause, D-pad left/right previous/next, `X` Library, and `Y`
-  show/hide cover art. Tap a Recently Played tile to open its tracks; hold it
+> **Global volume:** Press `L/R` on any screen to decrease/increase volume in
+> 5% steps. Hold either button to keep changing it.
+
+- Player: `A` play/pause, D-pad left/right previous/next, `L/R` volume down/up,
+  `X` Library, and `Y` show/hide cover art. Tap a Recently Played tile to open its tracks; hold it
   for 600 ms to start the collection immediately. Tracks opened from this shelf
   return directly to Player with `B` or the top-left back control.
 - Library: tap a row's play icon to start it immediately, or its right chevron
@@ -66,19 +73,26 @@ access at <https://spotify.com/account/apps> if the SD card or file is lost.
   D-pad up/down selects a collection, `A` starts it and then toggles play/pause,
   `X` opens its tracks,
   D-pad left/right skips the previous/next song, `SELECT` toggles play/pause,
-  `L/R` jumps sections, and `B` returns. Tap `FIND` to filter saved albums and
+  `L/R` changes volume, `ZL/ZR` jumps sections, and `B` returns. Tap `FIND` to filter saved albums and
   playlists by name, artist, or owner using the system keyboard; tap the filter
   strip's `X` to clear it.
 - Tracks: tap a row's play icon to start it immediately; the current playing
   track shows pause in the same cell. D-pad up/down selects a song, `A` plays
-  it and then toggles play/pause, `L/R` changes 50-track
+  it and then toggles play/pause, `L/R` changes volume, `ZL/ZR` changes 50-track
   pages, D-pad left/right skips the previous/next song, `SELECT` toggles
   play/pause, `X` queues the selected song, and `B` returns to the Library. Tap a
   row's right queue icon to queue it directly. Moving past a page boundary with
   D-pad up/down also loads the adjacent page automatically. Playlist pagination
-  wraps: `L`/Up on the first page opens the last page, and `R`/Down on the last
+  wraps: `ZL`/Up on the first page opens the last page, and `ZR`/Down on the last
   page opens the first page. The play icon at the right of the header starts
   the whole album or playlist without leaving Tracks.
+
+Volume changes step by five; hold either shoulder button to keep stepping. A
+transient bottom-screen overlay shows the current level. Devices
+that report no remote-volume support get an explanatory overlay instead of an
+API command.
+On original 3DS/2DS models without `ZL/ZR`, use touch or D-pad boundary paging;
+Library sections remain reachable by scrolling.
 
 Library and Tracks mark Spotify's current context or song with a green title,
 edge, row tint, and an equalizer over its artwork. The bars animate while
@@ -135,7 +149,22 @@ sudo dkp-pacman -S 3ds-zlib 3ds-mbedtls 3ds-libjpeg-turbo
 ./tests/run_host_tests.sh  # deterministic cache-shard and HTTP framing tests
 ```
 
-### Emulator auth (one time)
+To test Spotify Connect volume control with the same credentials used by the
+3DS, start playback on a Premium account and run:
+
+```sh
+python3 tools/set_volume.py 50
+python3 tools/set_volume.py --get                    # query active volume
+python3 tools/set_volume.py 50 --device-id <DEVICE_ID>  # optional target
+```
+
+The script refreshes OAuth, checks that the target supports volume control,
+requires Spotify's `204 No Content` response, and verifies the reported volume.
+If Spotify reports that it rotated the refresh token, re-copy the updated
+`creds.cfg` to `SD:/spotify/creds.cfg` before launching Spotify3DS. Passing the
+SD card's credential path with `--creds` updates it in place instead.
+
+### Emulator auth
 
 1. Create an app at <https://developer.spotify.com/dashboard>
 2. Add this redirect URI **exactly**: `http://127.0.0.1:8888/callback`
@@ -149,6 +178,10 @@ It opens Spotify's own login page in your browser, catches the redirect on a
 throwaway local listener, and writes `creds.cfg`. Copy that to the SD card as
 `/spotify/creds.cfg` (for Azahar:
 `~/Library/Application Support/Azahar/sdmc/spotify/creds.cfg`).
+
+Spotify refresh tokens expire six months after authorization. When Spotify3DS
+shows **Authorization expired**, rerun the bootstrap command and replace the
+console's `creds.cfg` with the newly generated file.
 
 PKCE means **no `client_secret` exists**, so no secret ever reaches the console
 or the repo, and the script never sees your password. The 3DS thereafter only

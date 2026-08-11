@@ -60,6 +60,7 @@ typedef struct {
 	long       arg;
 	char       context_uri[128];
 	char       item_uri[128];
+	char       device_id[128];
 	int        position;
 } queued_cmd;
 
@@ -297,9 +298,13 @@ static void do_poll(void)
 	 * could be a genuine 204 or a masked error, and on hardware this is the
 	 * only way to tell them apart. */
 	if (pr == PLAYER_OK)
-		tl_log("poll ok: %s - %s (playing=%d item=%s context=%s)", st.track,
-		       st.artist, (int)st.is_playing, st.track_uri,
-		       st.context_uri[0] ? st.context_uri : "-");
+		tl_log("poll ok: %s - %s (playing=%d item=%s context=%s device=%s "
+		       "volume=%ld supported=%d)",
+		       st.track, st.artist, (int)st.is_playing, st.track_uri,
+		       st.context_uri[0] ? st.context_uri : "-",
+		       st.device_id[0] ? st.device_id : "-",
+		       st.volume_known ? st.volume_percent : -1L,
+		       (int)st.supports_volume);
 	else
 		tl_log("poll: %s (%s)", player_result_str(pr), err);
 }
@@ -322,6 +327,9 @@ static void do_cmd(const queued_cmd *q)
 		case CMD_SEEK:    pr = player_seek(q->arg, err, sizeof err); break;
 		case CMD_SHUFFLE: pr = player_shuffle(q->arg != 0, err, sizeof err); break;
 		case CMD_REPEAT:  pr = player_repeat((repeat_mode)q->arg, err, sizeof err); break;
+		case CMD_VOLUME:
+			pr = player_set_volume((int)q->arg, q->device_id, err, sizeof err);
+			break;
 		case CMD_PLAY_CONTEXT:
 			if (q->item_uri[0])
 				pr = player_play_context_item(q->context_uri, q->item_uri, err,
@@ -364,7 +372,11 @@ static void worker_main(void *arg)
 	if (!auth_token(err, sizeof err)) {
 		/* On hardware this is usually clock skew: TLS rejects the certificate
 		 * when the console's RTC is wrong. */
-		set_fatal("Auth failed", "Check system date/time, then relaunch");
+		if (strstr(err, "invalid_grant"))
+			set_fatal("Authorization expired",
+			          "Run bootstrap_auth.py again and replace creds.cfg");
+		else
+			set_fatal("Auth failed", "Check system date/time, then relaunch");
 		tl_log("worker: auth_token FAILED: %s", err);
 		return;
 	}
@@ -377,12 +389,15 @@ static void worker_main(void *arg)
 	while (!s_quit) {
 		queued_cmd cmd;
 		bool       did_work = false;
+		bool       settle_track = false;
 
 		while (pop_cmd(&cmd)) {
 			LightLock_Lock(&s_lock);
 			s_busy = true;
 			LightLock_Unlock(&s_lock);
 
+			settle_track = settle_track || cmd.cmd == CMD_NEXT ||
+			               cmd.cmd == CMD_PREV || cmd.cmd == CMD_PLAY_CONTEXT;
 			do_cmd(&cmd);
 			did_work = true;
 		}
@@ -400,7 +415,7 @@ static void worker_main(void *arg)
 		 * re-polls a couple of times rather than waiting out a fixed delay. */
 		if (did_work) {
 			next_poll  = 0; /* poll on this iteration */
-			settle_left = SETTLE_RETRIES;
+			settle_left = settle_track ? SETTLE_RETRIES : 0;
 		}
 
 		LightLock_Lock(&s_lock);
@@ -553,6 +568,41 @@ void worker_post(worker_cmd cmd, long arg)
 	q.arg = arg;
 	q.position = -1;
 	enqueue(&q);
+}
+
+bool worker_set_volume(int volume_percent, const char *device_id)
+{
+	if (volume_percent < 0 || volume_percent > 100 || !device_id ||
+	    !device_id[0])
+		return false;
+
+	ensure_lock();
+	queued_cmd q;
+	memset(&q, 0, sizeof q);
+	q.cmd = CMD_VOLUME;
+	q.arg = volume_percent;
+	q.position = -1;
+	snprintf(q.device_id, sizeof q.device_id, "%s", device_id);
+
+	bool queued = false;
+	LightLock_Lock(&s_lock);
+	for (int i = s_qhead; i != s_qtail; i = (i + 1) % CMD_QUEUE) {
+		if (s_queue[i].cmd == CMD_VOLUME) {
+			s_queue[i] = q;
+			queued = true;
+			break;
+		}
+	}
+	if (!queued) {
+		const int next = (s_qtail + 1) % CMD_QUEUE;
+		if (next != s_qhead) {
+			s_queue[s_qtail] = q;
+			s_qtail = next;
+			queued = true;
+		}
+	}
+	LightLock_Unlock(&s_lock);
+	return queued;
 }
 
 void worker_request_art(const char *url)

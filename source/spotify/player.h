@@ -29,12 +29,16 @@ typedef struct {
 	char track_uri[128];
 	char album_uri[128];
 	char context_uri[128];
+	char device_id[128];
 	char device_name[64];
 	char device_type[32];
 	long progress_ms;
 	long duration_ms;
+	long volume_percent;
 	bool is_playing;
 	bool shuffle;
+	bool volume_known;
+	bool supports_volume;
 	repeat_mode repeat;
 } player_state;
 
@@ -50,6 +54,8 @@ player_result player_queue_item(const char *item_uri, char *err, int errlen);
 player_result player_seek(long position_ms, char *err, int errlen);
 player_result player_shuffle(bool on, char *err, int errlen);
 player_result player_repeat(repeat_mode mode, char *err, int errlen);
+player_result player_set_volume(int volume_percent, const char *device_id,
+                                char *err, int errlen);
 
 /* Next state in the off -> context -> track -> off cycle. */
 repeat_mode repeat_next(repeat_mode m);

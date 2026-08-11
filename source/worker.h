@@ -25,6 +25,7 @@ typedef enum {
 	CMD_REPEAT,
 	CMD_PLAY_CONTEXT,
 	CMD_QUEUE_ITEM,
+	CMD_VOLUME,
 } worker_cmd;
 
 typedef struct {
@@ -48,8 +49,13 @@ void worker_stop(void);
 void worker_set_fatal(const char *what, const char *hint);
 
 /* Queue a command. arg is position_ms for CMD_SEEK, 0/1 for CMD_SHUFFLE,
- * and a repeat_mode for CMD_REPEAT. */
+ * and a repeat_mode for CMD_REPEAT. Volume uses worker_set_volume so rapid
+ * shoulder presses can be coalesced. */
 void worker_post(worker_cmd cmd, long arg);
+
+/* Set volume on the device represented by the latest poll. New pending volume
+ * commands replace older ones so rapid stepping does not issue every midpoint. */
+bool worker_set_volume(int volume_percent, const char *device_id);
 
 /* Copy the current state out under lock. Never blocks on network I/O. */
 void worker_get(worker_snapshot *out);

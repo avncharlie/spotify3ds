@@ -290,16 +290,16 @@ void screen_tracks_draw(const screen_tracks_args *a)
 		    (a->page->collection.kind == COLLECTION_PLAYLIST &&
 		     a->page->offset > 0 && a->page->total > a->page->count);
 		if (has_prev) {
-			ui_text(a->buf, "< L", 198,
+			ui_text(a->buf, "< ZL", 196,
 			        ui_baseline((HEADER_H - ui_px(TY_ROW_NAME)) / 2, TY_ROW_NAME),
-			        TY_ROW_NAME, 34,
+			        TY_ROW_NAME, 38,
 			        a->pressed_id == TRACK_BTN_PREV_PAGE ? CLR_GREEN : CLR_SUB);
 			tb_add(a->tb, 194, 0, 40, HEADER_H, TRACK_BTN_PREV_PAGE);
 		}
 		if (has_next) {
-			ui_text(a->buf, "R >", 240,
+			ui_text(a->buf, "ZR >", 238,
 			        ui_baseline((HEADER_H - ui_px(TY_ROW_NAME)) / 2, TY_ROW_NAME),
-			        TY_ROW_NAME, 34,
+			        TY_ROW_NAME, 38,
 			        a->pressed_id == TRACK_BTN_NEXT_PAGE ? CLR_GREEN : CLR_SUB);
 			tb_add(a->tb, 236, 0, 40, HEADER_H, TRACK_BTN_NEXT_PAGE);
 		}

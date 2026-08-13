@@ -51,6 +51,15 @@ float ui_baseline(float top, type_role r);
 void ui_text(C2D_TextBuf buf, const char *s, float x, float y, type_role r,
              float maxw, u32 clr);
 
+/* Draw text broken across up to maxlines lines at word boundaries, and return
+ * the baseline of the last line drawn. `leading` multiplies ui_px(r) to get the
+ * baseline step. Unlike ui_text this is for prose that must be read in full -
+ * error messages - rather than for a name that may be ellipsised. Text still
+ * remaining on the last permitted line is ellipsised as usual. */
+float ui_text_wrapped(C2D_TextBuf buf, const char *s, float x, float y,
+                      type_role r, float maxw, u32 clr, int maxlines,
+                      float leading);
+
 /* Draw one case-insensitive matched substring in a second colour. Falls back
  * to ui_text when needle is empty or absent. */
 void ui_text_highlight(C2D_TextBuf buf, const char *s, const char *needle,

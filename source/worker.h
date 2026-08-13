@@ -34,6 +34,7 @@ typedef struct {
 	player_result last_result;
 	char          status[128];      /* human-readable status for the UI */
 	char          status_hint[128]; /* what the user should do about it */
+	char          status_detail[128]; /* raw underlying error, for bug reports */
 	bool          fatal;            /* setup problem, not a transient state */
 	bool          busy;             /* a command or poll is in flight */
 	unsigned      poll_seq;         /* increments after each completed poll */

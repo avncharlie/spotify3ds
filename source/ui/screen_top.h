@@ -27,6 +27,7 @@ typedef struct {
 	const char      *device;
 	const char      *status;
 	const char      *hint;
+	const char      *detail; /* raw error under a fatal status; may be NULL */
 } screen_top_args;
 
 void screen_top_draw(const screen_top_args *a);

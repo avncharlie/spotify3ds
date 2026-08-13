@@ -22,6 +22,13 @@
 #define BIG_X 40.0f
 #define BIG_W 320.0f
 
+/* Fatal-error block. Wider than either playback layout and starting higher,
+ * because it has three wrapped paragraphs to fit rather than three short
+ * lines - the top screen is 400x240. */
+#define ERR_X   28.0f
+#define ERR_TOP 34.0f
+#define ERR_W   344.0f
+
 /* Gaps between baselines. Scaled up with the type, which runs ~17% above the
  * mockup's sizes (see s_role_px): holding the mockup's gaps while enlarging the
  * text would have tightened the block relative to what it specified. */
@@ -120,23 +127,49 @@ void screen_top_draw(const screen_top_args *a)
 		C2D_DrawImageAt(a->art->image, ART_X, ART_Y, 0.0f, NULL, sx, sy);
 	}
 
+	/* --- a setup problem the user must fix ----------------------------
+	 *
+	 * Errors are prose, not a song name: they have to be read to the end. So
+	 * this ignores the now-playing type scale - whose 34px title ellipsised
+	 * "Spotify rejected the l.." and cut the actionable half of the hint - and
+	 * wraps across the full screen width instead. The cover is irrelevant while
+	 * the app is unusable, so the message always gets the whole screen. */
+	if (a->fatal) {
+		float bl = ui_baseline(ERR_TOP, TY_ARTIST_L);
+
+		bl = ui_text_wrapped(a->buf, a->status, ERR_X, bl, TY_ARTIST_L, ERR_W,
+		                     CLR_ERROR, 2, 1.25f);
+
+		if (a->hint && a->hint[0]) {
+			bl += ui_px(TY_ARTIST_L) * 0.5f + ui_px(TY_ALBUM_L);
+			bl = ui_text_wrapped(a->buf, a->hint, ERR_X, bl, TY_ALBUM_L, ERR_W,
+			                     CLR_ERR_D, 3, 1.35f);
+		}
+
+		/* The raw error, dimmed: it is for transcribing into a bug report,
+		 * while the hint above is what the user is meant to act on. */
+		if (a->detail && a->detail[0]) {
+			bl += ui_px(TY_ALBUM_L) * 0.5f + ui_px(TY_ROW_SUB);
+			ui_text_wrapped(a->buf, a->detail, ERR_X, bl, TY_ROW_SUB, ERR_W,
+			                CLR_FAINT, 2, 1.3f);
+		}
+		return;
+	}
+
 	/* --- no state: say so, and say what to do about it ---------------- */
 	if (!a->have_state) {
 		const float x = show_art ? COL_X : BIG_X;
 		const float w = show_art ? COL_W : BIG_W;
 		const type_role role = show_art ? TY_TITLE : TY_TITLE_L;
 
-		const char *primary =
-		    a->fatal ? a->status : (a->status[0] ? a->status : "Nothing playing");
+		const char *primary = a->status[0] ? a->status : "Nothing playing";
 
 		float bl = ui_baseline(show_art ? COL_TOP : 96.0f, role);
-		ui_text(a->buf, primary, x, bl, role, w,
-		        a->fatal ? CLR_ERROR : CLR_DIM);
+		ui_text(a->buf, primary, x, bl, role, w, CLR_DIM);
 
 		if (a->hint && a->hint[0]) {
 			bl += ui_px(role) * 0.6f + ui_px(TY_ALBUM_L);
-			ui_text(a->buf, a->hint, x, bl, TY_ALBUM_L, w,
-			        a->fatal ? CLR_ERR_D : CLR_FAINT);
+			ui_text(a->buf, a->hint, x, bl, TY_ALBUM_L, w, CLR_FAINT);
 		}
 		return;
 	}

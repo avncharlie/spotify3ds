@@ -172,6 +172,73 @@ void ui_text(C2D_TextBuf buf, const char *s, float x, float y, type_role r,
 	C2D_DrawText(&t, C2D_WithColor | C2D_AtBaseline, x, y, 0.0f, sc, sc, clr);
 }
 
+float ui_text_wrapped(C2D_TextBuf buf, const char *s, float x, float y,
+                      type_role r, float maxw, u32 clr, int maxlines,
+                      float leading)
+{
+	if (!s || !s[0] || maxlines <= 0)
+		return y;
+
+	const float step = ui_px(r) * leading;
+	float       bl   = y;
+	const char *p    = s;
+	int         line = 0;
+
+	while (*p && line < maxlines) {
+		/* Longest run of whole words that fits. Measuring per candidate is
+		 * fine here: this runs only on the error screen, not per frame of
+		 * ordinary playback. */
+		size_t take = 0, probe = 0;
+		char   cand[256];
+
+		for (;;) {
+			while (p[probe] == ' ')
+				probe++;
+			while (p[probe] && p[probe] != ' ')
+				probe++;
+			if (probe == 0)
+				break;
+
+			snprintf(cand, sizeof cand, "%.*s", (int)probe, p);
+			if (measure_width(buf, cand, r) > maxw)
+				break;
+
+			take = probe;
+			if (!p[probe])
+				break;
+		}
+
+		/* A single word too long for the column: hand it to ui_text, which
+		 * ellipsises it, rather than looping forever on zero progress. */
+		if (take == 0) {
+			ui_text(buf, p, x, bl, r, maxw, clr);
+			return bl;
+		}
+
+		const char *line_start = p;
+
+		p += take;
+		while (*p == ' ')
+			p++;
+
+		/* On the last permitted line with text still to come, draw the raw
+		 * remainder so ui_text's ellipsis shows the reader it was cut. */
+		if (*p && line == maxlines - 1) {
+			ui_text(buf, line_start, x, bl, r, maxw, clr);
+			return bl;
+		}
+
+		snprintf(cand, sizeof cand, "%.*s", (int)take, line_start);
+		ui_text(buf, cand, x, bl, r, maxw, clr);
+
+		line++;
+		if (*p)
+			bl += step;
+	}
+
+	return bl;
+}
+
 static char *find_ci(char *text, const char *needle)
 {
 	const size_t nn = strlen(needle);

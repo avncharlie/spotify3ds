@@ -50,6 +50,7 @@ static bool          s_have_state;
 static player_result s_last_result;
 static char          s_status[128];
 static char          s_status_hint[128];
+static char          s_status_detail[128];
 static bool          s_fatal;
 static bool          s_busy;
 static unsigned      s_poll_seq;
@@ -122,14 +123,26 @@ static void set_status(const char *s)
 }
 
 /* A setup problem the user must fix, with the remedy. Unlike a transient
- * status this persists, because retrying will not help. */
-static void set_fatal(const char *what, const char *hint)
+ * status this persists, because retrying will not help.
+ *
+ * `detail` is the raw underlying error. It is deliberately shown on screen as
+ * well as logged: the hint is a guess at the cause, and when the guess is wrong
+ * the detail is the only thing that lets a bug report name the real failure. */
+static void set_fatal_detail(const char *what, const char *hint,
+                             const char *detail)
 {
 	LightLock_Lock(&s_lock);
 	snprintf(s_status, sizeof s_status, "%s", what);
 	snprintf(s_status_hint, sizeof s_status_hint, "%s", hint);
+	snprintf(s_status_detail, sizeof s_status_detail, "%s",
+	         detail ? detail : "");
 	s_fatal = true;
 	LightLock_Unlock(&s_lock);
+}
+
+static void set_fatal(const char *what, const char *hint)
+{
+	set_fatal_detail(what, hint, NULL);
 }
 
 static void do_art(void);
@@ -352,6 +365,150 @@ static void do_cmd(const queued_cmd *q)
 	}
 }
 
+/* Turn an auth_token error into the right remedy.
+ *
+ * Every one of these used to render as "Check system date/time", which sent
+ * users hunting a clock that was already correct while the real fault was a
+ * dead network or a bad client_id (issue #2).
+ *
+ * The matched strings are the complete set reachable from auth_token: the
+ * explicit ones in auth.c, net.c, http.c and tls.c, plus the mbedTLS text that
+ * tls.c's describe() passes through verbatim for a failed handshake. Order
+ * matters - the narrow cases (invalid_grant, a 429) sit above the broader ones
+ * (any token http, any SSL) that would otherwise swallow them. Anything
+ * unrecognised stays generic rather than guessing, since the detail line
+ * carries the truth either way. */
+static void auth_fail_fatal(const char *err)
+{
+	/* Revoked or rotated-away refresh token: no amount of retrying helps. */
+	if (strstr(err, "invalid_grant")) {
+		set_fatal_detail("Authorization expired",
+		                 "Run bootstrap_auth.py again and replace creds.cfg",
+		                 err);
+		return;
+	}
+
+	/* tls.c reports certificate rejection as "verify flags=0x...". A wrong RTC
+	 * is by far the most common way to land here, because it makes a valid
+	 * certificate look not-yet-valid or expired. */
+	if (strstr(err, "verify flags=")) {
+		set_fatal_detail("Certificate rejected",
+		                 "Set the console's date, time and year, then relaunch",
+		                 err);
+		return;
+	}
+
+	/* net.c: DNS, socket and connect failures - the console cannot reach
+	 * accounts.spotify.com at all. */
+	if (strstr(err, "resolve") || strstr(err, "connect ") ||
+	    strstr(err, "socket errno") || strstr(err, "socInit")) {
+		set_fatal_detail("Network unreachable",
+		                 "Check the console's WiFi connection, then relaunch",
+		                 err);
+		return;
+	}
+
+	/* http.c: the connection came up but died mid-exchange. Usually transient,
+	 * so relaunching is genuinely worth a try here. */
+	if (strstr(err, "send failed") || strstr(err, "read failed") ||
+	    strstr(err, "no headers") || strstr(err, "truncated body") ||
+	    strstr(err, "bad chunked body") || strstr(err, "malformed status")) {
+		set_fatal_detail("Connection lost",
+		                 "Spotify could not be reached - relaunch to retry",
+		                 err);
+		return;
+	}
+
+	/* auth.c formats rejections as "token http <status> <error>". Split by
+	 * status: only the 4xx family implicates the credentials, and saying
+	 * "check client_id" for a 429 or a Spotify outage would send the user
+	 * editing a file that is perfectly correct. */
+	if (strstr(err, "token http")) {
+		if (strstr(err, "token http 429")) {
+			set_fatal_detail("Rate limited by Spotify",
+			                 "Too many requests - wait a minute, then relaunch",
+			                 err);
+		} else if (strstr(err, "token http 5")) {
+			set_fatal_detail("Spotify is unavailable",
+			                 "Spotify's servers are failing - try again later",
+			                 err);
+		} else {
+			set_fatal_detail("Spotify rejected the login",
+			                 "Check client_id in creds.cfg, or rerun bootstrap_auth.py",
+			                 err);
+		}
+		return;
+	}
+
+	/* tls.c hands through mbedTLS's own text for any handshake failure that is
+	 * not a certificate rejection: "SSL - <reason> (-0xXXXX)". These are the
+	 * ones a user can actually act on. An EOF or a fatal alert mid-handshake is
+	 * the classic symptom of the connection being interfered with rather than
+	 * anything wrong on the console. */
+	if (strstr(err, "indicated an EOF") || strstr(err, "fatal alert")) {
+		set_fatal_detail("Secure connection refused",
+		                 "The network dropped the TLS connection - try another WiFi network",
+		                 err);
+		return;
+	}
+
+	/* No shared ciphersuite. Nothing to do with the console: we ship our own
+	 * mbedTLS and trust store (sslc is only an RNG source here), so this means
+	 * Spotify now requires something this build does not offer. App-side, and
+	 * only a new build can fix it. */
+	if (strstr(err, "no ciphersuites in common")) {
+		set_fatal_detail("Incompatible encryption",
+		                 "Spotify3DS needs a cipher this build lacks - report this",
+		                 err);
+		return;
+	}
+
+	/* Any remaining mbedTLS failure. Still better than the old catch-all: it
+	 * names TLS as the layer that failed rather than blaming the clock. */
+	if (strstr(err, "SSL - ") || strstr(err, "X509 - ") ||
+	    strstr(err, "CTR_DRBG - ") || strstr(err, "ENTROPY - ")) {
+		set_fatal_detail("Secure connection failed",
+		                 "Could not establish TLS - check WiFi, then relaunch",
+		                 err);
+		return;
+	}
+
+	/* Out of memory, in the allocator or in mbedTLS/SOC's buffers. The console
+	 * does not multitask, so there is nothing to close: what actually frees the
+	 * linear heap is a cold boot, or launching as a CIA rather than via the
+	 * Homebrew Launcher, which leaves less headroom. */
+	if (strcmp(err, "oom") == 0 || strstr(err, "memalign") ||
+	    strstr(err, "Memory allocation failed")) {
+		set_fatal_detail("Out of memory",
+		                 "Restart the console, then relaunch",
+		                 err);
+		return;
+	}
+
+	/* A 200 that verified against our pinned roots but carried no access_token.
+	 * Not an interception: anything answering in Spotify's place would have
+	 * failed certificate verification above. So either the response shape
+	 * changed or the JSON did not parse - app-side either way, and only a new
+	 * build can fix it. */
+	if (strstr(err, "no access_token")) {
+		set_fatal_detail("Unexpected reply from Spotify",
+		                 "Spotify3DS could not read the token - report this",
+		                 err);
+		return;
+	}
+
+	/* tls.c's bare label for a failed RNG seed. Nothing the user can fix, but
+	 * naming it beats "Auth failed" in a bug report. */
+	if (strstr(err, "entropy")) {
+		set_fatal_detail("Secure connection failed",
+		                 "The console's RNG could not start - relaunch",
+		                 err);
+		return;
+	}
+
+	set_fatal_detail("Auth failed", "See the detail below, then relaunch", err);
+}
+
 static void worker_main(void *arg)
 {
 	(void)arg;
@@ -370,13 +527,7 @@ static void worker_main(void *arg)
 	tl_log("worker: creds loaded ok");
 
 	if (!auth_token(err, sizeof err)) {
-		/* On hardware this is usually clock skew: TLS rejects the certificate
-		 * when the console's RTC is wrong. */
-		if (strstr(err, "invalid_grant"))
-			set_fatal("Authorization expired",
-			          "Run bootstrap_auth.py again and replace creds.cfg");
-		else
-			set_fatal("Auth failed", "Check system date/time, then relaunch");
+		auth_fail_fatal(err);
 		tl_log("worker: auth_token FAILED: %s", err);
 		return;
 	}
@@ -1256,5 +1407,7 @@ void worker_get(worker_snapshot *out)
 	out->poll_seq    = s_poll_seq;
 	snprintf(out->status, sizeof out->status, "%s", s_status);
 	snprintf(out->status_hint, sizeof out->status_hint, "%s", s_status_hint);
+	snprintf(out->status_detail, sizeof out->status_detail, "%s",
+	         s_status_detail);
 	LightLock_Unlock(&s_lock);
 }

@@ -1668,6 +1668,7 @@ int main(int argc, char **argv)
 				.device     = snap.state.device_name,
 				.status     = snap.status,
 				.hint       = hint,
+				.detail     = snap.fatal ? snap.status_detail : NULL,
 			};
 			screen_top_draw(&ta);
 		}

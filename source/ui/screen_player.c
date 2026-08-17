@@ -229,11 +229,46 @@ static void draw_repeat_glyph(float cx, float cy, u32 clr, bool one)
 	}
 }
 
+static void draw_play_disc(float cx, float cy, bool pressed)
+{
+	const int segments = 32;
+	const float inner_r = PLAY_R - 0.75f;
+	const float outer_r = PLAY_R + 0.25f;
+	const u32 fill = pressed ? CLR_GREEN : CLR_WHITE;
+	const u32 clear = pressed ? C2D_Color32(0x1D, 0xB9, 0x54, 0x00)
+	                          : C2D_Color32(0xFF, 0xFF, 0xFF, 0x00);
+	float inner_px = cx + inner_r;
+	float inner_py = cy;
+	float outer_px = cx + outer_r;
+	float outer_py = cy;
+
+	for (int i = 1; i <= segments; i++) {
+		const float angle =
+		    (float)i * 2.0f * (float)M_PI / (float)segments;
+		const float inner_nx = cx + inner_r * cosf(angle);
+		const float inner_ny = cy + inner_r * sinf(angle);
+		const float outer_nx = cx + outer_r * cosf(angle);
+		const float outer_ny = cy + outer_r * sinf(angle);
+
+		C2D_DrawTriangle(cx, cy, fill, inner_px, inner_py, fill, inner_nx,
+		                 inner_ny, fill, 0.0f);
+		C2D_DrawTriangle(inner_px, inner_py, fill, outer_px, outer_py, clear,
+		                 outer_nx, outer_ny, clear, 0.0f);
+		C2D_DrawTriangle(inner_px, inner_py, fill, outer_nx, outer_ny, clear,
+		                 inner_nx, inner_ny, fill, 0.0f);
+
+		inner_px = inner_nx;
+		inner_py = inner_ny;
+		outer_px = outer_nx;
+		outer_py = outer_ny;
+	}
+}
+
 static void draw_playpause(float cx, float cy, bool playing, bool pressed)
 {
 	/* The disc is already the brightest thing on screen, so it presses by
 	 * tinting rather than by gaining a halo it would hide anyway. */
-	ui_disc(cx, cy, PLAY_R, pressed ? CLR_GREEN : CLR_WHITE);
+	draw_play_disc(cx, cy, pressed);
 
 	if (playing) {
 		C2D_DrawRectSolid(cx - 6.0f, cy - 7.5f, 0.0f, 4.0f, 15.0f, CLR_DISC_FG);

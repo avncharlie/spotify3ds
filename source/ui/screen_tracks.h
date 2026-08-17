@@ -26,6 +26,8 @@ typedef struct {
 	const char      *error;
 	bool             playing;
 	unsigned         animation_ms;
+	long             elapsed_ms;
+	long             duration_ms;
 	bool             loading;
 	bool             ready;
 	float            scroll;

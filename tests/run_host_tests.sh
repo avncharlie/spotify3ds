@@ -18,5 +18,12 @@ CFLAGS=(-std=c11 -Wall -Wextra -Werror -I"$ROOT/source")
 	"$ROOT/source/net/http.c" \
 	-o "$TMP/test_http"
 
+"$CC" "${CFLAGS[@]}" \
+	"$ROOT/tests/test_lyrics.c" \
+	"$ROOT/source/spotify/lyrics.c" \
+	"$ROOT/source/spotify/json.c" \
+	-o "$TMP/test_lyrics"
+
 "$TMP/test_artcache_shard"
 "$TMP/test_http"
+"$TMP/test_lyrics"

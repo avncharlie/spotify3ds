@@ -14,6 +14,7 @@
 #include "spotify/player.h"
 #include "testlog.h"
 #include "ui/screen_list.h"
+#include "ui/screen_lyrics.h"
 #include "ui/screen_player.h"
 #include "ui/screen_tracks.h"
 #include "ui/screen_top.h"
@@ -82,8 +83,22 @@ static album_art g_art;
 static bool g_art_hidden;
 
 /* Which view the bottom screen is showing. */
-typedef enum { VIEW_PLAYER = 0, VIEW_LIST, VIEW_TRACKS } bottom_view;
+typedef enum {
+	VIEW_PLAYER = 0,
+	VIEW_LIST,
+	VIEW_TRACKS,
+	VIEW_LYRICS
+} bottom_view;
 static bottom_view g_view;
+static bottom_view          g_lyrics_return_view = VIEW_PLAYER;
+static worker_lyrics_status g_lyrics_status;
+static worker_lyrics_payload g_lyrics_payload;
+static lyrics_layout        g_lyrics_layout;
+static char                 g_lyrics_requested_uri[128];
+static float                g_lyrics_scroll;
+static float                g_lyrics_velocity;
+static bool                 g_lyrics_follow;
+static bool                 g_lyrics_layout_error;
 static bottom_view g_tracks_return_view = VIEW_LIST;
 static float       g_list_scroll;
 static float       g_list_velocity;
@@ -107,11 +122,57 @@ static int                   g_tracks_select_on_load = -2;
 #define LIST_FLING_MAX      40.0f
 #define LIST_FLING_FRICTION 0.88f
 #define LIST_FLING_STOP     0.10f
+#define LYRICS_DPAD_SPEED   5.0f
+#define LYRICS_CPAD_SPEED   7.5f
+#define LYRICS_CPAD_DEADZONE 20
+#define LYRICS_CPAD_MAX     156.0f
 #define LIST_ARM_MS         4000
 #define TEXTBUF_GLYPHS      4096
 #define VOLUME_STEP         5
 #define VOLUME_OVERLAY_MS   1100
 #define VOLUME_OPT_MS       12000
+#define REPEAT_WRAP_MIN_MS  5000
+#define REPEAT_WRAP_MAX_MS  10000
+
+static void lyrics_drop_local(void)
+{
+	lyrics_layout_free(&g_lyrics_layout);
+	worker_lyrics_payload_free(&g_lyrics_payload);
+	g_lyrics_layout_error = false;
+}
+
+static void lyrics_request_current(const worker_snapshot *snap)
+{
+	lyrics_drop_local();
+	g_lyrics_scroll = 0.0f;
+	g_lyrics_velocity = 0.0f;
+	g_lyrics_follow = true;
+	memset(&g_lyrics_status, 0, sizeof g_lyrics_status);
+
+	if (!snap || !snap->have_state || !snap->state.track_uri[0] ||
+	    !snap->state.track[0] || !snap->state.artist[0]) {
+		worker_cancel_lyrics();
+		g_lyrics_requested_uri[0] = '\0';
+		return;
+	}
+
+	snprintf(g_lyrics_requested_uri, sizeof g_lyrics_requested_uri, "%s",
+	         snap->state.track_uri);
+	worker_request_lyrics(snap->state.track_uri, snap->state.track,
+	                      snap->state.artist, snap->state.album,
+	                      snap->state.duration_ms);
+	worker_get_lyrics_status(&g_lyrics_status);
+}
+
+static void lyrics_open_current(const worker_snapshot *snap)
+{
+	if (g_view == VIEW_LYRICS)
+		return;
+	g_lyrics_return_view = g_view;
+	g_view = VIEW_LYRICS;
+	g_scrub = SCRUB_IDLE;
+	lyrics_request_current(snap);
+}
 
 /* True when running under the headless harness, which needs the app to quit by
  * itself. On a real console the app must stay up until the user exits. */
@@ -190,6 +251,24 @@ static long effective_progress(const worker_snapshot *snap)
 	if (snap->state.duration_ms > 0 && p > snap->state.duration_ms)
 		p = snap->state.duration_ms;
 	return p;
+}
+
+
+/* Somewhat clunky way to detect a track repeating.
+ * returns true when current position moved backwards and
+ * new posiiton is near track start and previous position was near track end */
+static bool progress_wrapped(long previous_ms, long current_ms,
+	                         long duration_ms)
+{
+	if (previous_ms < 0 || current_ms < 0 || duration_ms <= 0 ||
+	    current_ms >= previous_ms)
+		return false;
+	long edge_ms = duration_ms / 4;
+	if (edge_ms < REPEAT_WRAP_MIN_MS)
+		edge_ms = REPEAT_WRAP_MIN_MS;
+	if (edge_ms > REPEAT_WRAP_MAX_MS)
+		edge_ms = REPEAT_WRAP_MAX_MS;
+	return previous_ms >= duration_ms - edge_ms && current_ms <= edge_ms;
 }
 
 /* Optimistic overlay, one implementation for all three toggles.
@@ -612,6 +691,7 @@ int main(int argc, char **argv)
 	C3D_RenderTarget *bottom = C2D_CreateScreenTarget(GFX_BOTTOM, GFX_LEFT);
 
 	C2D_TextBuf textbuf = C2D_TextBufNew(TEXTBUF_GLYPHS);
+	worker_lyrics_payload_init(&g_lyrics_payload);
 
 	char err[256];
 	bool net_up = net_init(err, sizeof err);
@@ -649,6 +729,7 @@ int main(int argc, char **argv)
 	char            last_art[256] = "";
 
 	long last_seen_progress = -1;
+	char last_seen_track_uri[128] = "";
 	int  frames             = 0;
 	size_t max_text_glyphs  = 0;
 	bool logged_first       = false;
@@ -673,8 +754,12 @@ int main(int argc, char **argv)
 	while (aptMainLoop()) {
 		hidScanInput();
 		const u32 keys_down   = hidKeysDown();
+		const u32 keys_held   = hidKeysHeld();
 		const u32 keys_repeat = hidKeysDownRepeat();
-		if (keys_down & KEY_START)
+		/* Deliberate two-button exit chord. Require one half to transition this
+		 * frame so holding both cannot retrigger unrelated input before shutdown. */
+		if ((keys_held & (KEY_L | KEY_START)) == (KEY_L | KEY_START) &&
+		    (keys_down & (KEY_L | KEY_START)))
 			break;
 		/* Y hides the cover. The top screen has no touch digitizer, so the
 		 * art-off layout needs a physical button. */
@@ -727,11 +812,28 @@ int main(int argc, char **argv)
 			g_opt_volume_device[0] = '\0';
 		}
 
-		/* Re-base the interpolation clock whenever a poll brings new data. */
-		if (snap.have_state && snap.state.progress_ms != last_seen_progress) {
+		/* Re-base on either progress or URI. Two consecutive tracks can report the
+		 * same numerical position, which must not preserve the previous clock. */
+		if (snap.have_state &&
+		    (snap.state.progress_ms != last_seen_progress ||
+		     strcmp(snap.state.track_uri, last_seen_track_uri) != 0)) {
+			const bool track_changed =
+			    strcmp(snap.state.track_uri, last_seen_track_uri) != 0;
+			const bool repeated =
+			    !track_changed && g_scrub != SCRUB_COMMITTING &&
+			    progress_wrapped(last_seen_progress, snap.state.progress_ms,
+			                     snap.state.duration_ms);
 			last_seen_progress = snap.state.progress_ms;
+			snprintf(last_seen_track_uri, sizeof last_seen_track_uri, "%s",
+			         snap.state.track_uri);
 			g_base_progress    = snap.state.progress_ms;
 			g_base_time        = osGetTime();
+			if (track_changed)
+				g_scrub = SCRUB_IDLE;
+			if (repeated && g_view == VIEW_LYRICS && g_lyrics_follow) {
+				g_lyrics_scroll = 0.0f;
+				g_lyrics_velocity = 0.0f;
+			}
 
 			/* A poll confirming our seek ends the commit hold. */
 			if (g_scrub == SCRUB_COMMITTING) {
@@ -749,7 +851,51 @@ int main(int argc, char **argv)
 		const bool shuffled = effective_shuffle(&snap);
 		const long progress = effective_progress(&snap);
 		const long duration = snap.have_state ? snap.state.duration_ms : 0;
+		/* START replaces the old app-exit shortcut and opens lyrics from any
+		 * ordinary view. Capture the return view before changing input dispatch. */
+		if (g_view != VIEW_LYRICS && (keys_down & KEY_START)) {
+			lyrics_open_current(&snap);
+		}
 		const bottom_view input_view = g_view;
+
+		if (input_view == VIEW_LYRICS) {
+			if (!snap.have_state || !snap.state.track_uri[0]) {
+				if (g_lyrics_requested_uri[0] || g_lyrics_payload.doc.count)
+					lyrics_request_current(NULL);
+			} else if (strcmp(g_lyrics_requested_uri,
+			                  snap.state.track_uri) != 0) {
+				lyrics_request_current(&snap);
+			}
+
+			worker_get_lyrics_status(&g_lyrics_status);
+			worker_lyrics_payload incoming;
+			worker_lyrics_payload_init(&incoming);
+			if (worker_take_lyrics(&incoming)) {
+				const bool current = snap.have_state &&
+				                     strcmp(incoming.track_uri,
+				                            snap.state.track_uri) == 0 &&
+				                     incoming.generation == g_lyrics_status.generation;
+				if (current && lyrics_layout_build(&g_lyrics_layout, textbuf,
+				                                   &incoming.doc)) {
+					worker_lyrics_payload_move(&g_lyrics_payload, &incoming);
+					g_lyrics_layout_error = false;
+				} else if (current) {
+					g_lyrics_layout_error = true;
+				}
+			}
+			worker_lyrics_payload_free(&incoming);
+		}
+
+		const bool lyrics_document_ready =
+		    input_view == VIEW_LYRICS && snap.have_state &&
+		    g_lyrics_payload.doc.count > 0 &&
+		    strcmp(g_lyrics_payload.track_uri, snap.state.track_uri) == 0 &&
+		    g_lyrics_layout.count == g_lyrics_payload.doc.count;
+		const int lyrics_highlight =
+		    lyrics_document_ready && g_lyrics_payload.doc.synced
+		        ? lyrics_index_at(&g_lyrics_payload.doc,
+		                          progress > 0 ? (uint32_t)progress : 0)
+		        : -1;
 
 		const u32 volume_keys = keys_repeat & (KEY_L | KEY_R);
 		if (volume_keys) {
@@ -815,6 +961,137 @@ int main(int argc, char **argv)
 		}
 
 		/* --- input ---------------------------------------------------- */
+		if (input_view == VIEW_LYRICS) {
+			if (keys_down & KEY_SELECT) {
+				opt_set(&g_opt_play, !playing);
+				worker_post(playing ? CMD_PAUSE : CMD_PLAY, 0);
+			}
+			if ((keys_down & KEY_B) || touch.clicked == LYRICS_BTN_BACK) {
+				worker_cancel_lyrics();
+				lyrics_drop_local();
+				g_lyrics_requested_uri[0] = '\0';
+				g_view = g_lyrics_return_view;
+			} else {
+				const u32 skip = keys_down & (KEY_DLEFT | KEY_DRIGHT);
+				if (skip == KEY_DRIGHT) {
+					g_cmd_sent = osGetTime();
+					tl_timing("button NEXT at %llu",
+					          (unsigned long long)g_cmd_sent);
+					worker_post(CMD_NEXT, 0);
+				} else if (skip == KEY_DLEFT) {
+					g_cmd_sent = osGetTime();
+					tl_timing("button PREV at %llu",
+					          (unsigned long long)g_cmd_sent);
+					worker_post(CMD_PREV, 0);
+				}
+				const bool retry = (keys_down & KEY_X) ||
+				                   touch.clicked == LYRICS_BTN_RETRY;
+				if (retry && snap.have_state)
+					lyrics_request_current(&snap);
+
+				if (touch.clicked == LYRICS_BTN_FOLLOW &&
+				    lyrics_document_ready && g_lyrics_payload.doc.synced)
+					g_lyrics_follow = true;
+
+				if (lyrics_document_ready && g_lyrics_payload.doc.synced &&
+				    touch.clicked >= LYRICS_LINE0) {
+					const int line = touch.clicked - LYRICS_LINE0;
+					if (line >= 0 &&
+					    (size_t)line < g_lyrics_payload.doc.count) {
+						long target =
+						    (long)g_lyrics_payload.doc.lines[line].time_ms;
+						if (duration > 0 && target > duration)
+							target = duration;
+						if (worker_seek_track(target, snap.state.track_uri)) {
+							g_scrub_ms = target;
+							g_scrub = SCRUB_COMMITTING;
+							g_scrub_until = osGetTime() + SCRUB_COMMIT_MS;
+							g_base_progress = target;
+							g_base_time = osGetTime();
+							g_lyrics_follow = true;
+						}
+					}
+				}
+
+				float nav_velocity = 0.0f;
+				const u32 lyric_nav = keys_held & (KEY_UP | KEY_DOWN);
+				if (lyric_nav != (KEY_UP | KEY_DOWN)) {
+					if (lyric_nav & KEY_UP)
+						nav_velocity -= LYRICS_DPAD_SPEED;
+					if (lyric_nav & KEY_DOWN)
+						nav_velocity += LYRICS_DPAD_SPEED;
+				}
+				circlePosition circle;
+				hidCircleRead(&circle);
+				const int circle_y = circle.dy;
+				const int circle_magnitude = abs(circle_y);
+				if (circle_magnitude > LYRICS_CPAD_DEADZONE) {
+					const float strength =
+					    (float)(circle_magnitude - LYRICS_CPAD_DEADZONE) /
+					    (LYRICS_CPAD_MAX - LYRICS_CPAD_DEADZONE);
+					nav_velocity += (circle_y > 0 ? -1.0f : 1.0f) *
+					                strength * LYRICS_CPAD_SPEED;
+				}
+				if (nav_velocity > LYRICS_CPAD_SPEED)
+					nav_velocity = LYRICS_CPAD_SPEED;
+				if (nav_velocity < -LYRICS_CPAD_SPEED)
+					nav_velocity = -LYRICS_CPAD_SPEED;
+
+				const bool content_touch = touch.start_py >= 30 &&
+				                           touch.start_py < 236;
+				if (touch.pressed && content_touch)
+					g_lyrics_velocity = 0.0f;
+				if (touch.down && touch.dragging && content_touch) {
+					const float delta = -(float)touch.dy;
+					g_lyrics_scroll += delta;
+					g_lyrics_velocity =
+					    g_lyrics_velocity * 0.25f + delta * 0.75f;
+					if (g_lyrics_velocity > LIST_FLING_MAX)
+						g_lyrics_velocity = LIST_FLING_MAX;
+					if (g_lyrics_velocity < -LIST_FLING_MAX)
+						g_lyrics_velocity = -LIST_FLING_MAX;
+					g_lyrics_follow = false;
+				} else if (!touch.down && lyrics_document_ready &&
+				           (nav_velocity < -0.01f || nav_velocity > 0.01f)) {
+					g_lyrics_velocity +=
+					    (nav_velocity - g_lyrics_velocity) * 0.24f;
+					g_lyrics_scroll += g_lyrics_velocity;
+					g_lyrics_follow = false;
+				} else if (!touch.down && !g_lyrics_follow) {
+					g_lyrics_scroll += g_lyrics_velocity;
+					g_lyrics_velocity *= LIST_FLING_FRICTION;
+					if (g_lyrics_velocity > -LIST_FLING_STOP &&
+					    g_lyrics_velocity < LIST_FLING_STOP)
+						g_lyrics_velocity = 0.0f;
+				}
+
+				const screen_lyrics_args metrics = {
+					.buf = textbuf,
+					.doc = lyrics_document_ready ? &g_lyrics_payload.doc : NULL,
+					.layout = lyrics_document_ready ? &g_lyrics_layout : NULL,
+					.highlight = lyrics_highlight,
+					.scroll = g_lyrics_scroll,
+				};
+				const float max_scroll = screen_lyrics_max_scroll(&metrics);
+				if (g_lyrics_follow && lyrics_document_ready &&
+				    g_lyrics_payload.doc.synced) {
+					const float target = screen_lyrics_follow_scroll(&metrics);
+					g_lyrics_scroll += (target - g_lyrics_scroll) * 0.15f;
+					if (g_lyrics_scroll > target - 0.25f &&
+					    g_lyrics_scroll < target + 0.25f)
+						g_lyrics_scroll = target;
+					g_lyrics_velocity = 0.0f;
+				}
+				if (g_lyrics_scroll < 0.0f) {
+					g_lyrics_scroll = 0.0f;
+					g_lyrics_velocity = 0.0f;
+				}
+				if (g_lyrics_scroll > max_scroll) {
+					g_lyrics_scroll = max_scroll;
+					g_lyrics_velocity = 0.0f;
+				}
+			}
+		}
 		if (input_view == VIEW_PLAYER) {
 			if (keys_down & KEY_A) {
 				opt_set(&g_opt_play, !playing);
@@ -856,7 +1133,8 @@ int main(int argc, char **argv)
 		    touch.press_id == BTN_SCRUB && duration > 0)
 			g_scrub = SCRUB_DRAGGING;
 
-		if (g_scrub == SCRUB_DRAGGING && touch.down && duration > 0) {
+		if (input_view == VIEW_PLAYER && g_scrub == SCRUB_DRAGGING &&
+		    touch.down && duration > 0) {
 			float f = ((float)touch.px - SCRUB_BAR_X) / SCRUB_BAR_W;
 			if (f < 0.0f)
 				f = 0.0f;
@@ -865,7 +1143,8 @@ int main(int argc, char **argv)
 			g_scrub_ms = (long)(f * (float)duration);
 		}
 
-		if (g_scrub == SCRUB_DRAGGING && touch.released) {
+		if (input_view == VIEW_PLAYER && g_scrub == SCRUB_DRAGGING &&
+		    touch.released) {
 			worker_post(CMD_SEEK, g_scrub_ms);
 			g_scrub       = SCRUB_COMMITTING;
 			g_scrub_until = osGetTime() + SCRUB_COMMIT_MS;
@@ -1237,6 +1516,9 @@ int main(int argc, char **argv)
 					worker_post(CMD_REPEAT, (long)next);
 					break;
 				}
+				case BTN_LYRICS:
+					lyrics_open_current(&snap);
+					break;
 				default:
 					break;
 			}
@@ -1642,6 +1924,46 @@ int main(int argc, char **argv)
 		}
 
 		C2D_TextBufClear(textbuf);
+		const bool lyrics_view = g_view == VIEW_LYRICS;
+		const bool lyrics_loading =
+		    lyrics_view && snap.have_state &&
+		    g_lyrics_status.state == WORKER_LYRICS_LOADING &&
+		    strcmp(g_lyrics_status.track_uri, snap.state.track_uri) == 0;
+		const bool lyrics_error =
+		    lyrics_view &&
+		    (g_lyrics_layout_error ||
+		     (g_lyrics_status.state == WORKER_LYRICS_ERROR && snap.have_state &&
+		      strcmp(g_lyrics_status.track_uri, snap.state.track_uri) == 0));
+		const char *lyrics_message = !snap.have_state
+		                                  ? "Nothing playing"
+		                              : g_lyrics_layout_error
+		                                  ? "Not enough memory for lyrics layout"
+		                              : g_lyrics_status.message[0]
+		                                  ? g_lyrics_status.message
+		                                  : NULL;
+		const screen_lyrics_args lyrics_args = {
+			.buf = textbuf,
+			.tb = &g_tb,
+			.doc = lyrics_document_ready ? &g_lyrics_payload.doc : NULL,
+			.layout = lyrics_document_ready ? &g_lyrics_layout : NULL,
+			.art = &g_art,
+			.track = snap.have_state && snap.state.track[0]
+			             ? snap.state.track
+			             : "Lyrics",
+			.elapsed_ms = progress,
+			.duration_ms = duration,
+			.highlight = lyrics_highlight,
+			.loading = lyrics_loading,
+			.error = lyrics_error,
+			.status = lyrics_message,
+			.loading_received = g_lyrics_status.bytes_received,
+			.loading_total = g_lyrics_status.bytes_total,
+			.loading_total_known = g_lyrics_status.bytes_total_known,
+			.loading_animation_ms = (unsigned)osGetTime(),
+			.scroll = g_lyrics_scroll,
+			.follow = g_lyrics_follow,
+			.pressed_id = touch.down ? touch.press_id : -1,
+		};
 
 		/* --- top screen ------------------------------------------------ */
 		C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
@@ -1649,35 +1971,35 @@ int main(int argc, char **argv)
 		C2D_TargetClear(top, C2D_Color32(0, 0, 0, 0xFF));
 		C2D_SceneBegin(top);
 
-		{
-			const char *hint = NULL;
-			if (snap.fatal)
-				hint = snap.status_hint;
-			else if (snap.last_result == PLAYER_NO_DEVICE)
-				hint = "Start Spotify on a device";
+		const char *hint = NULL;
+		if (snap.fatal)
+			hint = snap.status_hint;
+		else if (snap.last_result == PLAYER_NO_DEVICE)
+			hint = "Start Spotify on a device";
 
-			const screen_top_args ta = {
-				.buf        = textbuf,
-				.art        = &g_art,
-				.art_hidden = g_art_hidden,
-				.have_state = snap.have_state,
-				.fatal      = snap.fatal,
-				.track      = snap.state.track,
-				.artist     = snap.state.artist,
-				.album      = snap.state.album,
-				.device     = snap.state.device_name,
-				.status     = snap.status,
-				.hint       = hint,
-				.detail     = snap.fatal ? snap.status_detail : NULL,
-			};
-			screen_top_draw(&ta);
-		}
+		const screen_top_args ta = {
+			.buf        = textbuf,
+			.art        = &g_art,
+			.art_hidden = g_art_hidden,
+			.have_state = snap.have_state,
+			.fatal      = snap.fatal,
+			.track      = snap.state.track,
+			.artist     = snap.state.artist,
+			.album      = snap.state.album,
+			.device     = snap.state.device_name,
+			.status     = snap.status,
+			.hint       = hint,
+			.detail     = snap.fatal ? snap.status_detail : NULL,
+		};
+		screen_top_draw(&ta);
 
 		/* --- bottom screen --------------------------------------------- */
 		C2D_TargetClear(bottom, CLR_BOT_BG);
 		C2D_SceneBegin(bottom);
 
-		if (g_view == VIEW_LIST) {
+		if (g_view == VIEW_LYRICS) {
+			screen_lyrics_bottom_draw(&lyrics_args);
+		} else if (g_view == VIEW_LIST) {
 			recent_list *rl;
 			playlist_list *pl;
 			album_list *al;
@@ -1696,6 +2018,8 @@ int main(int argc, char **argv)
 				.search_matches = pl->count + al->count,
 				.playing     = playing,
 				.animation_ms = (unsigned)osGetTime(),
+				.elapsed_ms = progress,
+				.duration_ms = duration,
 				.scroll     = g_list_scroll,
 				.pressed_id = touch.down ? touch.press_id : -1,
 				.armed_id   = g_list_armed,
@@ -1715,6 +2039,8 @@ int main(int argc, char **argv)
 				.error = g_tracks_buf.error,
 				.playing = playing,
 				.animation_ms = (unsigned)osGetTime(),
+				.elapsed_ms = progress,
+				.duration_ms = duration,
 				.loading = g_tracks_buf.state == TRACKS_LOADING,
 				.ready = g_tracks_buf.state == TRACKS_READY,
 				.scroll = g_tracks_scroll,
@@ -1723,9 +2049,11 @@ int main(int argc, char **argv)
 			};
 			screen_tracks_draw(&ta);
 		} else {
-			screen_player_args pa = {
+				screen_player_args pa = {
 				.buf         = textbuf,
 				.tb          = &g_tb,
+				.art         = &g_art,
+				.track       = snap.have_state ? snap.state.track : NULL,
 				.playing     = playing,
 				.shuffle     = shuffled,
 				.repeat      = effective_repeat(&snap),
@@ -1834,6 +2162,7 @@ int main(int argc, char **argv)
 	}
 
 	worker_stop();
+	lyrics_drop_local();
 	art_free(&g_art);
 	thumbs_free_all();
 	net_exit();

@@ -11,10 +11,11 @@
 #include "tls.h"
 
 static bool http_exchange(const char *host, const char *method,
-                          const char *path, const char *bearer,
-                          const char *ctype, const char *body,
-                          http_response *out, bool *out_reused,
-                          bool *retryable, char *err, int errlen);
+                           const char *path, const char *bearer,
+                           const char *ctype, const char *body,
+                           http_progress_fn progress, void *progress_context,
+                           http_response *out, bool *out_reused,
+                           bool *retryable, char *err, int errlen);
 
 /* Spotify JSON responses are a few KB, but detailed covers can be much larger.
  * Allocation grows on demand, so this ceiling costs nothing for normal replies;
@@ -31,15 +32,23 @@ typedef struct {
 
 static bool gb_reserve(growbuf *g, size_t extra)
 {
-	if (g->len + extra + 1 <= g->cap)
+	if (extra >= MAX_RESPONSE || g->len > MAX_RESPONSE - extra - 1)
+		return false;
+	const size_t required = g->len + extra + 1;
+	if (required <= g->cap)
 		return true;
 
 	size_t want = g->cap ? g->cap * 2 : 4096;
-	while (want < g->len + extra + 1)
+	while (want < required) {
+		if (want >= MAX_RESPONSE / 2) {
+			want = MAX_RESPONSE;
+			break;
+		}
 		want *= 2;
+	}
 	if (want > MAX_RESPONSE)
 		want = MAX_RESPONSE;
-	if (g->len + extra + 1 > want)
+	if (required > want)
 		return false; /* would exceed the cap */
 
 	char *p = realloc(g->buf, want);
@@ -60,24 +69,80 @@ static bool gb_append(growbuf *g, const char *src, size_t n)
 	return true;
 }
 
+static bool gb_append_str(growbuf *g, const char *src)
+{
+	return gb_append(g, src, strlen(src));
+}
+
 /* Case-insensitive header lookup within the header block. Returns a pointer to
  * the value (past ": ") or NULL. */
-static const char *find_header(const char *headers, const char *name)
+static const char *find_header(const char *headers, size_t headers_len,
+	                           const char *name)
 {
-	size_t nlen = strlen(name);
-	for (const char *p = headers; p && *p;) {
-		if (strncasecmp(p, name, nlen) == 0 && p[nlen] == ':') {
+	const size_t nlen = strlen(name);
+	const char *const end = headers + headers_len;
+	for (const char *p = headers; p < end;) {
+		const char *line_end = memchr(p, '\n', (size_t)(end - p));
+		if (!line_end)
+			line_end = end;
+		const size_t line_len = (size_t)(line_end - p);
+		if (line_len > nlen && p[nlen] == ':' &&
+		    strncasecmp(p, name, nlen) == 0) {
 			p += nlen + 1;
-			while (*p == ' ' || *p == '\t')
+			while (p < line_end && (*p == ' ' || *p == '\t'))
 				p++;
 			return p;
 		}
-		p = strstr(p, "\r\n");
-		if (!p)
-			break;
-		p += 2;
+		p = line_end < end ? line_end + 1 : end;
 	}
 	return NULL;
+}
+
+static bool parse_decimal_header(const char *text, const char *headers_end,
+	                             size_t *out)
+{
+	size_t value = 0;
+	bool have_digit = false;
+	while (text < headers_end && (*text == ' ' || *text == '\t'))
+		text++;
+	while (text < headers_end && *text >= '0' && *text <= '9') {
+		const unsigned digit = (unsigned)(*text++ - '0');
+		if (value > (MAX_RESPONSE - digit) / 10)
+			return false;
+		value = value * 10 + digit;
+		have_digit = true;
+	}
+	while (text < headers_end && (*text == ' ' || *text == '\t'))
+		text++;
+	if (!have_digit || (text < headers_end && *text != '\r' && *text != '\n'))
+		return false;
+	*out = value;
+	return true;
+}
+
+static bool parse_chunk_size(const char *text, const char *end, size_t *out)
+{
+	size_t value = 0;
+	bool have_digit = false;
+	for (; text < end && *text != ';'; text++) {
+		unsigned digit;
+		if (*text >= '0' && *text <= '9')
+			digit = (unsigned)(*text - '0');
+		else if (*text >= 'a' && *text <= 'f')
+			digit = (unsigned)(*text - 'a' + 10);
+		else if (*text >= 'A' && *text <= 'F')
+			digit = (unsigned)(*text - 'A' + 10);
+		else
+			return false;
+		if (value > (MAX_RESPONSE - digit) / 16)
+			return false;
+		value = value * 16 + digit;
+		have_digit = true;
+	}
+	if (!have_digit)
+		return false;
+	*out = value;
+	return true;
 }
 
 /* Read from the TLS connection until `want` bytes are buffered, or the peer
@@ -101,7 +166,8 @@ static bool fill_to(tls_conn *c, growbuf *g, size_t want, bool *eof)
 
 /* Decode chunked transfer-encoding in place from `src` into `out`. */
 static bool decode_chunked(tls_conn *c, growbuf *raw, size_t body_start,
-                           growbuf *out)
+                           growbuf *out, http_progress_fn progress,
+                           void *progress_context)
 {
 	size_t pos = body_start;
 	bool   eof = false;
@@ -117,30 +183,75 @@ static bool decode_chunked(tls_conn *c, growbuf *raw, size_t body_start,
 				return false; /* truncated */
 		}
 
-		unsigned long sz = strtoul(raw->buf + pos, NULL, 16);
+		size_t sz;
+		if (!parse_chunk_size(raw->buf + pos, nl, &sz))
+			return false;
 		pos = (size_t)(nl - raw->buf) + 2;
 
-		if (sz == 0)
-			return true; /* terminating chunk */
+		if (sz == 0) {
+			/* Consume trailers through their empty terminating line before this
+			 * connection is returned to the keep-alive pool. */
+			for (;;) {
+				while (!(nl = strstr(raw->buf + pos, "\r\n"))) {
+					const size_t before = raw->len;
+					if (!fill_to(c, raw, raw->len + 1, &eof) ||
+					    (eof && raw->len == before))
+						return false;
+				}
+				if (nl == raw->buf + pos)
+					return true;
+				pos = (size_t)(nl - raw->buf) + 2;
+			}
+		}
 
 		/* Ensure the chunk body plus its trailing CRLF is buffered. */
-		while (raw->len < pos + sz + 2) {
+		const size_t chunk_end = pos + sz;
+		if (chunk_end < pos || chunk_end > MAX_RESPONSE - 2)
+			return false;
+		if (progress) {
+			size_t available = raw->len > pos ? raw->len - pos : 0;
+			if (available > sz)
+				available = sz;
+			progress(out->len + available, 0, false, progress_context);
+		}
+		while (raw->len < chunk_end + 2) {
 			size_t before = raw->len;
-			if (!fill_to(c, raw, pos + sz + 2, &eof))
+			if (!fill_to(c, raw, raw->len + 1, &eof))
 				return false;
+			if (progress) {
+				size_t available = raw->len > pos ? raw->len - pos : 0;
+				if (available > sz)
+					available = sz;
+				progress(out->len + available, 0, false,
+				         progress_context);
+			}
 			if (eof && raw->len == before)
 				return false;
 		}
 
+		if (raw->buf[chunk_end] != '\r' || raw->buf[chunk_end + 1] != '\n')
+			return false;
 		if (!gb_append(out, raw->buf + pos, sz))
 			return false;
-		pos += sz + 2; /* skip chunk data + CRLF */
+		if (progress)
+			progress(out->len, 0, false, progress_context);
+		pos = chunk_end + 2;
 	}
 }
 
 bool http_request(const char *host, const char *method, const char *path,
                   const char *bearer, const char *ctype, const char *body,
                   http_response *out, char *err, int errlen)
+{
+	return http_request_progress(host, method, path, bearer, ctype, body, NULL,
+	                             NULL, out, err, errlen);
+}
+
+bool http_request_progress(const char *host, const char *method,
+                           const char *path, const char *bearer,
+                           const char *ctype, const char *body,
+                           http_progress_fn progress, void *progress_context,
+                           http_response *out, char *err, int errlen)
 {
 	memset(out, 0, sizeof *out);
 
@@ -151,9 +262,11 @@ bool http_request(const char *host, const char *method, const char *path,
 	for (int attempt = 0; attempt < 2; attempt++) {
 		bool reused = false;
 		bool retryable;
+		if (progress)
+			progress(0, 0, false, progress_context);
 
-		if (http_exchange(host, method, path, bearer, ctype, body, out, &reused,
-		                  &retryable, err, errlen))
+		if (http_exchange(host, method, path, bearer, ctype, body, progress,
+		                  progress_context, out, &reused, &retryable, err, errlen))
 			return true;
 
 		/* GET is idempotent, so a truncated fresh response is also safe to retry.
@@ -172,9 +285,10 @@ bool http_request(const char *host, const char *method, const char *path,
  * *out_reused says whether the connection came from the pool; *retryable says
  * whether the failure is the kind a fresh connection would fix. */
 static bool http_exchange(const char *host, const char *method,
-                          const char *path, const char *bearer,
-                          const char *ctype, const char *body,
-                          http_response *out, bool *out_reused,
+                           const char *path, const char *bearer,
+                           const char *ctype, const char *body,
+                           http_progress_fn progress, void *progress_context,
+                           http_response *out, bool *out_reused,
                           bool *retryable, char *err, int errlen)
 {
 	*retryable = false;
@@ -185,36 +299,57 @@ static bool http_exchange(const char *host, const char *method,
 
 	/* --- request ---------------------------------------------------- */
 	growbuf req = {0};
-	char    line[512];
+	char    line[64];
 
 	/* Keep-alive is the whole point: a fresh TLS handshake to Spotify costs
 	 * 700-1500ms and used to be paid on every request. */
-	snprintf(line, sizeof line,
-	         "%s %s HTTP/1.1\r\n"
-	         "Host: %s\r\n"
-	         "User-Agent: spotify3ds/0.1\r\n"
-	         "Accept: */*\r\n"
-	         "Connection: keep-alive\r\n",
-	         method, path, host);
-	gb_append(&req, line, strlen(line));
+	if (!gb_append_str(&req, method) || !gb_append_str(&req, " ") ||
+	    !gb_append_str(&req, path) ||
+	    !gb_append_str(&req, " HTTP/1.1\r\nHost: ") ||
+	    !gb_append_str(&req, host) ||
+	    !gb_append_str(&req,
+	                   "\r\nUser-Agent: Spotify3DS/0.1 "
+	                   "(+https://github.com/avncharlie/spotify3ds)\r\n"
+	                   "Accept: */*\r\nConnection: keep-alive\r\n")) {
+		snprintf(err, errlen, "request headers too large");
+		free(req.buf);
+		pool_give(host, 443, c, false);
+		return false;
+	}
 
 	if (bearer) {
-		snprintf(line, sizeof line, "Authorization: Bearer %s\r\n", bearer);
-		gb_append(&req, line, strlen(line));
+		if (!gb_append_str(&req, "Authorization: Bearer ") ||
+		    !gb_append_str(&req, bearer) || !gb_append_str(&req, "\r\n")) {
+			snprintf(err, errlen, "authorization header too large");
+			free(req.buf);
+			pool_give(host, 443, c, false);
+			return false;
+		}
 	}
 	if (ctype) {
-		snprintf(line, sizeof line, "Content-Type: %s\r\n", ctype);
-		gb_append(&req, line, strlen(line));
+		if (!gb_append_str(&req, "Content-Type: ") ||
+		    !gb_append_str(&req, ctype) || !gb_append_str(&req, "\r\n")) {
+			snprintf(err, errlen, "content type header too large");
+			free(req.buf);
+			pool_give(host, 443, c, false);
+			return false;
+		}
 	}
 
 	/* Length must be sent even when empty: Spotify's PUT endpoints reject a
 	 * body-less request that omits it. */
 	size_t blen = body ? strlen(body) : 0;
-	snprintf(line, sizeof line, "Content-Length: %u\r\n\r\n", (unsigned)blen);
-	gb_append(&req, line, strlen(line));
-
-	if (body)
-		gb_append(&req, body, blen);
+	const int line_len = snprintf(line, sizeof line,
+	                              "Content-Length: %u\r\n\r\n",
+	                              (unsigned)blen);
+	if (line_len < 0 || line_len >= (int)sizeof line ||
+	    !gb_append(&req, line, (size_t)line_len) ||
+	    (body && !gb_append(&req, body, blen))) {
+		snprintf(err, errlen, "request body too large");
+		free(req.buf);
+		pool_give(host, 443, c, false);
+		return false;
+	}
 
 	bool sent = tls_write(c, req.buf, req.len);
 	free(req.buf);
@@ -260,9 +395,11 @@ static bool http_exchange(const char *host, const char *method,
 	size_t body_start = (size_t)(hdr_end - raw.buf) + 4;
 
 	/* --- body -------------------------------------------------------- */
-	const char *te   = find_header(raw.buf, "Transfer-Encoding");
-	const char *cl   = find_header(raw.buf, "Content-Length");
-	const char *conn = find_header(raw.buf, "Connection");
+	const size_t headers_len = (size_t)(hdr_end - raw.buf);
+	const char *const headers_end = raw.buf + headers_len;
+	const char *te = find_header(raw.buf, headers_len, "Transfer-Encoding");
+	const char *cl = find_header(raw.buf, headers_len, "Content-Length");
+	const char *conn = find_header(raw.buf, headers_len, "Connection");
 
 	/* Only keep the connection if we can find the end of this body without
 	 * relying on the close itself. Anything else and we would have no way to
@@ -272,18 +409,35 @@ static bool http_exchange(const char *host, const char *method,
 	growbuf out_body = {0};
 
 	if (te && strncasecmp(te, "chunked", 7) == 0) {
-		if (!decode_chunked(c, &raw, body_start, &out_body)) {
+		if (progress)
+			progress(0, 0, false, progress_context);
+		if (!decode_chunked(c, &raw, body_start, &out_body, progress,
+		                    progress_context)) {
 			free(out_body.buf);
 			snprintf(err, errlen, "bad chunked body");
 			*retryable = true;
 			goto fail;
 		}
 	} else if (cl) {
-		size_t want = (size_t)strtoul(cl, NULL, 10);
+		size_t want;
+		if (!parse_decimal_header(cl, headers_end, &want)) {
+			snprintf(err, errlen, "bad content-length");
+			goto fail;
+		}
+		size_t received = raw.len > body_start ? raw.len - body_start : 0;
+		if (received > want)
+			received = want;
+		if (progress)
+			progress(received, want, true, progress_context);
 		while (raw.len < body_start + want) {
 			size_t before = raw.len;
-			if (!fill_to(c, &raw, body_start + want, &eof))
+			if (!fill_to(c, &raw, raw.len + 1, &eof))
 				break;
+			received = raw.len > body_start ? raw.len - body_start : 0;
+			if (received > want)
+				received = want;
+			if (progress)
+				progress(received, want, true, progress_context);
 			if (eof && raw.len == before)
 				break;
 		}
@@ -296,26 +450,42 @@ static bool http_exchange(const char *host, const char *method,
 		}
 		if (have > want)
 			have = want;
-		if (have)
-			gb_append(&out_body, raw.buf + body_start, have);
+		if (have && !gb_append(&out_body, raw.buf + body_start, have)) {
+			snprintf(err, errlen, "response body too large");
+			goto fail;
+		}
 	} else if (out->status == 204 || out->status == 304 ||
 	           strcmp(method, "HEAD") == 0) {
 		/* Defined to have no body, so the response ends at the headers. This
 		 * matters for keep-alive: 204 is the normal reply to every playback
 		 * command, and reading to EOF here would block until the server gave
 		 * up on an otherwise healthy connection. */
+		if (progress)
+			progress(0, 0, true, progress_context);
 	} else {
 		/* No length signalled at all: the body ends when the connection does,
 		 * so this one cannot be reused. */
+		size_t received = raw.len > body_start ? raw.len - body_start : 0;
+		if (progress)
+			progress(received, 0, false, progress_context);
 		while (!eof) {
 			size_t before = raw.len;
-			if (!fill_to(c, &raw, raw.len + 1, &eof))
-				break;
+			if (!fill_to(c, &raw, raw.len + 1, &eof)) {
+				snprintf(err, errlen, "read failed");
+				*retryable = true;
+				goto fail;
+			}
 			if (raw.len == before)
 				break;
+			received = raw.len > body_start ? raw.len - body_start : 0;
+			if (progress)
+				progress(received, 0, false, progress_context);
 		}
-		if (raw.len > body_start)
-			gb_append(&out_body, raw.buf + body_start, raw.len - body_start);
+		if (raw.len > body_start &&
+		    !gb_append(&out_body, raw.buf + body_start, raw.len - body_start)) {
+			snprintf(err, errlen, "response body too large");
+			goto fail;
+		}
 		keep = false;
 	}
 

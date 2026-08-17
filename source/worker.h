@@ -2,6 +2,7 @@
 
 #include <stdbool.h>
 
+#include "spotify/lyrics.h"
 #include "spotify/player.h"
 #include "spotify/recents.h"
 #include "spotify/tracks.h"
@@ -53,6 +54,11 @@ void worker_set_fatal(const char *what, const char *hint);
  * and a repeat_mode for CMD_REPEAT. Volume uses worker_set_volume so rapid
  * shoulder presses can be coalesced. */
 void worker_post(worker_cmd cmd, long arg);
+
+/* Queue a seek only for the named current track. Unlike worker_post(CMD_SEEK),
+ * this reports a full command queue and is rejected if a track-changing
+ * command has overtaken it before execution. */
+bool worker_seek_track(long position_ms, const char *track_uri);
 
 /* Set volume on the device represented by the latest poll. New pending volume
  * commands replace older ones so rapid stepping does not issue every midpoint. */
@@ -125,6 +131,56 @@ typedef struct {
 unsigned worker_request_tracks(const collection_item *collection, int offset);
 void     worker_cancel_tracks(void);
 void     worker_get_tracks(worker_tracks_snapshot *out);
+
+/* --- lyrics ------------------------------------------------------------
+ * Status is cheap to copy every frame. The dynamic document is kept in a
+ * separate, single-owner payload and can only be claimed by moving it. */
+
+typedef enum {
+	WORKER_LYRICS_IDLE = 0,
+	WORKER_LYRICS_LOADING,
+	WORKER_LYRICS_READY,
+	WORKER_LYRICS_ERROR,
+} worker_lyrics_state;
+
+typedef struct {
+	worker_lyrics_state state;
+	lyrics_result       result;
+	unsigned            generation;
+	char                track_uri[128];
+	char                message[160];
+	lyrics_fetch_phase  phase;
+	size_t              bytes_received;
+	size_t              bytes_total;
+	bool                bytes_total_known;
+	bool                payload_ready;
+} worker_lyrics_status;
+
+typedef struct {
+	lyrics_doc doc;
+	unsigned   generation;
+	char       track_uri[128];
+} worker_lyrics_payload;
+
+/* Payloads are move-only: initialize before first use, free when finished,
+ * and use move rather than assigning the struct. Move replaces dst and leaves
+ * src initialized and empty. */
+void worker_lyrics_payload_init(worker_lyrics_payload *payload);
+void worker_lyrics_payload_free(worker_lyrics_payload *payload);
+void worker_lyrics_payload_move(worker_lyrics_payload *dst,
+	                            worker_lyrics_payload *src);
+
+/* Newest request wins. Re-requesting the same URI while it is loading or ready
+ * preserves that generation and any unclaimed payload. */
+unsigned worker_request_lyrics(const char *track_uri, const char *track,
+	                           const char *artist, const char *album,
+	                           long duration_ms);
+void     worker_cancel_lyrics(void);
+void     worker_get_lyrics_status(worker_lyrics_status *out);
+
+/* Claim the completed document without copying it. out must be initialized;
+ * on success, any document it currently owns is replaced by the ready one. */
+bool worker_take_lyrics(worker_lyrics_payload *out);
 
 /* --- album art -------------------------------------------------------
  * Fetching and decoding art costs ~1.5s, almost all of it network. Doing that

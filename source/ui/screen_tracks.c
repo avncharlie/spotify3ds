@@ -8,6 +8,7 @@
 
 #define BOT_W 320.0f
 #define BOT_H 240.0f
+#define CONTENT_BOTTOM (BOT_H - UI_PROGRESS_BAR_H)
 #define HEADER_H 30.0f
 #define CAPTION_H 20.0f
 #define ROWS_TOP (HEADER_H + CAPTION_H)
@@ -60,7 +61,7 @@ static float content_h(int count, int armed_id)
 
 float screen_tracks_max_scroll(int count, int armed_id)
 {
-	const float max = content_h(count, armed_id) - (BOT_H - ROWS_TOP);
+	const float max = content_h(count, armed_id) - (CONTENT_BOTTOM - ROWS_TOP);
 	return max > 0.0f ? max : 0.0f;
 }
 
@@ -76,8 +77,8 @@ float screen_tracks_reveal_row(int count, int row_id, int armed_id,
 	const float bottom = top + row_h(row_id, armed_id);
 	if (top < scroll + ROWS_TOP)
 		scroll = top - ROWS_TOP;
-	else if (bottom > scroll + BOT_H)
-		scroll = bottom - BOT_H;
+	else if (bottom > scroll + CONTENT_BOTTOM)
+		scroll = bottom - CONTENT_BOTTOM;
 	const float max = screen_tracks_max_scroll(count, armed_id);
 	if (scroll < 0.0f)
 		scroll = 0.0f;
@@ -100,7 +101,7 @@ static void clipped_hit(touch_builder *tb, float x, float y, float w, float h,
 	                    int id)
 {
 	const float top = y < ROWS_TOP ? ROWS_TOP : y;
-	const float bottom = y + h > BOT_H ? BOT_H : y + h;
+	const float bottom = y + h > CONTENT_BOTTOM ? CONTENT_BOTTOM : y + h;
 	if (bottom - top > 8.0f)
 		tb_add(tb, x, top, w, bottom - top, id);
 }
@@ -126,7 +127,7 @@ static void draw_row(const screen_tracks_args *a, const track_item *item,
 	const bool play_pressed = a->pressed_id == play_id;
 	const bool queue_pressed = a->pressed_id == queue_id;
 	const float h = row_h(id, a->armed_id);
-	if (y >= BOT_H || y + h <= HEADER_H)
+	if (y >= CONTENT_BOTTOM || y + h <= HEADER_H)
 		return;
 
 	if (current) {
@@ -219,7 +220,7 @@ void screen_tracks_draw(const screen_tracks_args *a)
 		const float max = screen_tracks_max_scroll(count, a->armed_id);
 		if (max > 0) {
 			C2D_DrawRectSolid(IND_X, IND_Y, 0, IND_W, IND_H, CLR_IND_TRK);
-			float th = IND_H * (BOT_H - ROWS_TOP) /
+			float th = IND_H * (CONTENT_BOTTOM - ROWS_TOP) /
 			           content_h(count, a->armed_id);
 			if (th < 20)
 				th = 20;
@@ -311,4 +312,6 @@ void screen_tracks_draw(const screen_tracks_args *a)
 	C2D_DrawTriangle(299, 10, CLR_ACTION, 299, 20, CLR_ACTION, 306, 15,
 	                 CLR_ACTION, 0);
 	tb_add(a->tb, 280, 0, 40, HEADER_H, TRACK_BTN_PLAY_COLLECTION);
+
+	ui_progress_bar(a->elapsed_ms, a->duration_ms);
 }

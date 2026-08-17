@@ -6,6 +6,7 @@ A Spotify remote for the Nintendo 3DS / New 2DS XL.
 - **Bottom screen (touch):** previous / play-pause / next, plus a seek scrubber
 - **Library:** recently played collections, playlists, saved albums, and their
   individual tracks
+- **Lyrics:** synchronized lyrics (from LRCLIB)
 
 Use the L/R shoulder buttons from any screen to decrease or increase active device's volume.
 
@@ -63,13 +64,17 @@ access at <https://spotify.com/account/apps> if the SD card or file is lost.
 
 ## Controls
 
-> **Global volume:** Press `L/R` on any screen to decrease/increase volume in
-> 5% steps. Hold either button to keep changing it.
+> **Global volume:** Press `L/R` on any screen to
+> decrease/increase volume in 5% steps. Hold either button to keep changing it.
+> Press `START` from Player, Library, or Tracks to open lyrics for the current
+> track.
+> Hold `L` and press `START` to exit the application from any screen.
 
 - Player: `A` play/pause, D-pad left/right previous/next, `L/R` volume down/up,
-  `X` Library, and `Y` show/hide cover art. Tap a Recently Played tile to open its tracks; hold it
-  for 600 ms to start the collection immediately. Tracks opened from this shelf
-  return directly to Player with `B` or the top-left back control.
+  `X` Library, and `Y` show/hide cover art. Tap `LYRICS` in the header to open
+  lyrics for the current song. Tap a Recently Played tile to open its tracks;
+  hold it for 600 ms to start the collection immediately. Tracks opened from
+  this shelf return directly to Player with `B` or the top-left back control.
 - Library: tap a row's play icon to start it immediately, or its right chevron
   to open its tracks. The current playing row shows pause in the same cell.
   D-pad up/down selects a collection, `A` starts it and then toggles play/pause,
@@ -88,6 +93,15 @@ access at <https://spotify.com/account/apps> if the SD card or file is lost.
   wraps: `ZL`/Up on the first page opens the last page, and `ZR`/Down on the last
   page opens the first page. The play icon at the right of the header starts
   the whole album or playlist without leaving Tracks.
+- Lyrics: press `START` from Player, Library, or Tracks. `B` or the top-left
+  back control returns to the screen that opened it. Drag or use D-pad/Circle
+  Pad up/down to scroll smoothly, then tap `FOLLOW` to resume synchronized
+  scrolling. D-pad left/right skips to the previous or next track. Tap a
+  timestamped line to seek Spotify to it, and press `X` to retry a failed
+  lookup. `SELECT` toggles play/pause and `L/R` changes volume. Plain lyrics
+  remain scrollable but cannot seek or auto-follow. `START` has no action while
+  Lyrics is open. While LRCLIB is loading, the screen shows downloaded KB and
+  an animated bar; responses with a known size show downloaded and total KB.
 
 Volume changes step by five; hold either shoulder button to keep stepping. A
 transient bottom-screen overlay shows the current level. Devices
@@ -120,12 +134,19 @@ The 3DS `sslc` system module maxes out at **TLS 1.1**, and Spotify requires
 links mbedTLS and speaks TLS in userspace over raw BSD sockets, bypassing
 `sslc` entirely.
 
-Both DigiCert roots must be embedded: **G2 (RSA)** serves `api.spotify.com` and
-`accounts.spotify.com`, while **G3 (ECC)** serves the `i.scdn.co` album-art CDN.
-Omitting G3 produces a confusing failure where the API works perfectly but
-cover art silently never loads. Verified: the two hosts negotiate
-`ECDHE-RSA-...` and `ECDHE-ECDSA-...` respectively, so the chains really are
-independent.
+The embedded roots cover Spotify's API and image hosts plus LRCLIB. DigiCert
+**G2 (RSA)** serves `api.spotify.com` and `accounts.spotify.com`, DigiCert
+**G3 (ECC)** serves `i.scdn.co`, GlobalSign R3 serves `mosaic.scdn.co`, and GTS
+Root R4 serves `lrclib.net`. Omitting one produces a confusing partial failure
+where the API works while one class of images or lyrics never loads.
+
+## Lyrics Provider
+
+Spotify's Web API does not expose lyrics. Spotify3DS sends the current track,
+artist, album, and duration to the open, keyless [LRCLIB](https://lrclib.net/)
+API. Exact matches are preferred, search results are checked against track
+metadata and duration, and synchronized lyrics are used only when their LRC
+timestamps parse successfully. No Spotify access token is sent to LRCLIB.
 
 ### Entropy
 
@@ -148,8 +169,14 @@ sudo dkp-pacman -S 3ds-zlib 3ds-mbedtls 3ds-libjpeg-turbo
 ./dev.sh          # build, run in Azahar, print pass/fail
 ./dev.sh --build  # build only
 ./dev.sh --log    # also dump the guest debug log
-./tests/run_host_tests.sh  # deterministic cache-shard and HTTP framing tests
+./dev.sh --hw --ip 192.168.1.x  # build and netload to a 3DS
+./tests/run_host_tests.sh  # deterministic cache, HTTP, JSON, and lyrics tests
 ```
+
+For hardware, leave the console at the Homebrew Launcher before running the
+`--hw` command. You can also store its address in `.hwip` or export
+`SPOTIFY3DS_IP`, then use `./dev.sh --hw`. Do not add `--test` for an interactive
+lyrics evaluation; `--test` runs the automated smoketest and exits on its own.
 
 To test Spotify Connect volume control with the same credentials used by the
 3DS, start playback on a Premium account and run:
@@ -165,6 +192,18 @@ requires Spotify's `204 No Content` response, and verifies the reported volume.
 If Spotify reports that it rotated the refresh token, re-copy the updated
 `creds.cfg` to `SD:/spotify/creds.cfg` before launching Spotify3DS. Passing the
 SD card's credential path with `--creds` updates it in place instead.
+
+To list currently available Spotify Connect devices and start or resume
+playback on one of them:
+
+```sh
+python3 tools/list_devices.py
+python3 tools/start_playback.py --device-id <DEVICE_ID>
+```
+
+The listing labels each device's state and displays the device ID needed by the
+playback command. Starting playback resumes the account's existing playback
+state; it does not select new content.
 
 ### Emulator auth
 
@@ -211,8 +250,8 @@ Environment quirks worth knowing, all learned the hard way:
   fully stopped.
 - `Failed to find title id for ROM` in the emulator log is normal for `.3dsx`.
 
-Hold **SELECT** at boot to keep the app running instead of auto-exiting, which
-is useful when capturing screenshots.
+Interactive emulator and hardware runs stay open until they are closed through
+HOME or the emulator controls. Only `dev.sh --test` enables automatic exit.
 
 ## Layout
 
@@ -223,6 +262,6 @@ source/
   net/            sockets + mbedTLS transport
   spotify/        auth, API calls, JSON
   ui/             screens, touch hit-testing
-tools/            host-side PKCE bootstrap
+tools/            host-side authentication and Spotify API utilities
 tests/            host-side cache and HTTP framing tests
 ```

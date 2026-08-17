@@ -9,6 +9,11 @@ typedef struct {
 	size_t body_len;
 } http_response;
 
+/* Decoded response-body progress. `total_known` is false for chunked and
+ * close-delimited responses; framing bytes are never included in received. */
+typedef void (*http_progress_fn)(size_t received, size_t total,
+                                 bool total_known, void *context);
+
 /* Perform one HTTPS request and read the full response.
  *
  * method   "GET" / "PUT" / "POST"
@@ -28,5 +33,13 @@ typedef struct {
 bool http_request(const char *host, const char *method, const char *path,
                   const char *bearer, const char *ctype, const char *body,
                   http_response *out, char *err, int errlen);
+
+/* Progress-reporting variant. The callback runs synchronously on the calling
+ * thread and may be NULL. Automatic retries reset received to zero. */
+bool http_request_progress(const char *host, const char *method,
+                           const char *path, const char *bearer,
+                           const char *ctype, const char *body,
+                           http_progress_fn progress, void *progress_context,
+                           http_response *out, char *err, int errlen);
 
 void http_free(http_response *r);

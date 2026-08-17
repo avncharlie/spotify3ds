@@ -43,6 +43,8 @@ typedef struct {
 	int                  search_matches;
 	bool                 playing;
 	unsigned             animation_ms;
+	long                 elapsed_ms;
+	long                 duration_ms;
 
 	float scroll;     /* pixels scrolled down */
 	int   pressed_id; /* control under the finger, or -1 */

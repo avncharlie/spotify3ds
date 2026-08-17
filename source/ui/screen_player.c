@@ -7,16 +7,22 @@
 #define BOT_W 320.0f
 #define BOT_H 240.0f
 
+/* Fixed header, aligned with Library and Tracks. */
+#define HEADER_H        30.0f
+#define HEADER_GUTTER_X 280.0f
+#define HEADER_GUTTER_W 40.0f
+#define HEADER_ACTION_X 214.0f
+
 /* Shelf */
 #define SHELF_LABEL_X 16.0f
-#define SHELF_LABEL_Y 26.0f
+#define SHELF_LABEL_Y 45.0f
 #define SHELF_X       16.0f
-#define SHELF_Y       42.0f
-#define TILE          52.0f
+#define SHELF_Y       69.0f
+#define TILE          50.0f
 #define TILE_GAP      7.0f
 
 /* Transport: one baseline, no boxes. */
-#define ROW_Y      152.0f
+#define ROW_Y      163.5f
 #define CTRL_GAP   22.0f
 #define CTRL_SMALL 34.0f
 #define PLAY_R     20.0f /* 40px disc */
@@ -43,6 +49,27 @@
 static u32 press_clr(u32 clr, bool pressed)
 {
 	return pressed ? CLR_GREEN : clr;
+}
+
+static u8 scaled_component(u8 value, float scale, int floor)
+{
+	int out = floor + (int)((float)value * scale);
+	if (out > 255)
+		out = 255;
+	return (u8)out;
+}
+
+static void accent_of(const screen_player_args *a, u8 *r, u8 *g, u8 *b)
+{
+	if (a->art && a->art->valid) {
+		*r = a->art->accent_r;
+		*g = a->art->accent_g;
+		*b = a->art->accent_b;
+	} else {
+		*r = 0x20;
+		*g = 0x43;
+		*b = 0x68;
+	}
 }
 
 static void press_halo(float cx, float cy, bool pressed)
@@ -255,6 +282,45 @@ static void fmt_time(long ms, char *out, int outlen)
 	snprintf(out, outlen, "%ld:%02ld", s / 60, s % 60);
 }
 
+static void draw_header(const screen_player_args *a)
+{
+	const bool pressed = a->pressed_id == BTN_LYRICS;
+	const u32 action_clr = pressed ? CLR_GREEN : CLR_IDLE;
+	u8 ar, ag, ab;
+	accent_of(a, &ar, &ag, &ab);
+	const u32 header = C2D_Color32(scaled_component(ar, 0.42f, 3),
+	                               scaled_component(ag, 0.42f, 3),
+	                               scaled_component(ab, 0.42f, 3), 0xFF);
+	const float gutter_scale = pressed ? 0.54f : 0.30f;
+	const int gutter_floor = pressed ? 5 : 2;
+	const u32 gutter = C2D_Color32(
+	    scaled_component(ar, gutter_scale, gutter_floor),
+	    scaled_component(ag, gutter_scale, gutter_floor),
+	    scaled_component(ab, gutter_scale, gutter_floor), 0xFF);
+	C2D_DrawRectSolid(0.0f, 0.0f, 0.0f, BOT_W, HEADER_H, header);
+	C2D_DrawRectSolid(HEADER_GUTTER_X, 0.0f, 0.0f, HEADER_GUTTER_W, HEADER_H,
+	                  gutter);
+
+	const float lyrics_w = ui_text_width(a->buf, "LYRICS", TY_MICRO);
+	const float lyrics_x = HEADER_GUTTER_X - 8.0f - lyrics_w;
+	const char *title = a->track && a->track[0] ? a->track : "Nothing playing";
+	ui_text(a->buf, title, 16.0f,
+	        ui_baseline((HEADER_H - ui_px(TY_ROW_NAME)) / 2.0f, TY_ROW_NAME),
+	        TY_ROW_NAME, lyrics_x - 26.0f, CLR_WHITE);
+	ui_text_tracked(a->buf, "LYRICS", lyrics_x,
+	                ui_baseline((HEADER_H - ui_px(TY_MICRO)) / 2.0f, TY_MICRO),
+	                TY_MICRO, 0.45f, action_clr);
+
+	const float cx = HEADER_GUTTER_X + 18.0f;
+	const float cy = HEADER_H / 2.0f;
+	C2D_DrawLine(cx - 5.0f, cy - 7.0f, action_clr, cx + 2.0f, cy,
+	             action_clr, 3.0f, 0.0f);
+	C2D_DrawLine(cx + 2.0f, cy, action_clr, cx - 5.0f, cy + 7.0f,
+	             action_clr, 3.0f, 0.0f);
+	tb_add(a->tb, HEADER_ACTION_X, 0.0f, BOT_W - HEADER_ACTION_X, HEADER_H,
+	       BTN_LYRICS);
+}
+
 void screen_player_draw(const screen_player_args *a)
 {
 	/* --- shelf -------------------------------------------------------- */
@@ -360,4 +426,7 @@ void screen_player_draw(const screen_player_args *a)
 	/* Generous strip so the 4px track is grabbable with a thumb. */
 	tb_add(a->tb, SHELF_LABEL_X, SCRUB_BAR_Y - 18.0f, BOT_W - 32.0f, 40.0f,
 	       BTN_SCRUB);
+
+	/* Draw last so the fixed bar masks anything beneath it. */
+	draw_header(a);
 }

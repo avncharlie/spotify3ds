@@ -61,3 +61,21 @@ bool json_doc_bool(const json_doc *d, const char *path, bool *out);
  * callers must not mistake a missing field in the middle for end-of-list. */
 int json_doc_array_size(const json_doc *d, const char *path);
 bool json_doc_is_null(const json_doc *d, const char *path);
+bool json_doc_is_string(const json_doc *d, const char *path);
+bool json_doc_is_nonempty_string(const json_doc *d, const char *path);
+bool json_doc_is_object(const json_doc *d, const char *path);
+
+/* Allocate and decode a JSON string, rejecting values larger than max_bytes
+ * after decoding. `*out` is NULL unless JSON_ALLOC_OK is returned; `outlen`
+ * receives the decoded byte count excluding the NUL terminator. */
+typedef enum {
+	JSON_ALLOC_OK = 0,
+	JSON_ALLOC_ABSENT,
+	JSON_ALLOC_TOO_LARGE,
+	JSON_ALLOC_OOM,
+	JSON_ALLOC_INVALID,
+} json_alloc_result;
+
+json_alloc_result json_doc_str_alloc(const json_doc *d, const char *path,
+                                     size_t max_bytes, char **out,
+                                     size_t *outlen);

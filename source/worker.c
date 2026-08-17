@@ -8,6 +8,7 @@
 #include "spotify/art.h"
 #include "spotify/artcache.h"
 #include "spotify/auth.h"
+#include "spotify/lyrics.h"
 #include "spotify/recents.h"
 #include "spotify/tracks.h"
 #include "testlog.h"
@@ -27,6 +28,7 @@
  * ~750ms round trip, so this is a short window, not a busy loop. */
 #define SETTLE_RETRIES  3
 #define SETTLE_RETRY_MS 250
+#define LYRICS_PROGRESS_STEP 1024
 #define SUB_SEP " \xC2\xB7 "
 
 static Thread    s_thread;
@@ -34,12 +36,38 @@ static LightLock s_lock;
 static bool      s_lock_ready;
 static volatile bool s_quit;
 
+typedef struct {
+	char     track_uri[128];
+	char     track[192];
+	char     artist[192];
+	char     album[192];
+	long     duration_ms;
+	unsigned generation;
+} lyrics_request;
+
+typedef struct {
+	unsigned           generation;
+	lyrics_fetch_phase phase;
+	size_t             last_received;
+	size_t             last_total;
+	bool               last_total_known;
+	bool               initialized;
+} lyrics_progress_context;
+
+static lyrics_request         s_lyrics_want;
+static bool                   s_lyrics_pending;
+static unsigned               s_lyrics_generation;
+static worker_lyrics_status   s_lyrics_status;
+static worker_lyrics_payload  s_lyrics_ready;
+static bool                   s_lyrics_have;
+
 /* The lock must be usable before worker_start runs, because main.c can go
  * fatal on a path that never starts the worker at all (e.g. net_init failing). */
 static void ensure_lock(void)
 {
 	if (!s_lock_ready) {
 		LightLock_Init(&s_lock);
+		worker_lyrics_payload_init(&s_lyrics_ready);
 		s_lock_ready = true;
 	}
 }
@@ -62,12 +90,14 @@ typedef struct {
 	char       context_uri[128];
 	char       item_uri[128];
 	char       device_id[128];
+	char       expected_track_uri[128];
 	int        position;
 } queued_cmd;
 
 static queued_cmd s_queue[CMD_QUEUE];
 static int  s_qhead, s_qtail;
 static bool s_poll_requested;
+static bool s_track_change_pending;
 
 /* Album art in flight. s_art_want is what the UI asked for; s_art_ready holds a
  * finished download waiting to be claimed. Guarded by s_lock. */
@@ -150,6 +180,7 @@ static void do_recents(void);
 static void do_playlists(void);
 static void do_albums(void);
 static void do_tracks(void);
+static void do_lyrics(void);
 static void do_thumbs(void);
 static void do_current_metadata(void);
 
@@ -298,6 +329,7 @@ static void do_poll(void)
 	if (pr == PLAYER_OK) {
 		s_state      = st;
 		s_have_state = true;
+		s_track_change_pending = false;
 		s_status[0]  = '\0';
 		update_current_meta_pending_locked(&st, pin_current_locked(&st, true));
 	} else {
@@ -337,7 +369,21 @@ static void do_cmd(const queued_cmd *q)
 		case CMD_QUEUE_ITEM:
 			pr = player_queue_item(q->item_uri, err, sizeof err);
 			break;
-		case CMD_SEEK:    pr = player_seek(q->arg, err, sizeof err); break;
+		case CMD_SEEK:
+			if (q->expected_track_uri[0]) {
+				LightLock_Lock(&s_lock);
+				const bool current = s_have_state && !s_track_change_pending &&
+				                     strcmp(q->expected_track_uri,
+				                            s_state.track_uri) == 0;
+				LightLock_Unlock(&s_lock);
+				if (!current) {
+					tl_log("seek dropped: track changed (wanted=%s)",
+					       q->expected_track_uri);
+					return;
+				}
+			}
+			pr = player_seek(q->arg, err, sizeof err);
+			break;
 		case CMD_SHUFFLE: pr = player_shuffle(q->arg != 0, err, sizeof err); break;
 		case CMD_REPEAT:  pr = player_repeat((repeat_mode)q->arg, err, sizeof err); break;
 		case CMD_VOLUME:
@@ -352,6 +398,13 @@ static void do_cmd(const queued_cmd *q)
 				                            sizeof err);
 			break;
 		default: return;
+	}
+	if (pr == PLAYER_OK &&
+	    (q->cmd == CMD_NEXT || q->cmd == CMD_PREV ||
+	     q->cmd == CMD_PLAY_CONTEXT)) {
+		LightLock_Lock(&s_lock);
+		s_track_change_pending = true;
+		LightLock_Unlock(&s_lock);
 	}
 
 	tl_timing("cmd %d http took %lldms", (int)q->cmd,
@@ -617,6 +670,7 @@ static void worker_main(void *arg)
 		 * picked up in the same iteration rather than 100ms later. */
 		do_art();
 		do_tracks();
+		do_lyrics();
 
 		/* Lists last: the cover the user is looking at matters more than the
 		 * shelf behind it. Playlists before recents so the name cache is warm
@@ -669,7 +723,7 @@ bool worker_start(char *err, int errlen)
 	const s32 worker_prio = prio - 1;
 
 	s_thread = threadCreate(worker_main, NULL, WORKER_STACK, worker_prio,
-	                        WORKER_CORE, true);
+	                        WORKER_CORE, false);
 	if (!s_thread) {
 		snprintf(err, errlen, "threadCreate failed (core %d prio 0x%lX)",
 		         WORKER_CORE, (unsigned long)worker_prio);
@@ -690,8 +744,13 @@ void worker_set_fatal(const char *what, const char *hint)
 void worker_stop(void)
 {
 	s_quit = true;
+	/* Invalidate before joining so an in-flight provider cannot publish while
+	 * shutdown waits for its cancellation checkpoints. This also releases an
+	 * unclaimed ready document. */
+	worker_cancel_lyrics();
 	if (s_thread) {
 		threadJoin(s_thread, U64_MAX);
+		threadFree(s_thread);
 		s_thread = NULL;
 	}
 }
@@ -719,6 +778,21 @@ void worker_post(worker_cmd cmd, long arg)
 	q.arg = arg;
 	q.position = -1;
 	enqueue(&q);
+}
+
+bool worker_seek_track(long position_ms, const char *track_uri)
+{
+	if (!track_uri || !track_uri[0])
+		return false;
+	ensure_lock();
+	queued_cmd q;
+	memset(&q, 0, sizeof q);
+	q.cmd = CMD_SEEK;
+	q.arg = position_ms;
+	q.position = -1;
+	snprintf(q.expected_track_uri, sizeof q.expected_track_uri, "%s",
+	         track_uri);
+	return enqueue(&q);
 }
 
 bool worker_set_volume(int volume_percent, const char *device_id)
@@ -1141,6 +1215,303 @@ static void do_albums(void)
 
 	if (pr != PLAYER_OK && pr != PLAYER_NOTHING_PLAYING)
 		tl_log("albums: %s (%s)", player_result_str(pr), err);
+}
+
+void worker_lyrics_payload_init(worker_lyrics_payload *payload)
+{
+	if (!payload)
+		return;
+	memset(payload, 0, sizeof *payload);
+	lyrics_doc_init(&payload->doc);
+}
+
+void worker_lyrics_payload_free(worker_lyrics_payload *payload)
+{
+	if (!payload)
+		return;
+	lyrics_doc_free(&payload->doc);
+	payload->generation = 0;
+	payload->track_uri[0] = '\0';
+}
+
+void worker_lyrics_payload_move(worker_lyrics_payload *dst,
+	                            worker_lyrics_payload *src)
+{
+	if (!dst || !src || dst == src)
+		return;
+	lyrics_doc_free(&dst->doc);
+	lyrics_doc_move(&dst->doc, &src->doc);
+	dst->generation = src->generation;
+	snprintf(dst->track_uri, sizeof dst->track_uri, "%s", src->track_uri);
+	src->generation = 0;
+	src->track_uri[0] = '\0';
+}
+
+unsigned worker_request_lyrics(const char *track_uri, const char *track,
+	                           const char *artist, const char *album,
+	                           long duration_ms)
+{
+	if (!track_uri || !track_uri[0] || !track || !track[0])
+		return 0;
+
+	worker_lyrics_payload discarded;
+	worker_lyrics_payload_init(&discarded);
+	ensure_lock();
+	LightLock_Lock(&s_lock);
+
+	/* The render loop may ask every frame. Do not invalidate a completed
+	 * document merely because it has not been claimed yet. Errors remain
+	 * retryable by making another request. */
+	if (strcmp(track_uri, s_lyrics_status.track_uri) == 0 &&
+	    (s_lyrics_status.state == WORKER_LYRICS_LOADING ||
+	     (s_lyrics_status.state == WORKER_LYRICS_READY && s_lyrics_have))) {
+		const unsigned generation = s_lyrics_status.generation;
+		LightLock_Unlock(&s_lock);
+		worker_lyrics_payload_free(&discarded);
+		return generation;
+	}
+
+	const unsigned generation = ++s_lyrics_generation;
+	snprintf(s_lyrics_want.track_uri, sizeof s_lyrics_want.track_uri, "%s",
+	         track_uri);
+	snprintf(s_lyrics_want.track, sizeof s_lyrics_want.track, "%s", track);
+	snprintf(s_lyrics_want.artist, sizeof s_lyrics_want.artist, "%s",
+	         artist ? artist : "");
+	snprintf(s_lyrics_want.album, sizeof s_lyrics_want.album, "%s",
+	         album ? album : "");
+	s_lyrics_want.duration_ms = duration_ms > 0 ? duration_ms : 0;
+	s_lyrics_want.generation = generation;
+	s_lyrics_pending = true;
+
+	if (s_lyrics_have)
+		worker_lyrics_payload_move(&discarded, &s_lyrics_ready);
+	s_lyrics_have = false;
+	s_lyrics_status.state = WORKER_LYRICS_LOADING;
+	s_lyrics_status.result = (lyrics_result)0;
+	s_lyrics_status.generation = generation;
+	snprintf(s_lyrics_status.track_uri, sizeof s_lyrics_status.track_uri, "%s",
+	         track_uri);
+	s_lyrics_status.message[0] = '\0';
+	s_lyrics_status.phase = LYRICS_FETCH_EXACT;
+	s_lyrics_status.bytes_received = 0;
+	s_lyrics_status.bytes_total = 0;
+	s_lyrics_status.bytes_total_known = false;
+	snprintf(s_lyrics_status.message, sizeof s_lyrics_status.message,
+	         "Checking LRCLIB");
+	s_lyrics_status.payload_ready = false;
+	LightLock_Unlock(&s_lock);
+
+	worker_lyrics_payload_free(&discarded);
+	return generation;
+}
+
+void worker_cancel_lyrics(void)
+{
+	worker_lyrics_payload discarded;
+	worker_lyrics_payload_init(&discarded);
+	ensure_lock();
+	LightLock_Lock(&s_lock);
+	s_lyrics_generation++;
+	s_lyrics_pending = false;
+	memset(&s_lyrics_want, 0, sizeof s_lyrics_want);
+	if (s_lyrics_have)
+		worker_lyrics_payload_move(&discarded, &s_lyrics_ready);
+	s_lyrics_have = false;
+	s_lyrics_status.state = WORKER_LYRICS_IDLE;
+	s_lyrics_status.result = (lyrics_result)0;
+	s_lyrics_status.generation = s_lyrics_generation;
+	s_lyrics_status.track_uri[0] = '\0';
+	s_lyrics_status.message[0] = '\0';
+	s_lyrics_status.phase = LYRICS_FETCH_EXACT;
+	s_lyrics_status.bytes_received = 0;
+	s_lyrics_status.bytes_total = 0;
+	s_lyrics_status.bytes_total_known = false;
+	s_lyrics_status.payload_ready = false;
+	LightLock_Unlock(&s_lock);
+	worker_lyrics_payload_free(&discarded);
+}
+
+void worker_get_lyrics_status(worker_lyrics_status *out)
+{
+	if (!out)
+		return;
+	ensure_lock();
+	LightLock_Lock(&s_lock);
+	*out = s_lyrics_status;
+	LightLock_Unlock(&s_lock);
+}
+
+bool worker_take_lyrics(worker_lyrics_payload *out)
+{
+	if (!out)
+		return false;
+
+	worker_lyrics_payload claimed;
+	worker_lyrics_payload_init(&claimed);
+	ensure_lock();
+	LightLock_Lock(&s_lock);
+	const bool have = s_lyrics_have;
+	if (have) {
+		worker_lyrics_payload_move(&claimed, &s_lyrics_ready);
+		s_lyrics_have = false;
+		s_lyrics_status.payload_ready = false;
+	}
+	LightLock_Unlock(&s_lock);
+
+	/* Releasing a caller-owned previous document can happen outside the shared
+	 * lock. A failed take leaves out unchanged. */
+	if (have)
+		worker_lyrics_payload_move(out, &claimed);
+	worker_lyrics_payload_free(&claimed);
+	return have;
+}
+
+static bool lyrics_cancelled(void *ctx)
+{
+	if (s_quit)
+		return true;
+
+	const unsigned generation = *(const unsigned *)ctx;
+	LightLock_Lock(&s_lock);
+	const bool cancelled = generation != s_lyrics_generation;
+	LightLock_Unlock(&s_lock);
+	return cancelled;
+}
+
+static const char *lyrics_phase_message(lyrics_fetch_phase phase)
+{
+	switch (phase) {
+		case LYRICS_FETCH_SEARCH: return "Searching LRCLIB";
+		case LYRICS_FETCH_PROCESSING: return "Processing lyrics";
+		case LYRICS_FETCH_EXACT:
+		default: return "Checking LRCLIB";
+	}
+}
+
+static void lyrics_progress(lyrics_fetch_phase phase, size_t received,
+	                        size_t total, bool total_known, void *ctx)
+{
+	lyrics_progress_context *progress = ctx;
+	const bool phase_changed = !progress->initialized ||
+	                           phase != progress->phase;
+	const bool reset = progress->initialized && phase == progress->phase &&
+	                   received < progress->last_received;
+	const bool total_changed = !progress->initialized ||
+	                           total != progress->last_total ||
+	                           total_known != progress->last_total_known;
+	const bool first_data = progress->last_received == 0 && received > 0;
+	const bool completed = total_known && received >= total;
+	if (!phase_changed && !reset && !total_changed && !first_data && !completed &&
+	    received < progress->last_received + LYRICS_PROGRESS_STEP)
+		return;
+
+	progress->phase = phase;
+	progress->last_received = received;
+	progress->last_total = total;
+	progress->last_total_known = total_known;
+	progress->initialized = true;
+
+	LightLock_Lock(&s_lock);
+	if (progress->generation == s_lyrics_generation &&
+	    s_lyrics_status.state == WORKER_LYRICS_LOADING) {
+		s_lyrics_status.phase = phase;
+		s_lyrics_status.bytes_received = received;
+		s_lyrics_status.bytes_total = total;
+		s_lyrics_status.bytes_total_known = total_known;
+		snprintf(s_lyrics_status.message, sizeof s_lyrics_status.message, "%s",
+		         lyrics_phase_message(phase));
+	}
+	LightLock_Unlock(&s_lock);
+}
+
+static void do_lyrics(void)
+{
+	lyrics_request request;
+	LightLock_Lock(&s_lock);
+	const bool pending = s_lyrics_pending;
+	if (pending) {
+		request = s_lyrics_want;
+		s_lyrics_pending = false;
+		s_busy = true;
+	}
+	LightLock_Unlock(&s_lock);
+	if (!pending)
+		return;
+
+	/* Keep the potentially large dynamic document off the TLS-constrained
+	 * worker stack. The provider fills it without holding the shared lock. */
+	lyrics_doc *fresh = malloc(sizeof *fresh);
+	if (!fresh) {
+		LightLock_Lock(&s_lock);
+		if (request.generation == s_lyrics_generation) {
+			s_lyrics_status.state = WORKER_LYRICS_ERROR;
+			s_lyrics_status.result = LYRICS_ERR;
+			s_lyrics_status.message[0] = '\0';
+			snprintf(s_lyrics_status.message,
+			         sizeof s_lyrics_status.message, "Out of memory");
+			s_lyrics_status.payload_ready = false;
+		}
+		LightLock_Unlock(&s_lock);
+		return;
+	}
+	lyrics_doc_init(fresh);
+
+	char err[256] = "";
+	lyrics_progress_context progress = {
+		.generation = request.generation,
+	};
+	const lyrics_result result = lyrics_fetch_lrclib_progress(
+	    request.track, request.artist, request.album, request.duration_ms, fresh,
+	    lyrics_cancelled, &request.generation, lyrics_progress, &progress, err,
+	    sizeof err);
+
+	worker_lyrics_payload discarded;
+	worker_lyrics_payload_init(&discarded);
+	LightLock_Lock(&s_lock);
+	const bool current = request.generation == s_lyrics_generation;
+	if (current && result != LYRICS_CANCELLED) {
+		s_lyrics_status.result = result;
+		s_lyrics_status.generation = request.generation;
+		snprintf(s_lyrics_status.track_uri,
+		         sizeof s_lyrics_status.track_uri, "%s", request.track_uri);
+		s_lyrics_status.payload_ready = false;
+
+		if (s_lyrics_have)
+			worker_lyrics_payload_move(&discarded, &s_lyrics_ready);
+		s_lyrics_have = false;
+
+		if (result == LYRICS_OK) {
+			lyrics_doc_move(&s_lyrics_ready.doc, fresh);
+			s_lyrics_ready.generation = request.generation;
+			snprintf(s_lyrics_ready.track_uri,
+			         sizeof s_lyrics_ready.track_uri, "%s", request.track_uri);
+			s_lyrics_have = true;
+			s_lyrics_status.state = WORKER_LYRICS_READY;
+			s_lyrics_status.message[0] = '\0';
+			s_lyrics_status.payload_ready = true;
+		} else if (result == LYRICS_INSTRUMENTAL) {
+			s_lyrics_status.state = WORKER_LYRICS_READY;
+			snprintf(s_lyrics_status.message,
+			         sizeof s_lyrics_status.message, "Instrumental track");
+		} else if (result == LYRICS_NONE) {
+			s_lyrics_status.state = WORKER_LYRICS_READY;
+			snprintf(s_lyrics_status.message,
+			         sizeof s_lyrics_status.message, "No lyrics found");
+		} else {
+			s_lyrics_status.state = WORKER_LYRICS_ERROR;
+			snprintf(s_lyrics_status.message,
+			         sizeof s_lyrics_status.message, "%s",
+			         err[0] ? err : "Lyrics request failed");
+		}
+	}
+	LightLock_Unlock(&s_lock);
+
+	worker_lyrics_payload_free(&discarded);
+	lyrics_doc_free(fresh);
+	free(fresh);
+
+	if (current && result == LYRICS_ERR)
+		tl_log("lyrics: failed (%s)", err);
 }
 
 unsigned worker_request_tracks(const collection_item *collection, int offset)

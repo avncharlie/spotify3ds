@@ -8,6 +8,7 @@
 
 #define BOT_W 320.0f
 #define BOT_H 240.0f
+#define CONTENT_BOTTOM (BOT_H - UI_PROGRESS_BAR_H)
 
 #define PAD_X    16.0f
 #define THUMB    30.0f
@@ -60,7 +61,7 @@ static float document_top(bool filtering)
 
 static float viewport_h(bool filtering)
 {
-	return BOT_H - document_top(filtering);
+	return CONTENT_BOTTOM - document_top(filtering);
 }
 
 static bool armed_valid(int id, int recent_count, int playlist_count,
@@ -179,8 +180,8 @@ float screen_list_reveal_row(int recent_count, int playlist_count,
 	const float doc_top = document_top(filtering);
 	if (top < scroll + doc_top)
 		scroll = top - doc_top;
-	else if (bottom > scroll + BOT_H)
-		scroll = bottom - BOT_H;
+	else if (bottom > scroll + CONTENT_BOTTOM)
+		scroll = bottom - CONTENT_BOTTOM;
 
 	const float max =
 	    screen_list_max_scroll(recent_count, playlist_count, album_count,
@@ -298,7 +299,7 @@ static void add_clipped_hit(touch_builder *tb, float x, float y, float w,
                             float h, int id, float clip_top)
 {
 	const float top = y < clip_top ? clip_top : y;
-	const float bottom = y + h > BOT_H ? BOT_H : y + h;
+	const float bottom = y + h > CONTENT_BOTTOM ? CONTENT_BOTTOM : y + h;
 	if (bottom - top > 8.0f)
 		tb_add(tb, x, top, w, bottom - top, id);
 }
@@ -329,7 +330,7 @@ static void draw_caption(const screen_list_args *a, float y, const char *label,
                          int count)
 {
 	const float clip_top = document_top(a->search_query && a->search_query[0]);
-	if (y >= BOT_H || y + CAPTION_H <= clip_top)
+	if (y >= CONTENT_BOTTOM || y + CAPTION_H <= clip_top)
 		return;
 
 	C2D_DrawRectSolid(0.0f, y, 0.0f, BOT_W, CAPTION_H, CLR_HEADER);
@@ -356,7 +357,7 @@ static void draw_row(const screen_list_args *a, const collection_item *item,
 	                     strcmp(item->context_uri,
 	                            a->current_context_uri) == 0;
 	const float h = row_h(id, a->armed_id);
-	if (y >= BOT_H || y + h <= LIST_HEADER_H)
+	if (y >= CONTENT_BOTTOM || y + h <= LIST_HEADER_H)
 		return;
 
 	const bool pressed = a->pressed_id == id;
@@ -574,4 +575,6 @@ void screen_list_draw(const screen_list_args *a)
 	/* Generous hit area: the arrow itself is small. */
 	tb_add(a->tb, 0.0f, 0.0f, 90.0f, LIST_HEADER_H, LIST_BTN_BACK);
 	tb_add(a->tb, 238.0f, 0.0f, 82.0f, LIST_HEADER_H, LIST_BTN_FIND);
+
+	ui_progress_bar(a->elapsed_ms, a->duration_ms);
 }

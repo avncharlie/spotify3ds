@@ -27,6 +27,8 @@ typedef enum {
 	TY_COUNT
 } type_role;
 
+#define UI_PROGRESS_BAR_H 4.0f
+
 /* Call once after C2D_Init. */
 void ui_init(void);
 void ui_exit(void);
@@ -83,6 +85,10 @@ void ui_disc(float cx, float cy, float r, u32 clr);
  * playback animates slowly; paused playback remains at a fixed silhouette. */
 void ui_now_playing_badge(float x, float y, float size, bool playing,
                           unsigned animation_ms);
+
+/* Bottom-screen playback progress used by non-Player views. Player has its own
+ * interactive scrubber instead. */
+void ui_progress_bar(long elapsed_ms, long duration_ms);
 
 /* Emit font metrics and the derived scales. Smoketest only; no-op unless
  * timing output is enabled. */

@@ -382,6 +382,27 @@ void ui_now_playing_badge(float x, float y, float size, bool playing,
 	}
 }
 
+void ui_progress_bar(long elapsed_ms, long duration_ms)
+{
+	const float width = 320.0f;
+	const float y = 240.0f - UI_PROGRESS_BAR_H;
+	float progress = 0.0f;
+	if (duration_ms > 0) {
+		long clamped = elapsed_ms;
+		if (clamped < 0)
+			clamped = 0;
+		if (clamped > duration_ms)
+			clamped = duration_ms;
+		progress = (float)clamped / (float)duration_ms;
+	}
+	C2D_DrawRectSolid(0.0f, y, 0.0f, width, UI_PROGRESS_BAR_H,
+	                  C2D_Color32(0x32, 0x32, 0x32, 0xFF));
+	if (progress > 0.0f)
+		C2D_DrawRectSolid(0.0f, y, 0.0f, width * progress,
+		                  UI_PROGRESS_BAR_H,
+		                  C2D_Color32(0x1D, 0xB9, 0x54, 0xFF));
+}
+
 void ui_font_probe(void)
 {
 	FINF_s *fi = fontGetInfo(NULL);

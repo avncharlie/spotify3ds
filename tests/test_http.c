@@ -19,6 +19,31 @@ static const char *s_response;
 static int s_takes;
 static size_t s_read_limit = 3;
 static struct tls_conn s_conn;
+static char *s_written;
+static size_t s_written_len;
+
+typedef struct {
+	int calls;
+	size_t received;
+	size_t total;
+	bool total_known;
+	size_t first_nonzero;
+	int zero_calls;
+} progress_state;
+
+static void record_progress(size_t received, size_t total, bool total_known,
+	                        void *context)
+{
+	progress_state *state = context;
+	state->calls++;
+	state->received = received;
+	state->total = total;
+	state->total_known = total_known;
+	if (!state->first_nonzero && received)
+		state->first_nonzero = received;
+	if (!received)
+		state->zero_calls++;
+}
 
 tls_conn *pool_take(const char *host, int port, bool *reused, char *err,
 	                int errlen)
@@ -46,8 +71,12 @@ void pool_give(const char *host, int port, tls_conn *conn, bool keep)
 bool tls_write(tls_conn *conn, const void *buf, size_t len)
 {
 	(void)conn;
-	(void)buf;
-	(void)len;
+	free(s_written);
+	s_written = malloc(len + 1);
+	assert(s_written);
+	memcpy(s_written, buf, len);
+	s_written[len] = '\0';
+	s_written_len = len;
 	return true;
 }
 
@@ -78,6 +107,25 @@ static bool request(const char *method, const char *response,
 	                    err, errlen);
 }
 
+static bool request_path(const char *path, const char *response,
+	                     http_response *out, char *err, int errlen)
+{
+	s_response = response;
+	s_takes = 0;
+	return http_request("test.invalid", "GET", path, NULL, NULL, NULL, out,
+	                    err, errlen);
+}
+
+static bool request_progress(const char *response, progress_state *progress,
+	                         http_response *out, char *err, int errlen)
+{
+	s_response = response;
+	s_takes = 0;
+	memset(progress, 0, sizeof *progress);
+	return http_request_progress("test.invalid", "GET", "/", NULL, NULL, NULL,
+	                             record_progress, progress, out, err, errlen);
+}
+
 int main(void)
 {
 	http_response out;
@@ -91,17 +139,53 @@ int main(void)
 	assert(s_takes == 1);
 	http_free(&out);
 
+	progress_state progress;
+	assert(request_progress(
+	    "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello", &progress,
+	    &out, err, sizeof err));
+	assert(progress.calls >= 2);
+	assert(progress.received == 5 && progress.total == 5 &&
+	       progress.total_known);
+	http_free(&out);
+
+	/* LRCLIB metadata can percent-encode to several kilobytes. The request line
+	 * must grow with it rather than passing through a fixed staging array. */
+	char long_path[3001];
+	long_path[0] = '/';
+	memset(long_path + 1, 'q', sizeof long_path - 2);
+	long_path[sizeof long_path - 1] = '\0';
+	assert(request_path(long_path,
+	                    "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n",
+	                    &out, err, sizeof err));
+	assert(s_written_len > strlen(long_path));
+	assert(strncmp(s_written, "GET /qqq", 8) == 0);
+	assert(strstr(s_written, " HTTP/1.1\r\nHost: test.invalid\r\n") != NULL);
+	http_free(&out);
+
 	assert(!request("GET",
 	                "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhel",
 	                &out, err, sizeof err));
 	assert(strstr(err, "truncated body") != NULL);
 	assert(s_takes == 2); /* idempotent GET retries once on a fresh stream */
+	assert(!request_progress(
+	    "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhel", &progress,
+	    &out, err, sizeof err));
+	assert(s_takes == 2 && progress.zero_calls >= 2);
 
 	assert(request("GET",
 	               "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
 	               "5\r\nhello\r\n0\r\n\r\n",
 	               &out, err, sizeof err));
 	assert(out.body_len == 5 && memcmp(out.body, "hello", 5) == 0);
+	http_free(&out);
+	assert(request_progress(
+	    "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+	    "2\r\nhe\r\n3\r\nllo\r\n0\r\n\r\n",
+	    &progress, &out, err, sizeof err));
+	assert(progress.calls >= 3);
+	assert(progress.received == 5 && progress.total == 0 &&
+	       !progress.total_known);
+	assert(progress.first_nonzero < 5);
 	http_free(&out);
 
 	assert(!request("GET",
@@ -110,6 +194,20 @@ int main(void)
 	                &out, err, sizeof err));
 	assert(strcmp(err, "bad chunked body") == 0);
 	assert(s_takes == 2);
+
+	assert(!request("GET",
+	                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+	                "FFFFFFFF\r\n",
+	                &out, err, sizeof err));
+	assert(strcmp(err, "bad chunked body") == 0);
+
+	/* Header names in a close-delimited body are body text, not framing. */
+	assert(request("GET",
+	               "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n"
+	               "Content-Length: 999\r\nbody",
+	               &out, err, sizeof err));
+	assert(out.body_len == strlen("Content-Length: 999\r\nbody"));
+	http_free(&out);
 
 	assert(!request("POST",
 	                "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhel",
@@ -134,7 +232,8 @@ int main(void)
 	assert(out.body[0] == 'x' && out.body[large_len - 1] == 'x');
 	http_free(&out);
 	free(large);
+	free(s_written);
 
-	puts("http framing: complete 6MiB bodies accepted; truncation rejected/retried");
+	puts("http framing: long paths and complete 6MiB bodies accepted; truncation rejected/retried");
 	return 0;
 }

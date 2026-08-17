@@ -20,8 +20,9 @@
  *   DigiCert G2 (RSA) -> api.spotify.com, accounts.spotify.com
  *   DigiCert G3 (ECC) -> i.scdn.co         (album art CDN)
  *   GlobalSign R3     -> mosaic.scdn.co    (generated playlist mosaics)
+ *   GTS Root R4       -> lrclib.net         (lyrics provider)
  *
- * All three are required, and the failure mode when one is missing is
+ * All four are required, and the failure mode when one is missing is
  * consistently confusing: the API works while some subset of images silently
  * never loads. Spotify serves different asset classes from different CDNs with
  * different issuers, so a host that has always worked is no guarantee about a
@@ -37,6 +38,8 @@ extern const unsigned char digicert_g3_der[];
 extern const unsigned char digicert_g3_der_end[];
 extern const unsigned char globalsign_r3_der[];
 extern const unsigned char globalsign_r3_der_end[];
+extern const unsigned char gts_root_r4_der[];
+extern const unsigned char gts_root_r4_der_end[];
 
 struct tls_conn {
 	int                      fd;
@@ -152,6 +155,7 @@ tls_conn *tls_connect(const char *host, int port, char *err, int errlen)
 			{digicert_g2_der, digicert_g2_der_end},
 			{digicert_g3_der, digicert_g3_der_end},
 			{globalsign_r3_der, globalsign_r3_der_end},
+			{gts_root_r4_der, gts_root_r4_der_end},
 		};
 
 		for (unsigned i = 0; i < sizeof roots / sizeof roots[0]; i++) {

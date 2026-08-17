@@ -3,6 +3,7 @@
 #include <citro2d.h>
 #include <stdbool.h>
 
+#include "../spotify/art.h"
 #include "../spotify/player.h"
 #include "touch.h"
 
@@ -23,6 +24,7 @@ enum {
 	BTN_SCRUB,
 	BTN_SHELF_ALL,
 	BTN_SHELF0, /* .. BTN_SHELF0 + SHELF_TILES - 1 */
+	BTN_LYRICS = 20,
 };
 
 #define SHELF_TILES 4
@@ -30,6 +32,8 @@ enum {
 typedef struct {
 	C2D_TextBuf buf;
 	touch_builder *tb;
+	const album_art *art;
+	const char *track;
 
 	bool        playing;
 	bool        shuffle;

@@ -42,7 +42,9 @@ points to the CIA from the latest release.
 1. Create an app in the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard).
    Select **Web API**, add `http://127.0.0.1:8888/callback` as a redirect URI,
    and copy the app's Client ID. No client secret is needed.
-2. From this project directory, generate your console credentials:
+   
+   If you're having difficulty with this, look at [this issue](https://github.com/avncharlie/spotify3ds/issues/3#issuecomment-5298331372) to see some screenshots of the process.
+3. From this project directory, generate your console credentials:
 
    ```sh
    python3 tools/bootstrap_auth.py --client-id <YOUR_CLIENT_ID>
@@ -50,9 +52,9 @@ points to the CIA from the latest release.
 
    Your browser will open Spotify's authorization page. After approval, the
    script writes `creds.cfg` in the project directory.
-3. Create a folder named `spotify` at the root of the 3DS SD card and copy the
+4. Create a folder named `spotify` at the root of the 3DS SD card and copy the
    generated file to it. The resulting path must be `/spotify/creds.cfg`.
-4. Copy `Spotify3DS.cia` to the SD card, put the card back in the console, and
+5. Copy `Spotify3DS.cia` to the SD card, put the card back in the console, and
    install the CIA with FBI or another homebrew CIA installer (Or install via
    QR code)
 

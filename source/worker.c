@@ -792,7 +792,35 @@ bool worker_seek_track(long position_ms, const char *track_uri)
 	q.position = -1;
 	snprintf(q.expected_track_uri, sizeof q.expected_track_uri, "%s",
 	         track_uri);
-	return enqueue(&q);
+
+	/* A held scrub can produce another target while the previous seek is still
+	 * queued behind network work. Replace that pending target rather than
+	 * building a stale seek backlog. */
+	bool queued = false;
+	int replace = -1;
+	LightLock_Lock(&s_lock);
+	for (int i = s_qhead; i != s_qtail; i = (i + 1) % CMD_QUEUE) {
+		if (s_queue[i].cmd == CMD_NEXT || s_queue[i].cmd == CMD_PREV ||
+		    s_queue[i].cmd == CMD_PLAY_CONTEXT)
+			replace = -1;
+		else if (s_queue[i].cmd == CMD_SEEK &&
+		         strcmp(s_queue[i].expected_track_uri, track_uri) == 0)
+			replace = i;
+	}
+	if (replace >= 0) {
+		s_queue[replace] = q;
+		queued = true;
+	}
+	if (!queued) {
+		const int next = (s_qtail + 1) % CMD_QUEUE;
+		if (next != s_qhead) {
+			s_queue[s_qtail] = q;
+			s_qtail = next;
+			queued = true;
+		}
+	}
+	LightLock_Unlock(&s_lock);
+	return queued;
 }
 
 bool worker_set_volume(int volume_percent, const char *device_id)

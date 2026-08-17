@@ -70,6 +70,20 @@ static scrub_mode g_scrub;
 static long       g_scrub_ms;
 static u64        g_scrub_until;
 #define SCRUB_COMMIT_MS 3500
+#define HOLD_SCRUB_DELAY_MS (TOUCH_TAP_TIMEOUT_MS + 1)
+#define HOLD_SCRUB_STEP_MS  10000
+#define HOLD_SCRUB_REPEAT_MS 1000
+
+typedef struct {
+	int  direction;
+	bool scrubbing;
+	u64  pressed_at;
+	u64  next_seek_at;
+	char track_uri[128];
+} hold_scrub_state;
+
+static hold_scrub_state g_dpad_scrub;
+static hold_scrub_state g_touch_button_scrub;
 
 /* Local clock for interpolating progress between polls, so the bar moves
  * smoothly at 60fps rather than jumping every 3s. */
@@ -238,19 +252,92 @@ static void emit_banner(int link_fd)
  * poll plus elapsed wall time. */
 static long effective_progress(const worker_snapshot *snap)
 {
-	if (g_scrub == SCRUB_DRAGGING || g_scrub == SCRUB_COMMITTING)
+	if (g_scrub == SCRUB_DRAGGING)
 		return g_scrub_ms;
 
 	if (!snap->have_state)
 		return 0;
 
-	long p = g_base_progress;
+	long p = g_scrub == SCRUB_COMMITTING ? g_scrub_ms : g_base_progress;
 	if (snap->state.is_playing)
 		p += (long)(osGetTime() - g_base_time);
 
 	if (snap->state.duration_ms > 0 && p > snap->state.duration_ms)
 		p = snap->state.duration_ms;
 	return p;
+}
+
+static void hold_scrub_start(hold_scrub_state *hold, int direction,
+	                         const worker_snapshot *snap)
+{
+	memset(hold, 0, sizeof *hold);
+	hold->direction = direction;
+	hold->pressed_at = osGetTime();
+	if (snap->have_state)
+		snprintf(hold->track_uri, sizeof hold->track_uri, "%s",
+		         snap->state.track_uri);
+}
+
+static void hold_scrub_cancel(hold_scrub_state *hold)
+{
+	memset(hold, 0, sizeof *hold);
+}
+
+static void hold_scrub_update(hold_scrub_state *hold, long progress_ms,
+	                          long duration_ms,
+	                          const worker_snapshot *snap)
+{
+	if (!hold->direction)
+		return;
+	if (hold->track_uri[0] &&
+	    (!snap->have_state ||
+	     strcmp(hold->track_uri, snap->state.track_uri) != 0)) {
+		hold_scrub_cancel(hold);
+		return;
+	}
+	if (!snap->have_state || !hold->track_uri[0] || duration_ms <= 0)
+		return;
+
+	const u64 now = osGetTime();
+	if (!hold->scrubbing) {
+		if (now - hold->pressed_at < HOLD_SCRUB_DELAY_MS)
+			return;
+		hold->scrubbing = true;
+		hold->next_seek_at = now;
+	}
+	if (now < hold->next_seek_at)
+		return;
+
+	long target = progress_ms + hold->direction * HOLD_SCRUB_STEP_MS;
+	if (target < 0)
+		target = 0;
+	if (target > duration_ms)
+		target = duration_ms;
+	if (target != progress_ms && worker_seek_track(target, hold->track_uri)) {
+		g_scrub_ms = target;
+		g_scrub = SCRUB_COMMITTING;
+		g_scrub_until = now + SCRUB_COMMIT_MS;
+		g_base_progress = target;
+		g_base_time = now;
+	}
+	hold->next_seek_at = now + HOLD_SCRUB_REPEAT_MS;
+}
+
+/* Returns true when a hold became a scrub. A short press is left to the
+ * caller's ordinary previous/next action. */
+static bool hold_scrub_finish(hold_scrub_state *hold)
+{
+	const bool scrubbed = hold->scrubbing;
+	memset(hold, 0, sizeof *hold);
+	return scrubbed;
+}
+
+static void post_skip(int direction)
+{
+	g_cmd_sent = osGetTime();
+	tl_timing("button %s at %llu", direction > 0 ? "NEXT" : "PREV",
+	          (unsigned long long)g_cmd_sent);
+	worker_post(direction > 0 ? CMD_NEXT : CMD_PREV, 0);
 }
 
 
@@ -755,6 +842,7 @@ int main(int argc, char **argv)
 		hidScanInput();
 		const u32 keys_down   = hidKeysDown();
 		const u32 keys_held   = hidKeysHeld();
+		const u32 keys_up     = hidKeysUp();
 		const u32 keys_repeat = hidKeysDownRepeat();
 		/* Deliberate two-button exit chord. Require one half to transition this
 		 * frame so holding both cannot retrigger unrelated input before shutdown. */
@@ -857,6 +945,49 @@ int main(int argc, char **argv)
 			lyrics_open_current(&snap);
 		}
 		const bottom_view input_view = g_view;
+		const u32 dpad_down = keys_down & (KEY_DLEFT | KEY_DRIGHT);
+		const bool player_bar_drag = input_view == VIEW_PLAYER && touch.down &&
+		                             touch.press_id == BTN_SCRUB;
+		if (player_bar_drag)
+			hold_scrub_cancel(&g_dpad_scrub);
+		if (!player_bar_drag && !g_touch_button_scrub.direction &&
+		    !g_dpad_scrub.direction &&
+		    dpad_down != (KEY_DLEFT | KEY_DRIGHT)) {
+			if (dpad_down & KEY_DRIGHT)
+				hold_scrub_start(&g_dpad_scrub, 1, &snap);
+			else if (dpad_down & KEY_DLEFT)
+				hold_scrub_start(&g_dpad_scrub, -1, &snap);
+		}
+		if (g_dpad_scrub.direction) {
+			const u32 held_key = g_dpad_scrub.direction > 0 ? KEY_DRIGHT
+			                                                  : KEY_DLEFT;
+			if (keys_held & held_key) {
+				hold_scrub_update(&g_dpad_scrub, progress, duration, &snap);
+			} else if ((keys_up & held_key) || !(keys_held & held_key)) {
+				const int direction = g_dpad_scrub.direction;
+				if (!hold_scrub_finish(&g_dpad_scrub))
+					post_skip(direction);
+			}
+		}
+
+		if (input_view == VIEW_PLAYER && touch.pressed &&
+		    (touch.press_id == BTN_PREV || touch.press_id == BTN_NEXT)) {
+			hold_scrub_cancel(&g_dpad_scrub);
+			hold_scrub_start(&g_touch_button_scrub,
+			                 touch.press_id == BTN_NEXT ? 1 : -1, &snap);
+		}
+		if (g_touch_button_scrub.direction) {
+			if (input_view != VIEW_PLAYER || touch.dragging) {
+				hold_scrub_cancel(&g_touch_button_scrub);
+			} else if (touch.down) {
+				hold_scrub_update(&g_touch_button_scrub, progress, duration, &snap);
+			} else if (touch.released) {
+				const int direction = g_touch_button_scrub.direction;
+				if (!hold_scrub_finish(&g_touch_button_scrub) &&
+				    touch.clicked < 0)
+					post_skip(direction);
+			}
+		}
 
 		if (input_view == VIEW_LYRICS) {
 			if (!snap.have_state || !snap.state.track_uri[0]) {
@@ -972,18 +1103,6 @@ int main(int argc, char **argv)
 				g_lyrics_requested_uri[0] = '\0';
 				g_view = g_lyrics_return_view;
 			} else {
-				const u32 skip = keys_down & (KEY_DLEFT | KEY_DRIGHT);
-				if (skip == KEY_DRIGHT) {
-					g_cmd_sent = osGetTime();
-					tl_timing("button NEXT at %llu",
-					          (unsigned long long)g_cmd_sent);
-					worker_post(CMD_NEXT, 0);
-				} else if (skip == KEY_DLEFT) {
-					g_cmd_sent = osGetTime();
-					tl_timing("button PREV at %llu",
-					          (unsigned long long)g_cmd_sent);
-					worker_post(CMD_PREV, 0);
-				}
 				const bool retry = (keys_down & KEY_X) ||
 				                   touch.clicked == LYRICS_BTN_RETRY;
 				if (retry && snap.have_state)
@@ -1097,35 +1216,11 @@ int main(int argc, char **argv)
 				opt_set(&g_opt_play, !playing);
 				worker_post(playing ? CMD_PAUSE : CMD_PLAY, 0);
 			}
-			if (keys_down & KEY_DRIGHT) {
-				g_cmd_sent = osGetTime();
-				tl_timing("button NEXT at %llu",
-				          (unsigned long long)g_cmd_sent);
-				worker_post(CMD_NEXT, 0);
-			}
-			if (keys_down & KEY_DLEFT) {
-				g_cmd_sent = osGetTime();
-				tl_timing("button PREV at %llu",
-				          (unsigned long long)g_cmd_sent);
-				worker_post(CMD_PREV, 0);
-			}
 		}
 		if (input_view == VIEW_LIST || input_view == VIEW_TRACKS) {
 			if (keys_down & KEY_SELECT) {
 				opt_set(&g_opt_play, !playing);
 				worker_post(playing ? CMD_PAUSE : CMD_PLAY, 0);
-			}
-			if (keys_down & KEY_DRIGHT) {
-				g_cmd_sent = osGetTime();
-				tl_timing("button NEXT at %llu",
-				          (unsigned long long)g_cmd_sent);
-				worker_post(CMD_NEXT, 0);
-			}
-			if (keys_down & KEY_DLEFT) {
-				g_cmd_sent = osGetTime();
-				tl_timing("button PREV at %llu",
-				          (unsigned long long)g_cmd_sent);
-				worker_post(CMD_PREV, 0);
 			}
 		}
 
@@ -1133,7 +1228,8 @@ int main(int argc, char **argv)
 		    touch.press_id == BTN_SCRUB && duration > 0)
 			g_scrub = SCRUB_DRAGGING;
 
-		if (input_view == VIEW_PLAYER && g_scrub == SCRUB_DRAGGING &&
+		if (input_view == VIEW_PLAYER && !g_touch_button_scrub.direction &&
+		    g_scrub == SCRUB_DRAGGING &&
 		    touch.down && duration > 0) {
 			float f = ((float)touch.px - SCRUB_BAR_X) / SCRUB_BAR_W;
 			if (f < 0.0f)
@@ -1146,6 +1242,8 @@ int main(int argc, char **argv)
 		if (input_view == VIEW_PLAYER && g_scrub == SCRUB_DRAGGING &&
 		    touch.released) {
 			worker_post(CMD_SEEK, g_scrub_ms);
+			g_base_progress = g_scrub_ms;
+			g_base_time = osGetTime();
 			g_scrub       = SCRUB_COMMITTING;
 			g_scrub_until = osGetTime() + SCRUB_COMMIT_MS;
 		}

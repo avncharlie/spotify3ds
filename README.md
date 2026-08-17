@@ -72,24 +72,28 @@ access at <https://spotify.com/account/apps> if the SD card or file is lost.
 > track.
 > Hold `L` and press `START` to exit the application from any screen.
 
-- Player: `A` play/pause, D-pad left/right previous/next, `L/R` volume down/up,
-  `X` Library, and `Y` show/hide cover art. Tap `LYRICS` in the header to open
-  lyrics for the current song. Tap a Recently Played tile to open its tracks;
-  hold it for 600 ms to start the collection immediately. Tracks opened from
-  this shelf return directly to Player with `B` or the top-left back control.
+- Player: `A` play/pause, `L/R` volume down/up, `X` Library, and `Y` show/hide
+  cover art. Press and release D-pad left/right to skip, or hold either
+  direction for repeated 10-second seeks. The touch previous/next controls work
+  the same way. Tap `LYRICS` in the header to open lyrics for the current song.
+  Tap a Recently Played tile to open its tracks; hold it for 600 ms to start the collection
+  immediately. Tracks opened from this shelf return directly to Player with
+  `B` or the top-left back control.
 - Library: tap a row's play icon to start it immediately, or its right chevron
   to open its tracks. The current playing row shows pause in the same cell.
   D-pad up/down selects a collection, `A` starts it and then toggles play/pause,
   `X` opens its tracks,
-  D-pad left/right skips the previous/next song, `SELECT` toggles play/pause,
-  `L/R` changes volume, `ZL/ZR` jumps sections, and `B` returns. Tap `FIND` to filter saved albums and
+  Press and release D-pad left/right to skip the previous/next song, or hold
+  either direction for repeated 10-second seeks. `SELECT` toggles play/pause, `L/R` changes volume,
+  `ZL/ZR` jumps sections, and `B` returns. Tap `FIND` to filter saved albums and
   playlists by name, artist, or owner using the system keyboard; tap the filter
   strip's `X` to clear it.
 - Tracks: tap a row's play icon to start it immediately; the current playing
   track shows pause in the same cell. D-pad up/down selects a song, `A` plays
   it and then toggles play/pause, `L/R` changes volume, `ZL/ZR` changes 50-track
-  pages, D-pad left/right skips the previous/next song, `SELECT` toggles
-  play/pause, `X` queues the selected song, and `B` returns to the Library. Tap a
+  pages, pressing and releasing D-pad left/right skips the previous/next song,
+  and holding either direction performs repeated 10-second seeks. `SELECT` toggles play/pause, `X`
+  queues the selected song, and `B` returns to the Library. Tap a
   row's right queue icon to queue it directly. Moving past a page boundary with
   D-pad up/down also loads the adjacent page automatically. Playlist pagination
   wraps: `ZL`/Up on the first page opens the last page, and `ZR`/Down on the last
@@ -98,7 +102,8 @@ access at <https://spotify.com/account/apps> if the SD card or file is lost.
 - Lyrics: press `START` from Player, Library, or Tracks. `B` or the top-left
   back control returns to the screen that opened it. Drag or use D-pad/Circle
   Pad up/down to scroll smoothly, then tap `FOLLOW` to resume synchronized
-  scrolling. D-pad left/right skips to the previous or next track. Tap a
+  scrolling. Press and release D-pad left/right to skip tracks, or hold either
+  direction for repeated 10-second seeks. Tap a
   timestamped line to seek Spotify to it, and press `X` to retry a failed
   lookup. `SELECT` toggles play/pause and `L/R` changes volume. Plain lyrics
   remain scrollable but cannot seek or auto-follow. `START` has no action while

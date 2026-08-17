@@ -277,19 +277,27 @@ void screen_tracks_draw(const screen_tracks_args *a)
 	        TY_ROW_NAME, 70, back_clr);
 	tb_add(a->tb, 0, 0, 90, HEADER_H, TRACK_BTN_BACK);
 
-	ui_text(a->buf, a->collection_name ? a->collection_name : "Tracks", 96,
-	        ui_baseline((HEADER_H - ui_px(TY_ROW_NAME)) / 2, TY_ROW_NAME),
-	        TY_ROW_NAME, 96, CLR_NAME);
-
+	bool has_prev = false;
+	bool has_next = false;
 	if (a->ready && a->page) {
-		const bool has_prev =
+		has_prev =
 		    a->page->offset > 0 ||
 		    (a->page->collection.kind == COLLECTION_PLAYLIST &&
 		     a->page->total > a->page->count);
-		const bool has_next =
+		has_next =
 		    a->page->offset + a->page->count < a->page->total ||
 		    (a->page->collection.kind == COLLECTION_PLAYLIST &&
 		     a->page->offset > 0 && a->page->total > a->page->count);
+	}
+	const float title_x = 96.0f;
+	const float title_right = has_prev ? 190.0f
+	                          : has_next ? 232.0f
+	                                     : 274.0f;
+	ui_text(a->buf, a->collection_name ? a->collection_name : "Tracks", title_x,
+	        ui_baseline((HEADER_H - ui_px(TY_ROW_NAME)) / 2, TY_ROW_NAME),
+	        TY_ROW_NAME, title_right - title_x, CLR_NAME);
+
+	if (a->ready && a->page) {
 		if (has_prev) {
 			ui_text(a->buf, "< ZL", 196,
 			        ui_baseline((HEADER_H - ui_px(TY_ROW_NAME)) / 2, TY_ROW_NAME),

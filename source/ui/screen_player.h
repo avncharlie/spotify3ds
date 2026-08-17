@@ -13,8 +13,8 @@
  * baseline with no button boxes, and an inline scrubber.
  */
 
-/* Control ids. Shelf tiles occupy BTN_SHELF0..BTN_SHELF0+3, and the fifth tile
- * is BTN_SHELF_ALL, which opens the full list. */
+/* Control ids. Shelf tiles occupy BTN_SHELF0..BTN_SHELF0+3, and
+ * BTN_SHELF_ALL follows the last populated tile. */
 enum {
 	BTN_PREV = 0,
 	BTN_PLAY,
@@ -48,6 +48,7 @@ typedef struct {
 	bool scrubbing;
 
 	/* Shelf art, NULL where not yet loaded. */
+	int              shelf_count;
 	const C2D_Image *shelf[SHELF_TILES];
 	bool             shelf_current[SHELF_TILES];
 	unsigned         animation_ms;

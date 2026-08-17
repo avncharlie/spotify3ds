@@ -328,7 +328,12 @@ void screen_player_draw(const screen_player_args *a)
 	                ui_baseline(SHELF_LABEL_Y, TY_MICRO), TY_MICRO, 1.1f,
 	                CLR_LABEL);
 
-	for (int i = 0; i < SHELF_TILES; i++) {
+	int shelf_count = a->shelf_count;
+	if (shelf_count < 0)
+		shelf_count = 0;
+	if (shelf_count > SHELF_TILES)
+		shelf_count = SHELF_TILES;
+	for (int i = 0; i < shelf_count; i++) {
 		const float x = SHELF_X + (float)i * (TILE + TILE_GAP);
 		if (a->shelf[i]) {
 			const float s = TILE / (float)a->shelf[i]->subtex->width;
@@ -342,7 +347,8 @@ void screen_player_draw(const screen_player_args *a)
 		tb_add(a->tb, x, SHELF_Y, TILE, TILE, BTN_SHELF0 + i);
 	}
 
-	const float all_x = SHELF_X + (float)SHELF_TILES * (TILE + TILE_GAP);
+	const float all_x =
+	    SHELF_X + (float)shelf_count * (TILE + TILE_GAP);
 	draw_all_tile(a->buf, all_x, SHELF_Y, a->pressed_id == BTN_SHELF_ALL);
 	tb_add(a->tb, all_x, SHELF_Y, TILE, TILE, BTN_SHELF_ALL);
 

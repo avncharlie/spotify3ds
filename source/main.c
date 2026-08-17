@@ -2068,7 +2068,10 @@ int main(int argc, char **argv)
 			 * a miss queues the fetch once. */
 			recent_list *const rl = &g_recents_buf;
 			const int          rn = worker_get_recents(rl);
-			for (int i = 0; i < SHELF_TILES && i < rn; i++) {
+			pa.shelf_count = rn <= 0 ? 0
+			                 : rn < SHELF_TILES ? rn
+			                                     : SHELF_TILES;
+			for (int i = 0; i < pa.shelf_count; i++) {
 				pa.shelf[i] = thumbs_get(rl->items[i].art_url);
 				pa.shelf_current[i] =
 				    snap.have_state &&

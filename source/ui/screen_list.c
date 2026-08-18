@@ -285,16 +285,6 @@ int screen_list_section_first_id(int recent_count, int playlist_count,
 	return -1;
 }
 
-static void rounded_rect(float x, float y, float w, float h, float r, u32 clr)
-{
-	C2D_DrawRectSolid(x + r, y, 0.0f, w - 2.0f * r, h, clr);
-	C2D_DrawRectSolid(x, y + r, 0.0f, w, h - 2.0f * r, clr);
-	ui_disc(x + r, y + r, r, clr);
-	ui_disc(x + w - r, y + r, r, clr);
-	ui_disc(x + r, y + h - r, r, clr);
-	ui_disc(x + w - r, y + h - r, r, clr);
-}
-
 static void add_clipped_hit(touch_builder *tb, float x, float y, float w,
                             float h, int id, float clip_top)
 {
@@ -556,25 +546,25 @@ void screen_list_draw(const screen_list_args *a)
 	C2D_DrawTriangle(ax, ay, back_clr, ax + 7.0f, ay - 5.0f, back_clr,
 	                 ax + 7.0f, ay + 5.0f, back_clr, 0.0f);
 
+	/* The search disc starts at x=292, so the title has the header to itself
+	 * up to a small gap before it. */
 	ui_text(a->buf, "Library", ax + 17.0f,
 	        ui_baseline(LIST_HEADER_H / 2.0f - ui_px(TY_ROW_NAME) / 2.0f,
 	                    TY_ROW_NAME),
-	        TY_ROW_NAME, 145.0f, CLR_NAME);
+	        TY_ROW_NAME, 264.0f - (ax + 17.0f), CLR_NAME);
 
+	/* Same affordance as the Tracks header, so one green disc means "search"
+	 * everywhere in the app. */
 	const bool find_pressed = a->pressed_id == LIST_BTN_FIND;
-	rounded_rect(252, 3, 62, 24, 6,
-	             find_pressed ? CLR_GUTTER_PRESS : CLR_GUTTER);
-	const u32 find_clr = find_pressed ? CLR_GREEN_PRESS : CLR_SUB;
-	ui_disc(263, 13, 5, find_clr);
-	ui_disc(263, 13, 3, find_pressed ? CLR_GUTTER_PRESS : CLR_GUTTER);
-	C2D_DrawLine(266.5f, 16.5f, find_clr, 271, 21, find_clr, 2, 0);
-	ui_text(a->buf, "FIND", 276,
-	        ui_baseline((LIST_HEADER_H - ui_px(TY_ROW_SUB)) / 2, TY_ROW_SUB),
-	        TY_ROW_SUB, 44, find_clr);
+	const u32 find_bg = find_pressed ? CLR_GREEN_PRESS : CLR_GREEN;
+	ui_disc(302, 15, 10, find_bg);
+	ui_disc(300, 13, 4, CLR_ACTION);
+	ui_disc(300, 13, 2, find_bg);
+	C2D_DrawLine(303, 16, CLR_ACTION, 307, 20, CLR_ACTION, 2, 0);
 
 	/* Generous hit area: the arrow itself is small. */
 	tb_add(a->tb, 0.0f, 0.0f, 90.0f, LIST_HEADER_H, LIST_BTN_BACK);
-	tb_add(a->tb, 238.0f, 0.0f, 82.0f, LIST_HEADER_H, LIST_BTN_FIND);
+	tb_add(a->tb, 280.0f, 0.0f, 40.0f, LIST_HEADER_H, LIST_BTN_FIND);
 
 	ui_progress_bar(a->elapsed_ms, a->duration_ms);
 }

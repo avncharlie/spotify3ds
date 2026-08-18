@@ -77,9 +77,17 @@ void ui_text_tracked(C2D_TextBuf buf, const char *s, float x, float y,
 /* Width the string would occupy, for right-aligning and centring. */
 float ui_text_width(C2D_TextBuf buf, const char *s, type_role r);
 
-/* Filled circle. citro2d has no circle primitive; this is a triangle fan, and
- * 16 segments at r=20 keeps the chord error under half a pixel. */
+/* Filled circle. citro2d has no circle primitive, so this is a triangle fan
+ * whose segment count scales with the radius to hold the chord error under a
+ * quarter pixel. There is no MSAA on this target, so the outermost pixel is a
+ * ring that fades to alpha 0 and does the anti-aliasing by hand. */
 void ui_disc(float cx, float cy, float r, u32 clr);
+
+/* Anti-aliased polyline. C2D_DrawLine is a hard-edged quad, so a curve built
+ * from it stair-steps along every segment and notches at the joints. This lays
+ * one continuous strip with edges that fade to alpha 0, and shares the joint
+ * vertices between segments so the seams disappear. `pts` is x,y interleaved. */
+void ui_polyline(const float *pts, int count, float thickness, u32 clr);
 
 /* Darken cover art and draw the four-bar current-playback indicator. Active
  * playback animates slowly; paused playback remains at a fixed silhouette. */

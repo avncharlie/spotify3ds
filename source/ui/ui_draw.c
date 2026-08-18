@@ -328,16 +328,149 @@ void ui_text_tracked(C2D_TextBuf buf, const char *s, float x, float y,
 
 void ui_disc(float cx, float cy, float r, u32 clr)
 {
-	const int segs = r >= 12.0f ? 16 : 10;
+	/* Segments needed for a sagitta of a quarter pixel: r(1-cos(pi/n)) <= 0.25.
+	 * Small dots are already round at low counts, so this only spends triangles
+	 * where the facets would actually be visible. */
+	int segs = (int)(3.5f * sqrtf(r)) * 2;
+	if (segs < 10)
+		segs = 10;
+	else if (segs > 48)
+		segs = 48;
 
-	float px = cx + r, py = cy;
+	/* Fade the last pixel to transparent instead of ending on a hard edge. A
+	 * disc smaller than that would vanish, so it stays a plain fan. */
+	const float edge = r > 1.5f ? 0.75f : 0.0f;
+	const float inner_r = r - edge;
+	const u32 clear = clr & 0x00FFFFFF;
+
+	float ipx = cx + inner_r, ipy = cy;
+	float opx = cx + r, opy = cy;
 	for (int i = 1; i <= segs; i++) {
-		const float a  = (float)i * 2.0f * (float)M_PI / (float)segs;
-		const float nx = cx + r * cosf(a);
-		const float ny = cy + r * sinf(a);
-		C2D_DrawTriangle(cx, cy, clr, px, py, clr, nx, ny, clr, 0.0f);
-		px = nx;
-		py = ny;
+		const float a   = (float)i * 2.0f * (float)M_PI / (float)segs;
+		const float cs  = cosf(a);
+		const float sn  = sinf(a);
+		const float inx = cx + inner_r * cs;
+		const float iny = cy + inner_r * sn;
+		C2D_DrawTriangle(cx, cy, clr, ipx, ipy, clr, inx, iny, clr, 0.0f);
+		if (edge > 0.0f) {
+			const float onx = cx + r * cs;
+			const float ony = cy + r * sn;
+			C2D_DrawTriangle(ipx, ipy, clr, opx, opy, clear, onx, ony, clear,
+			                 0.0f);
+			C2D_DrawTriangle(ipx, ipy, clr, onx, ony, clear, inx, iny, clr,
+			                 0.0f);
+			opx = onx;
+			opy = ony;
+		}
+		ipx = inx;
+		ipy = iny;
+	}
+}
+
+void ui_polyline(const float *pts, int count, float thickness, u32 clr)
+{
+	if (!pts || count < 2 || thickness <= 0.0f)
+		return;
+
+	const u32 clear = clr & 0x00FFFFFF;
+	const float half = thickness / 2.0f;
+	/* Keep the solid core at least a hair wide: for a thin stroke the fade
+	 * would otherwise consume the whole width and leave nothing visible. */
+	const float fade = half > 0.6f ? 0.5f : half * 0.4f;
+	const float core = half - fade;
+
+	/* Offset each joint along the average of its two segment normals so the
+	 * two sides share vertices. Scaling by 1/cos(theta/2) keeps the stroke an
+	 * even width through the bend (the standard mitre), clamped so a near
+	 * reversal cannot fling the corner off to infinity. */
+	float pnx = 0.0f, pny = 0.0f;
+	for (int i = 0; i + 1 < count; i++) {
+		const float ax = pts[i * 2], ay = pts[i * 2 + 1];
+		const float bx = pts[i * 2 + 2], by = pts[i * 2 + 3];
+		float dx = bx - ax, dy = by - ay;
+		const float len = sqrtf(dx * dx + dy * dy);
+		if (len <= 0.0001f)
+			continue;
+		dx /= len;
+		dy /= len;
+		const float nx = -dy, ny = dx;
+
+		/* Start joint: average with the previous segment unless this is the
+		 * first, which is left square. */
+		float sx = nx, sy = ny;
+		if (i > 0) {
+			sx = nx + pnx;
+			sy = ny + pny;
+			const float sl = sqrtf(sx * sx + sy * sy);
+			if (sl > 0.0001f) {
+				sx /= sl;
+				sy /= sl;
+				float scale = sx * nx + sy * ny;
+				if (scale < 0.35f)
+					scale = 0.35f;
+				sx /= scale;
+				sy /= scale;
+			} else {
+				sx = nx;
+				sy = ny;
+			}
+		}
+
+		/* End joint: average with the next segment unless this is the last. */
+		float ex = nx, ey = ny;
+		if (i + 2 < count) {
+			const float cx = pts[i * 2 + 4], cy = pts[i * 2 + 5];
+			float ndx = cx - bx, ndy = cy - by;
+			const float nl = sqrtf(ndx * ndx + ndy * ndy);
+			if (nl > 0.0001f) {
+				ndx /= nl;
+				ndy /= nl;
+				ex = nx + -ndy;
+				ey = ny + ndx;
+				const float el = sqrtf(ex * ex + ey * ey);
+				if (el > 0.0001f) {
+					ex /= el;
+					ey /= el;
+					float scale = ex * nx + ey * ny;
+					if (scale < 0.35f)
+						scale = 0.35f;
+					ex /= scale;
+					ey /= scale;
+				} else {
+					ex = nx;
+					ey = ny;
+				}
+			}
+		}
+
+		const float a_in_x = ax + sx * core, a_in_y = ay + sy * core;
+		const float a_out_x = ax - sx * core, a_out_y = ay - sy * core;
+		const float b_in_x = bx + ex * core, b_in_y = by + ey * core;
+		const float b_out_x = bx - ex * core, b_out_y = by - ey * core;
+
+		/* Solid core. */
+		C2D_DrawTriangle(a_in_x, a_in_y, clr, a_out_x, a_out_y, clr, b_in_x,
+		                 b_in_y, clr, 0.0f);
+		C2D_DrawTriangle(a_out_x, a_out_y, clr, b_out_x, b_out_y, clr, b_in_x,
+		                 b_in_y, clr, 0.0f);
+
+		/* Fading skirt on each side. */
+		const float a_fin_x = ax + sx * half, a_fin_y = ay + sy * half;
+		const float a_fout_x = ax - sx * half, a_fout_y = ay - sy * half;
+		const float b_fin_x = bx + ex * half, b_fin_y = by + ey * half;
+		const float b_fout_x = bx - ex * half, b_fout_y = by - ey * half;
+
+		C2D_DrawTriangle(a_in_x, a_in_y, clr, a_fin_x, a_fin_y, clear, b_fin_x,
+		                 b_fin_y, clear, 0.0f);
+		C2D_DrawTriangle(a_in_x, a_in_y, clr, b_fin_x, b_fin_y, clear, b_in_x,
+		                 b_in_y, clr, 0.0f);
+		C2D_DrawTriangle(a_out_x, a_out_y, clr, a_fout_x, a_fout_y, clear,
+		                 b_fout_x, b_fout_y, clear, 0.0f);
+		C2D_DrawTriangle(a_out_x, a_out_y, clr, b_fout_x, b_fout_y, clear,
+		                 b_out_x, b_out_y, clr, 0.0f);
+
+		pnx = nx;
+		pny = ny;
 	}
 }
 

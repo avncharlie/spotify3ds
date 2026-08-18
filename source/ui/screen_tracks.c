@@ -208,6 +208,8 @@ static void draw_row(const screen_tracks_args *a, const track_item *item,
 	                  ui_baseline(top + name_h + 2.0f, TY_ROW_SUB), TY_ROW_SUB,
 	                  tw, item->playable ? CLR_SUB : CLR_DISABLED, CLR_GREEN);
 
+	if (a->suppress_hits)
+		return;
 	if (item->playable)
 		clipped_hit(a->tb, PLAY_X, y, PLAY_W, h, play_id);
 	if (item->playable)

@@ -2084,6 +2084,8 @@ static void do_track_search(bool higher_priority_work)
 		job->active = false;
 		return;
 	}
+	// We don't want to hammer Spotify with rapid playlist requests so we
+	// wait 250ms between each one.
 	if (higher_priority_work || osGetTime() < job->next_request_at)
 		return;
 
@@ -2096,6 +2098,7 @@ static void do_track_search(bool higher_priority_work)
 	const player_result result = tracks_fetch_page(
 	    &job->collection, job->next_offset, page, err, sizeof err);
 	if (!track_search_current(job->generation)) {
+		// Cancel search if it has been superceded by another search
 		free(page);
 		track_search_drop_builder(job);
 		track_search_results_free(&job->results);
@@ -2164,7 +2167,11 @@ static void do_track_search(bool higher_priority_work)
 			track_search_publish(job, true);
 			job->next_publish_at = now + 1000;
 		}
-		job->next_request_at = now + 500;
+		/* Paced rather than back-to-back, so a long scan does not monopolise
+		 * the one network thread the poll and the artwork also queue behind.
+		 * The wait starts after the fetch returns, and a page measures around
+		 * 400ms, so the real gap between requests is that plus this. */
+		job->next_request_at = now + 250;
 		return;
 	}
 

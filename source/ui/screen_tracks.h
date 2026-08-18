@@ -43,6 +43,10 @@ typedef struct {
 	int              pressed_id;
 	/* 0..1 of the way to a long press on the search disc; 0 draws nothing. */
 	float         hold_progress;
+	/* The recent-searches panel is over the top and owns the touch, so the
+	 * rows must not register hit areas: they would compete for a 32-rect
+	 * budget that silently drops the overflow. */
+	bool          suppress_hits;
 	int              armed_id;
 } screen_tracks_args;
 

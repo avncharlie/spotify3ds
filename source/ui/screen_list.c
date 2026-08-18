@@ -419,6 +419,8 @@ static void draw_row(const screen_list_args *a, const collection_item *item,
 	                  tw, CLR_SUB, CLR_GREEN);
 
 	/* Keep all three zones disjoint: row body, immediate play, and drill-down. */
+	if (a->suppress_hits)
+		return;
 	add_clipped_hit(a->tb, PLAY_X, y, PLAY_W, h, play_id,
 	                document_top(filtering));
 	add_clipped_hit(a->tb, CHEVRON_X, y, CHEVRON_W, h, chevron_id,

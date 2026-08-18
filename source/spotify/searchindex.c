@@ -85,6 +85,10 @@ struct searchindex {
 	const unsigned char *payload;
 	size_t               payload_len;
 	int                  count;
+	/* Whether the album column was stored. Taken from the file rather than
+	 * re-derived from the caller's collection, so an empty album on a
+	 * playlist track stays empty instead of inheriting the playlist name. */
+	bool                 match_album;
 	char                 snapshot[SEARCHINDEX_SNAPSHOT_MAX + 1];
 };
 
@@ -403,6 +407,7 @@ searchindex *searchindex_open(unsigned char *blob, size_t len)
 	ix->payload = blob + sizeof(searchindex_hdr);
 	ix->payload_len = hdr.payload_len;
 	ix->count = (int)hdr.record_count;
+	ix->match_album = (hdr.flags & 1u) != 0;
 	memcpy(ix->snapshot, hdr.snapshot_id, sizeof ix->snapshot);
 	ix->snapshot[SEARCHINDEX_SNAPSHOT_MAX] = '\0';
 	return ix;
@@ -430,6 +435,50 @@ int searchindex_count(const searchindex *ix) { return ix ? ix->count : 0; }
 
 size_t searchindex_bytes(const searchindex *ix) { return ix ? ix->len : 0; }
 
+bool searchindex_age_file_for_test(const char *path)
+{
+	FILE *f = fopen(path, "r+b");
+	if (!f)
+		return false;
+	if (fseek(f, 0, SEEK_END) != 0) {
+		fclose(f);
+		return false;
+	}
+	const long size = ftell(f);
+	if (size <= (long)sizeof(searchindex_hdr) ||
+	    (size_t)size > SEARCHINDEX_BYTES_MAX || fseek(f, 0, SEEK_SET) != 0) {
+		fclose(f);
+		return false;
+	}
+	unsigned char *blob = malloc((size_t)size);
+	if (!blob) {
+		fclose(f);
+		return false;
+	}
+	const bool read_ok = fread(blob, 1, (size_t)size, f) == (size_t)size;
+	if (!read_ok) {
+		free(blob);
+		fclose(f);
+		return false;
+	}
+
+	searchindex_hdr hdr;
+	memcpy(&hdr, blob, sizeof hdr);
+	/* Any value the real playlist cannot hold. */
+	snprintf(hdr.snapshot_id, sizeof hdr.snapshot_id, "aged-for-test");
+	hdr.crc32 = 0;
+	memcpy(blob, &hdr, sizeof hdr);
+	hdr.crc32 = crc32_of(blob, (size_t)size);
+	memcpy(blob, &hdr, sizeof hdr);
+
+	const bool ok = fseek(f, 0, SEEK_SET) == 0 &&
+	                fwrite(blob, 1, (size_t)size, f) == (size_t)size;
+	fflush(f);
+	fclose(f);
+	free(blob);
+	return ok;
+}
+
 bool searchindex_search(const searchindex *ix,
                         const collection_item *collection, const char *query,
                         track_search_results *results)
@@ -437,7 +486,8 @@ bool searchindex_search(const searchindex *ix,
 	if (!ix || !collection || !query || !query[0] || !results)
 		return false;
 	const size_t querylen = strlen(query);
-	const bool match_album = collection->kind == COLLECTION_PLAYLIST;
+	const bool hdr_match_album = ix->match_album;
+	const bool match_album = hdr_match_album;
 	if (ix->count > results->source_total)
 		results->source_total = ix->count;
 
@@ -452,6 +502,21 @@ bool searchindex_search(const searchindex *ix,
 		const size_t raw = sizeof(record_hdr) + body;
 		const size_t padded = (raw + 3u) & ~(size_t)3u;
 		if (at + raw > ix->payload_len)
+			return false;
+
+		/* Every length is a u8 and can therefore claim up to 255, while the
+		 * fields they are copied into are smaller. Checking only that the
+		 * bytes exist in the blob is not enough: this file comes off an SD
+		 * card and a tamperer can recompute the crc, so the lengths have to
+		 * be checked against their destinations too. Reject the whole index
+		 * rather than clamping, so a damaged entry behaves like the miss the
+		 * header promises. */
+		if (rh.name_len >= sizeof ((track_item *)0)->name ||
+		    rh.artist_len >= sizeof ((track_item *)0)->artist ||
+		    rh.album_len >= sizeof ((track_item *)0)->album ||
+		    rh.uri_len >= sizeof ((track_item *)0)->uri ||
+		    rh.art_host > ART_HOST_CDN_AK ||
+		    (rh.id_len && rh.id_len != TRACK_ID_LEN))
 			return false;
 
 		const char *text = (const char *)(ix->payload + at + sizeof(record_hdr));
@@ -475,18 +540,28 @@ bool searchindex_search(const searchindex *ix,
 			item.playable = (rh.flags & REC_FLAG_PLAYABLE) != 0;
 			item.is_local = (rh.flags & REC_FLAG_LOCAL) != 0;
 			item.explicit_content = (rh.flags & REC_FLAG_EXPLICIT) != 0;
-			memcpy(item.name, name, rh.name_len);
-			memcpy(item.artist, artist, rh.artist_len);
+			/* The lengths were validated against these fields above; the
+			 * %.*s forms restate the bound so the copies stay safe on their
+			 * own terms. */
+			snprintf(item.name, sizeof item.name, "%.*s", (int)rh.name_len,
+			         name);
+			snprintf(item.artist, sizeof item.artist, "%.*s",
+			         (int)rh.artist_len, artist);
 			if (rh.album_len)
-				memcpy(item.album, album, rh.album_len);
-			else
+				snprintf(item.album, sizeof item.album, "%.*s",
+				         (int)rh.album_len, album);
+			else if (!hdr_match_album)
+				/* An album collection does not store the column, because
+				 * every row repeats the collection name. A playlist track
+				 * whose album really is empty keeps it empty. */
 				snprintf(item.album, sizeof item.album, "%s",
 				         collection->name);
 			if (rh.id_len)
 				snprintf(item.uri, sizeof item.uri, "%s%.*s", TRACK_URI_PREFIX,
 				         (int)rh.id_len, idp);
 			else
-				memcpy(item.uri, idp, rh.uri_len);
+				snprintf(item.uri, sizeof item.uri, "%.*s", (int)rh.uri_len,
+				         idp);
 
 			if (rh.art_host >= ART_HOST_SCDN) {
 				char hex[256];

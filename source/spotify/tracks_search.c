@@ -225,6 +225,11 @@ void track_search_build_page(const track_search_results *results,
 	out->offset = offset;
 	out->total = results->count;
 	out->count = results->count - offset;
+	/* An empty result set skips the offset clamp above, so a caller that
+	 * preserved its scroll position - which the rescan path does - would
+	 * otherwise be handed a negative count. */
+	if (out->count < 0)
+		out->count = 0;
 	if (out->count > TRACK_PAGE_MAX)
 		out->count = TRACK_PAGE_MAX;
 	for (int i = 0; i < out->count; i++)

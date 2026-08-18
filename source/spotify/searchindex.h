@@ -73,6 +73,12 @@ const unsigned char *searchindex_blob(const searchindex *index);
 int         searchindex_count(const searchindex *index);
 size_t      searchindex_bytes(const searchindex *index);
 
+/* Rewrite a stored index's snapshot id in place, leaving it structurally
+ * valid. Only the freshness check should reject the result - which is exactly
+ * what happens when a playlist gains a track, and is otherwise impossible to
+ * reproduce from a test without editing the playlist. */
+bool searchindex_age_file_for_test(const char *path);
+
 /* Rank the whole corpus against `query`, filling `results` exactly as a live
  * scan would. `collection` supplies what the records do not carry: the album
  * name for album collections, and the art url fallback. */

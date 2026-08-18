@@ -1,6 +1,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 
 #include "spotify/searchindex.h"
@@ -16,6 +17,30 @@ static const char *hex40(int seed, char *out)
 		out[i] = digits[(seed * 7 + i * 3) & 0x0F];
 	out[40] = '\0';
 	return out;
+}
+
+/* Same reflected crc32 the format uses, so a test can repair a tampered
+ * blob exactly as someone editing the file would. */
+static void repair_crc(unsigned char *blob, size_t len)
+{
+	static uint32_t tbl[256];
+	static bool ready;
+	if (!ready) {
+		for (uint32_t i = 0; i < 256; i++) {
+			uint32_t c = i;
+			for (int k = 0; k < 8; k++)
+				c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+			tbl[i] = c;
+		}
+		ready = true;
+	}
+	const uint32_t zero = 0;
+	memcpy(blob + 84, &zero, 4);
+	uint32_t c = 0xFFFFFFFFu;
+	for (size_t i = 0; i < len; i++)
+		c = tbl[(c ^ blob[i]) & 0xFF] ^ (c >> 8);
+	c ^= 0xFFFFFFFFu;
+	memcpy(blob + 84, &c, 4);
 }
 
 static collection_item playlist_of(const char *name, int total)
@@ -235,6 +260,35 @@ static void test_album_collection(void)
 	searchindex_free(ix);
 }
 
+/* A playlist track whose album name is genuinely empty - local files and some
+ * unavailable tracks come back that way - must stay empty when served from the
+ * index. Substituting the collection name there is only correct for album
+ * collections, which do not store the column at all. */
+static void test_empty_album_on_playlist(void)
+{
+	collection_item c = playlist_of("MyPlaylist", 1);
+	track_page page;
+	memset(&page, 0, sizeof page);
+	page.collection = c;
+	page.total = 1;
+	page.count = 1;
+	page.items[0] = item(0, "Local Song", "Someone", "", "");
+
+	searchindex *ix = build(&c, &page, 1, "snap");
+	track_search_results live, cached;
+	track_search_results_init(&live);
+	track_search_results_init(&cached);
+	assert(track_search_consider_page(&live, &page, "local", true));
+	assert(searchindex_search(ix, &c, "local", &cached));
+	assert(live.count == 1 && cached.count == 1);
+	/* The live scan leaves it empty; the cached one must agree. */
+	assert(live.hits[0].item.album[0] == '\0');
+	assert(strcmp(cached.hits[0].item.album, live.hits[0].item.album) == 0);
+	track_search_results_free(&live);
+	track_search_results_free(&cached);
+	searchindex_free(ix);
+}
+
 /* A damaged file must read exactly like a missing one, never like a valid
  * index with wrong contents. */
 static void test_corruption_is_a_miss(void)
@@ -342,14 +396,124 @@ static void test_alignment_and_bounds(void)
 	searchindex_builder_free(empty);
 }
 
+/* A tampered file can claim field lengths larger than the fields they are
+ * copied into. The crc does not help - anyone editing the file can recompute
+ * it - so the lengths must be checked against their destinations. */
+static void test_oversized_lengths_rejected(void)
+{
+	collection_item c = playlist_of("Small", 1);
+	track_page page;
+	memset(&page, 0, sizeof page);
+	page.collection = c;
+	page.total = 1;
+	page.count = 1;
+	page.items[0] = item(0, "AAAA", "BB", "CC", "");
+
+	searchindex_builder *b = searchindex_builder_new(&c, "snap", 1);
+	unsigned char       *blob = NULL;
+	size_t               len = 0;
+	assert(b && searchindex_builder_add_page(b, &page));
+	assert(searchindex_builder_finish(b, &blob, &len));
+	searchindex_builder_free(b);
+
+	/* Room behind the claimed lengths, so only the field bound can reject. */
+	const size_t big_len = len + 512;
+	unsigned char *big = calloc(1, big_len);
+	assert(big);
+	memcpy(big, blob, len);
+	memset(big + len, 'Z', 512);
+	free(blob);
+
+	const size_t hdr = 96, rec = 96;
+	uint32_t plen = (uint32_t)(big_len - hdr);
+	memcpy(big + 80, &plen, 4);
+
+	/* name_len at record offset 4; 200 overflows track_item.name[128]. */
+	big[rec + 4] = 200;
+	repair_crc(big, big_len);
+
+	searchindex *ix = searchindex_open(big, big_len);
+	if (ix) {
+		/* Opening may succeed - the walk is what must refuse. */
+		track_search_results r;
+		track_search_results_init(&r);
+		assert(!searchindex_search(ix, &c, "A", &r));
+		assert(r.count == 0);
+		track_search_results_free(&r);
+		searchindex_free(ix);
+	} else {
+		free(big);
+	}
+}
+
+/* The format is read off an SD card, so it has to survive arbitrary damage.
+ * Mutating a known-good blob and repairing the crc half the time exercises
+ * both the cheap header checks and the per-record validation behind them;
+ * the point is that nothing here may read outside the blob. Run under the
+ * address and undefined sanitizers, which is what actually catches it. */
+static void test_fuzz_corrupt_blobs(void)
+{
+	collection_item c = playlist_of("Fuzz", 8);
+	track_page page;
+	memset(&page, 0, sizeof page);
+	page.collection = c;
+	page.total = 8;
+	page.count = 8;
+	char art[41];
+	for (int i = 0; i < 8; i++) {
+		char full[64];
+		snprintf(full, sizeof full, "%s%s", ART_SCDN, hex40(i, art));
+		page.items[i] = item(i, "Song", "Artist", "Album", full);
+	}
+
+	searchindex_builder *b = searchindex_builder_new(&c, "snap", 8);
+	unsigned char       *good = NULL;
+	size_t               len = 0;
+	assert(b && searchindex_builder_add_page(b, &page));
+	assert(searchindex_builder_finish(b, &good, &len));
+	searchindex_builder_free(b);
+
+	unsigned rng = 12345;
+	for (int iter = 0; iter < 4000; iter++) {
+		unsigned char *copy = malloc(len);
+		assert(copy);
+		memcpy(copy, good, len);
+		const int muts = 1 + (int)((rng = rng * 1103515245u + 12345u) >> 8) % 4;
+		for (int m = 0; m < muts; m++) {
+			rng = rng * 1103515245u + 12345u;
+			const size_t off = (rng >> 8) % len;
+			rng = rng * 1103515245u + 12345u;
+			copy[off] = (unsigned char)((rng >> 8) & 0xFF);
+		}
+		rng = rng * 1103515245u + 12345u;
+		if ((rng >> 8) & 1)
+			repair_crc(copy, len);
+
+		searchindex *ix = searchindex_open(copy, len);
+		if (!ix) {
+			free(copy);
+			continue;
+		}
+		track_search_results r;
+		track_search_results_init(&r);
+		searchindex_search(ix, &c, "song", &r);
+		track_search_results_free(&r);
+		searchindex_free(ix);
+	}
+	free(good);
+}
+
 int main(void)
 {
 	test_round_trip();
 	test_equivalence_with_live_scan();
 	test_album_collection();
+	test_empty_album_on_playlist();
 	test_corruption_is_a_miss();
 	test_alignment_and_bounds();
-	puts("search index: round-trip, live equivalence, albums, corruption, and "
-	     "alignment passed");
+	test_oversized_lengths_rejected();
+	test_fuzz_corrupt_blobs();
+	puts("search index: round-trip, live equivalence, albums, tamper, fuzz, "
+	     "and alignment passed");
 	return 0;
 }

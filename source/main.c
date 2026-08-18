@@ -144,6 +144,13 @@ static float search_hold_progress(const touch_state *t, int button_id)
  * view is on screen at a time. */
 static bool                  g_search_popover;
 
+/* The shelf tile a long press just fired on, shown for a moment afterwards:
+ * a tap opens a collection and a hold plays it, so without a beat saying which
+ * happened the tile just returns to normal and the two look the same. */
+static int                   g_shelf_fired = -1;
+static u64                   g_shelf_fired_until;
+#define SHELF_FIRED_MS 550
+
 /* Assemble the panel's args from the store. Returns false when there is
  * nothing to show, which is also the signal not to draw it at all. */
 static bool search_popover_fill(search_popover_args *out, C2D_TextBuf buf,
@@ -1018,6 +1025,8 @@ int main(int argc, char **argv)
 	int      cache_probe_first_scanned = 0;
 	u64      cache_probe_started = 0;
 	u64      persist_wait_started = 0;
+	u64      shelf_probe_at = 0;
+	bool     shelf_probe_alive = false;
 	bool     deletable_reported = false;
 	bool     cache_probe_saw_network = false;
 
@@ -1068,6 +1077,10 @@ int main(int argc, char **argv)
 		 * user was actually looking at when they touched. */
 		touch_update(&touch, g_tb.rects, g_tb.n);
 		tb_reset(&g_tb);
+		/* Lapses on its own wherever the user is: tied to the player's draw
+		 * it would stay set for good the moment they left that screen. */
+		if (g_shelf_fired >= 0 && osGetTime() >= g_shelf_fired_until)
+			g_shelf_fired = -1;
 		worker_get(&snap);
 		if (snap.have_state &&
 		    strcmp(g_seen_device, snap.state.device_id) != 0) {
@@ -1918,6 +1931,8 @@ int main(int argc, char **argv)
 				tl_log("shelf: long-play %s", rl->items[idx].context_uri);
 				worker_play_context(rl->items[idx].context_uri);
 				opt_set(&g_opt_play, 1);
+				g_shelf_fired = idx;
+				g_shelf_fired_until = osGetTime() + SHELF_FIRED_MS;
 			}
 		}
 
@@ -2960,6 +2975,20 @@ int main(int argc, char **argv)
 			if (pop_open)
 				search_popover_draw(&pop);
 		} else {
+				/* Only while the finger is still down and has not
+				 * wandered: a hold that turned into a drag is a scroll, not a
+				 * press, and its ring should go with it. */
+				int   hold_tile = -1;
+				float hold_progress = 0.0f;
+				if (touch.down && !touch.dragging &&
+				    touch.press_id >= BTN_SHELF0 &&
+				    touch.press_id < BTN_SHELF0 + SHELF_TILES) {
+					hold_tile = touch.press_id - BTN_SHELF0;
+					hold_progress = (float)(osGetTime() - touch.press_at) /
+					                (float)TOUCH_LONG_PRESS_MS;
+					if (hold_progress > 1.0f)
+						hold_progress = 1.0f;
+				}
 				screen_player_args pa = {
 				.buf         = textbuf,
 				.tb          = &g_tb,
@@ -2971,6 +3000,9 @@ int main(int argc, char **argv)
 				.progress_ms = progress,
 				.duration_ms = duration,
 				.pressed_id  = touch.down ? touch.press_id : -1,
+				.hold_tile   = hold_tile,
+				.hold_progress = hold_progress,
+				.fired_tile  = g_shelf_fired,
 				.scrubbing   = g_scrub == SCRUB_DRAGGING,
 				.animation_ms = (unsigned)osGetTime(),
 			};
@@ -3054,6 +3086,26 @@ int main(int argc, char **argv)
 		 * the overflow without a word, so a panel that is drawn but untappable
 		 * is the failure to watch for, and counting is the only way to see it
 		 * coming. */
+		/* The confirmation has to outlive the frame that set it and then go
+		 * away on its own. Checking it is still up shortly after, and gone
+		 * once the window has passed, covers both halves - either alone
+		 * passes with the duration set to nothing. The ring itself needs a
+		 * finger held on the tile, which the harness cannot synthesise, so
+		 * that one is checked by eye. */
+		if (g_smoketest && frames == 660) {
+			g_shelf_fired = 0;
+			g_shelf_fired_until = osGetTime() + SHELF_FIRED_MS;
+			shelf_probe_at = osGetTime();
+		} else if (g_smoketest && frames == 666) {
+			shelf_probe_alive = g_shelf_fired == 0 &&
+			                    osGetTime() - shelf_probe_at < SHELF_FIRED_MS;
+		} else if (g_smoketest && frames == 700) {
+			tl_step("shelf_hold_fired",
+			        shelf_probe_alive && g_shelf_fired < 0,
+			        "held after 6 frames=%d, cleared by 40=%d",
+			        (int)shelf_probe_alive, (int)(g_shelf_fired < 0));
+		}
+
 		if (g_smoketest && frames == 706) {
 			/* Every row, CLEAR, TYPE INSTEAD and the dismiss catcher. A
 			 * count that merely fits is not enough - the header's own buttons

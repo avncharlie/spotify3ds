@@ -45,6 +45,13 @@ typedef struct {
 	/* Which control the finger is currently down on, or -1. Used only to give
 	 * a pressed appearance. */
 	int  pressed_id;
+	/* Which shelf tile is being held and how far, so the hold can show its
+	 * own progress; -1 when nothing is. */
+	int   hold_tile;
+	float hold_progress;
+	/* The tile that just fired, held on screen for a beat so the hold can
+	 * say what it did. */
+	int   fired_tile;
 	bool scrubbing;
 
 	/* Shelf art, NULL where not yet loaded. */

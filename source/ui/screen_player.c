@@ -283,6 +283,72 @@ static void draw_playpause(float cx, float cy, bool playing, bool pressed)
  *
  * Centred by measuring the group rather than by hardcoded offsets, so it stays
  * centred when the label size changes - which it already has twice. */
+/* A stroke closing a loop around the tile as it is held, the same idea as the
+ * ring on the search button and in the same green. It runs clockwise from the
+ * top-left corner, which is what makes a partial one read as unfinished - a
+ * partly-filled shape just looks like a different shape.
+ *
+ * Nothing is drawn inside the tile, so the artwork stays visible throughout. */
+static void draw_hold_ring(float x, float y, float progress)
+{
+	if (progress <= 0.15f)
+		return; /* every ordinary tap passes through the start of the hold */
+	if (progress > 1.0f)
+		progress = 1.0f;
+	const float swept = (progress - 0.15f) / 0.85f;
+
+	const float t = 3.0f;
+	const float in = t / 2.0f;
+	const float l = x + in, r = x + TILE - in;
+	const float top = y + in, bot = y + TILE - in;
+	const float side = r - l;
+	/* One continuous run around the edge, measured in pixels so each side
+	 * takes the time its length deserves. */
+	float drawn = swept * 4.0f * side;
+
+	/* Corners are squared off by overdrawing half a stroke at each end,
+	 * which is cheaper than mitring four separate segments. */
+	if (drawn > 0.0f) {
+		const float d = drawn < side ? drawn : side;
+		C2D_DrawRectSolid(l - in, top - in, 0.0f, d + t, t, CLR_GREEN);
+		drawn -= d;
+	}
+	if (drawn > 0.0f) {
+		const float d = drawn < side ? drawn : side;
+		C2D_DrawRectSolid(r - in, top - in, 0.0f, t, d + t, CLR_GREEN);
+		drawn -= d;
+	}
+	if (drawn > 0.0f) {
+		const float d = drawn < side ? drawn : side;
+		C2D_DrawRectSolid(r - in - d, bot - in, 0.0f, d + t, t, CLR_GREEN);
+		drawn -= d;
+	}
+	if (drawn > 0.0f) {
+		const float d = drawn < side ? drawn : side;
+		C2D_DrawRectSolid(l - in, bot - in - d, 0.0f, t, d + t, CLR_GREEN);
+	}
+}
+
+/* The beat after the loop closes: a dimmed tile behind a play triangle, so the
+ * hold says what it did. A tap opens the collection and a hold plays it, and
+ * without this the tile simply returns to normal and the two are
+ * indistinguishable. */
+static void draw_hold_fired(float x, float y)
+{
+	C2D_DrawRectSolid(x, y, 0.0f, TILE, TILE, C2D_Color32(0, 0, 0, 0x88));
+	const float t = 3.0f;
+	C2D_DrawRectSolid(x + t / 2.0f, y + t / 2.0f, 0.0f, TILE - t, t, CLR_GREEN);
+	C2D_DrawRectSolid(x + t / 2.0f, y + TILE - t - t / 2.0f, 0.0f, TILE - t, t,
+	                  CLR_GREEN);
+	C2D_DrawRectSolid(x + t / 2.0f, y + t / 2.0f, 0.0f, t, TILE - t, CLR_GREEN);
+	C2D_DrawRectSolid(x + TILE - t - t / 2.0f, y + t / 2.0f, 0.0f, t, TILE - t,
+	                  CLR_GREEN);
+
+	const float cx = x + TILE / 2.0f, cy = y + TILE / 2.0f;
+	C2D_DrawTriangle(cx - 7.0f, cy - 9.0f, CLR_WHITE, cx - 7.0f, cy + 9.0f,
+	                 CLR_WHITE, cx + 9.0f, cy, CLR_WHITE, 0.0f);
+}
+
 static void draw_all_tile(C2D_TextBuf buf, float x, float y, bool pressed)
 {
 	C2D_DrawRectSolid(x, y, 0.0f, TILE, TILE,
@@ -379,7 +445,13 @@ void screen_player_draw(const screen_player_args *a)
 		if (a->shelf_current[i])
 			ui_now_playing_badge(x, SHELF_Y, TILE, a->playing,
 			                     a->animation_ms);
-		tb_add(a->tb, x, SHELF_Y, TILE, TILE, BTN_SHELF0 + i);
+		if (a->fired_tile == i)
+			draw_hold_fired(x, SHELF_Y);
+		else if (a->hold_tile == i)
+			draw_hold_ring(x, SHELF_Y, a->hold_progress);
+		/* Holds to play the collection, so a slow release must still open it
+		 * rather than falling into the gap before the long press fires. */
+		tb_add_hold(a->tb, x, SHELF_Y, TILE, TILE, BTN_SHELF0 + i);
 	}
 
 	const float all_x =

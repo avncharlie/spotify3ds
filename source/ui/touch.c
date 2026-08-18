@@ -13,13 +13,32 @@ void tb_add(touch_builder *tb, float x, float y, float w, float h, int id)
 	if (tb->n >= TOUCH_MAX_RECTS)
 		return; /* silently drop rather than corrupt: a missing hit area is a
 		         * far milder failure than an overrun */
-	tb->rects[tb->n++] = (touch_rect){x, y, w, h, id};
+	tb->rects[tb->n++] = (touch_rect){x, y, w, h, id, false};
+}
+
+void tb_add_hold(touch_builder *tb, float x, float y, float w, float h, int id)
+{
+	if (tb->n >= TOUCH_MAX_RECTS)
+		return;
+	tb->rects[tb->n++] = (touch_rect){x, y, w, h, id, true};
 }
 
 void tb_add_hit(touch_builder *tb, float cx, float cy, float min_size, int id)
 {
 	const float s = min_size < 44.0f ? 44.0f : min_size;
 	tb_add(tb, cx - s / 2.0f, cy - s / 2.0f, s, s, id);
+}
+
+static const touch_rect *rect_at(const touch_rect *rects, int nrects, int x,
+	                             int y)
+{
+	for (int i = 0; i < nrects; i++) {
+		const touch_rect *r = &rects[i];
+		if ((float)x >= r->x && (float)x < r->x + r->w && (float)y >= r->y &&
+		    (float)y < r->y + r->h)
+			return r;
+	}
+	return NULL;
 }
 
 int touch_hit(const touch_rect *rects, int nrects, int x, int y)
@@ -70,7 +89,9 @@ void touch_update(touch_state *t, const touch_rect *rects, int nrects)
 		t->long_fired = false;
 		t->start_px = t->px;
 		t->start_py = t->py;
-		t->press_id = touch_hit(rects, nrects, t->px, t->py);
+		const touch_rect *pr = rect_at(rects, nrects, t->px, t->py);
+		t->press_id = pr ? pr->id : -1;
+		t->press_hold = pr && pr->hold;
 	}
 
 	if (down && !t->dragging) {
@@ -81,8 +102,14 @@ void touch_update(touch_state *t, const touch_rect *rects, int nrects)
 	}
 
 	/* A held finger is usually waiting to scroll, not asking to activate a row.
-	 * Keep drag detection alive, but disarm the eventual release as a tap. */
-	if (down && osGetTime() - t->press_at > TOUCH_TAP_TIMEOUT_MS)
+	 * Keep drag detection alive, but disarm the eventual release as a tap.
+	 *
+	 * Not for a rect that answers a hold, though: there is no scroll gesture
+	 * on a button for a slow release to be mistaken for, and disarming it
+	 * would leave every release between this timeout and the long press doing
+	 * nothing whatsoever. */
+	if (down && !t->press_hold &&
+	    osGetTime() - t->press_at > TOUCH_TAP_TIMEOUT_MS)
 		t->tap_cancelled = true;
 
 	if (down && !t->dragging && !t->long_fired && t->press_id >= 0 &&
@@ -107,5 +134,6 @@ void touch_update(touch_state *t, const touch_rect *rects, int nrects)
 		}
 
 		t->press_id = -1;
+		t->press_hold = false;
 	}
 }

@@ -564,7 +564,9 @@ void screen_list_draw(const screen_list_args *a)
 
 	/* Generous hit area: the arrow itself is small. */
 	tb_add(a->tb, 0.0f, 0.0f, 90.0f, LIST_HEADER_H, LIST_BTN_BACK);
-	tb_add(a->tb, 280.0f, 0.0f, 40.0f, LIST_HEADER_H, LIST_BTN_FIND);
+	/* Holds to offer recent searches, so a slow release must still open the
+	 * keyboard rather than falling into the gap before the long press. */
+	tb_add_hold(a->tb, 280.0f, 0.0f, 40.0f, LIST_HEADER_H, LIST_BTN_FIND);
 
 	ui_progress_bar(a->elapsed_ms, a->duration_ms);
 }

@@ -423,7 +423,8 @@ void screen_tracks_draw(const screen_tracks_args *a)
 	ui_disc(300, 13, 4, CLR_ACTION);
 	ui_disc(300, 13, 2, search_bg);
 	C2D_DrawLine(303, 16, CLR_ACTION, 307, 20, CLR_ACTION, 2, 0);
-	tb_add(a->tb, 280, 0, 40, HEADER_H, TRACK_BTN_SEARCH);
+	/* See the Library header: holding offers recent searches. */
+	tb_add_hold(a->tb, 280, 0, 40, HEADER_H, TRACK_BTN_SEARCH);
 
 	ui_progress_bar(a->elapsed_ms, a->duration_ms);
 }

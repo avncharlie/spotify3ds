@@ -19,6 +19,10 @@
 typedef struct {
 	float x, y, w, h;
 	int   id;
+	/* A control that answers a hold differently from a tap. See tb_add_hold:
+	 * it changes when a slow release still counts as a tap, which is wrong
+	 * for a list row and right for a button. */
+	bool  hold;
 } touch_rect;
 
 /* Hit rects are rebuilt every frame rather than held in a static table,
@@ -34,6 +38,17 @@ typedef struct {
 
 void tb_reset(touch_builder *tb);
 void tb_add(touch_builder *tb, float x, float y, float w, float h, int id);
+
+/* Register a control that distinguishes a hold from a tap.
+ *
+ * An ordinary rect stops counting as a tap after TOUCH_TAP_TIMEOUT_MS, because
+ * a finger resting on a list row is usually about to scroll rather than asking
+ * to open the row. A button has no such gesture to be confused with, so a slow
+ * release should still press it - and without that, releasing between the tap
+ * timeout and TOUCH_LONG_PRESS_MS does nothing at all, which reads as the
+ * button being broken. */
+void tb_add_hold(touch_builder *tb, float x, float y, float w, float h,
+                 int id);
 
 /* Centre-anchored rect, padded out to at least 44x44 whatever the glyph size.
  *
@@ -64,6 +79,8 @@ typedef struct {
 	bool tap_cancelled;          /* held too long to still count as a tap */
 	bool long_fired;             /* long press already emitted for this hold */
 	int  press_id; /* rect the press started in, or -1 */
+	bool press_hold; /* that rect's `hold`, latched so a moving finger cannot
+	                  * change the rules mid-press */
 	int  clicked;  /* rect activated this frame, or -1 */
 	int  long_pressed; /* stationary rect held for TOUCH_LONG_PRESS_MS */
 } touch_state;

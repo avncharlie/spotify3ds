@@ -7,6 +7,7 @@
 int track_search_match_quality_n(const char *text, size_t textlen,
 	                             const char *query, size_t querylen)
 {
+	// return 3 for exact match, 2 for query is prefixed, 1 for text contains query
 	if (!text || !query || !querylen || querylen > textlen)
 		return 0;
 	/* `textlen - querylen` cannot underflow after that guard, so the loop
@@ -32,6 +33,7 @@ int track_search_rank_fields(const char *name, size_t namelen,
 	                         const char *query, size_t querylen,
 	                         bool match_album)
 {
+	// score search first on matching tracks, then artists, then albums
 	int quality = track_search_match_quality_n(name, namelen, query, querylen);
 	if (quality)
 		return 3 - quality;

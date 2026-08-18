@@ -48,6 +48,8 @@ typedef struct {
 
 	float scroll;     /* pixels scrolled down */
 	int   pressed_id; /* control under the finger, or -1 */
+	/* 0..1 of the way to a long press on the search disc; 0 draws nothing. */
+	float hold_progress;
 	int   armed_id;   /* row awaiting PLAY confirmation, or -1 */
 } screen_list_args;
 

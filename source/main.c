@@ -128,6 +128,17 @@ static int                   g_tracks_armed = -1;
 static int                   g_tracks_cursor = -1;
 static u64                   g_tracks_arm_until;
 static unsigned              g_tracks_applied_generation;
+/* How far a hold on the search disc has got, 0..1. Derived rather than
+ * stored: the ring vanishes on its own the frame the finger lifts. */
+static float search_hold_progress(const touch_state *t, int button_id)
+{
+	if (!t->down || t->dragging || t->press_id != button_id)
+		return 0.0f;
+	const float held = (float)(osGetTime() - t->press_at);
+	const float p = held / (float)TOUCH_LONG_PRESS_MS;
+	return p > 1.0f ? 1.0f : p;
+}
+
 static bool                  g_track_search_mode;
 static char                  g_track_search_query[TRACK_SEARCH_QUERY_MAX + 1];
 static worker_track_search_status g_track_search_status;
@@ -2745,6 +2756,7 @@ int main(int argc, char **argv)
 				.duration_ms = duration,
 				.scroll     = g_list_scroll,
 				.pressed_id = touch.down ? touch.press_id : -1,
+				.hold_progress = search_hold_progress(&touch, LIST_BTN_FIND),
 				.armed_id   = g_list_armed,
 			};
 			screen_list_draw(&la);
@@ -2795,6 +2807,8 @@ int main(int argc, char **argv)
 				.no_matches = no_matches,
 				.scroll = g_tracks_scroll,
 				.pressed_id = touch.down ? touch.press_id : -1,
+				.hold_progress =
+				    search_hold_progress(&touch, TRACK_BTN_SEARCH),
 				.armed_id = g_tracks_armed,
 			};
 			screen_tracks_draw(&ta);

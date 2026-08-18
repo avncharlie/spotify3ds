@@ -41,6 +41,8 @@ typedef struct {
 	bool             no_matches;
 	float            scroll;
 	int              pressed_id;
+	/* 0..1 of the way to a long press on the search disc; 0 draws nothing. */
+	float         hold_progress;
 	int              armed_id;
 } screen_tracks_args;
 

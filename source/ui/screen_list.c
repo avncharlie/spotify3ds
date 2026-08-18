@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "thumbs.h"
+#include "search_popover.h"
 #include "ui.h"
 
 #define BOT_W 320.0f
@@ -561,12 +562,11 @@ void screen_list_draw(const screen_list_args *a)
 	ui_disc(300, 13, 4, CLR_ACTION);
 	ui_disc(300, 13, 2, find_bg);
 	C2D_DrawLine(303, 16, CLR_ACTION, 307, 20, CLR_ACTION, 2, 0);
+	search_popover_draw_ring(302.0f, 15.0f, a->hold_progress);
 
 	/* Generous hit area: the arrow itself is small. */
 	tb_add(a->tb, 0.0f, 0.0f, 90.0f, LIST_HEADER_H, LIST_BTN_BACK);
-	/* Holds to offer recent searches, so a slow release must still open the
-	 * keyboard rather than falling into the gap before the long press. */
-	tb_add_hold(a->tb, 280.0f, 0.0f, 40.0f, LIST_HEADER_H, LIST_BTN_FIND);
+	tb_add(a->tb, 280.0f, 0.0f, 40.0f, LIST_HEADER_H, LIST_BTN_FIND);
 
 	ui_progress_bar(a->elapsed_ms, a->duration_ms);
 }

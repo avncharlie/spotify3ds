@@ -4,40 +4,53 @@
 #include <stdlib.h>
 #include <string.h>
 
-static int match_quality(const char *text, const char *query)
+int track_search_match_quality_n(const char *text, size_t textlen,
+	                             const char *query, size_t querylen)
 {
-	if (!text || !query || !query[0])
+	if (!text || !query || !querylen || querylen > textlen)
 		return 0;
-	const size_t query_len = strlen(query);
-	for (const char *at = text; *at; at++) {
+	/* `textlen - querylen` cannot underflow after that guard, so the loop
+	 * stops before the tail that is too short to hold a match. */
+	for (size_t at = 0; at <= textlen - querylen; at++) {
 		size_t i = 0;
-		while (i < query_len && at[i] &&
-		       tolower((unsigned char)at[i]) ==
+		while (i < querylen &&
+		       tolower((unsigned char)text[at + i]) ==
 		           tolower((unsigned char)query[i]))
 			i++;
-		if (i != query_len)
+		if (i != querylen)
 			continue;
-		const bool exact = at == text && at[i] == '\0';
-		if (exact)
-			return 3;
-		if (at == text)
-			return 2;
+		if (at == 0)
+			return at + querylen == textlen ? 3 : 2;
 		return 1;
 	}
 	return 0;
 }
 
+int track_search_rank_fields(const char *name, size_t namelen,
+	                         const char *artist, size_t artistlen,
+	                         const char *album, size_t albumlen,
+	                         const char *query, size_t querylen,
+	                         bool match_album)
+{
+	int quality = track_search_match_quality_n(name, namelen, query, querylen);
+	if (quality)
+		return 3 - quality;
+	quality = track_search_match_quality_n(artist, artistlen, query, querylen);
+	if (quality)
+		return 6 - quality;
+	quality = match_album ? track_search_match_quality_n(album, albumlen, query,
+	                                                     querylen)
+	                      : 0;
+	return quality ? 9 - quality : -1;
+}
+
 static int hit_rank(const track_item *item, const char *query,
 	                bool match_album)
 {
-	int quality = match_quality(item->name, query);
-	if (quality)
-		return 3 - quality;
-	quality = match_quality(item->artist, query);
-	if (quality)
-		return 6 - quality;
-	quality = match_album ? match_quality(item->album, query) : 0;
-	return quality ? 9 - quality : -1;
+	return track_search_rank_fields(item->name, strlen(item->name),
+	                                item->artist, strlen(item->artist),
+	                                item->album, strlen(item->album), query,
+	                                strlen(query), match_album);
 }
 
 static bool better(const track_search_hit *a, const track_search_hit *b)
@@ -129,6 +142,33 @@ bool track_search_results_copy(track_search_results *dst,
 	return true;
 }
 
+bool track_search_consider_hit(track_search_results *results,
+	                           const track_item *item, int rank)
+{
+	if (!results || !item || rank < 0)
+		return false;
+	results->matched_total++;
+	track_search_hit hit = {.item = *item, .rank = (unsigned char)rank};
+	if (results->count < TRACK_SEARCH_RESULTS_MAX) {
+		if (!results->hits) {
+			results->hits =
+			    malloc(TRACK_SEARCH_RESULTS_MAX * sizeof *results->hits);
+			if (!results->hits) {
+				results->matched_total--;
+				return false;
+			}
+		}
+		results->hits[results->count] = hit;
+		heap_up(results->hits, results->count);
+		results->count++;
+	} else if (better(&hit, &results->hits[0])) {
+		results->hits[0] = hit;
+		heap_down(results->hits, results->count, 0);
+	}
+	results->truncated = results->matched_total > results->count;
+	return true;
+}
+
 bool track_search_consider_page(track_search_results *results,
 	                            const track_page *page, const char *query,
 	                            bool match_album)
@@ -144,22 +184,8 @@ bool track_search_consider_page(track_search_results *results,
 		const int rank = hit_rank(item, query, match_album);
 		if (rank < 0)
 			continue;
-		results->matched_total++;
-		track_search_hit hit = {.item = *item, .rank = (unsigned char)rank};
-		if (results->count < TRACK_SEARCH_RESULTS_MAX) {
-			if (!results->hits) {
-				results->hits = malloc(TRACK_SEARCH_RESULTS_MAX *
-				                       sizeof *results->hits);
-				if (!results->hits)
-					return false;
-			}
-			results->hits[results->count] = hit;
-			heap_up(results->hits, results->count);
-			results->count++;
-		} else if (better(&hit, &results->hits[0])) {
-			results->hits[0] = hit;
-			heap_down(results->hits, results->count, 0);
-		}
+		if (!track_search_consider_hit(results, item, rank))
+			return false;
 	}
 	results->truncated = results->matched_total > results->count;
 	return true;

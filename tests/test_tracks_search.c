@@ -142,11 +142,44 @@ static void test_partial_snapshot(void)
 	track_search_results_free(&empty_copy);
 }
 
+/* The cached index stores text packed without terminators, so the matcher must
+ * honour the length it is given rather than scanning to a NUL. Getting this
+ * wrong would let a warm cache rank differently from a live scan. */
+static void test_length_bounded_matching(void)
+{
+	const char buf[] = "loveXXXX";
+	/* Bounded to "love", so it is an exact match despite the trailing bytes. */
+	assert(track_search_match_quality_n(buf, 4, "love", 4) == 3);
+	/* Must not read past the bound to find the 'X'. */
+	assert(track_search_match_quality_n(buf, 4, "lovex", 5) == 0);
+	/* Prefix and interior still grade as they do for whole strings. */
+	assert(track_search_match_quality_n(buf, 8, "love", 4) == 2);
+	assert(track_search_match_quality_n("a love song", 11, "love", 4) == 1);
+	/* Degenerate inputs. */
+	assert(track_search_match_quality_n("ab", 2, "abc", 3) == 0);
+	assert(track_search_match_quality_n("", 0, "a", 1) == 0);
+	assert(track_search_match_quality_n("ab", 2, "", 0) == 0);
+	assert(track_search_match_quality_n(NULL, 0, "a", 1) == 0);
+
+	/* Field ranking: name beats artist beats album, and album is skipped
+	 * for album collections. */
+	assert(track_search_rank_fields("Love", 4, "X", 1, "Y", 1, "love", 4,
+	                                true) == 0);
+	assert(track_search_rank_fields("X", 1, "Love", 4, "Y", 1, "love", 4,
+	                                true) == 3);
+	assert(track_search_rank_fields("X", 1, "Y", 1, "Love", 4, "love", 4,
+	                                true) == 6);
+	assert(track_search_rank_fields("X", 1, "Y", 1, "Love", 4, "love", 4,
+	                                false) == -1);
+}
+
 int main(void)
 {
 	test_ranking();
 	test_cap_move_and_page();
 	test_partial_snapshot();
-	puts("track search: ranking, cap, move, snapshot, and pagination passed");
+	test_length_bounded_matching();
+	puts("track search: ranking, cap, move, snapshot, bounds, and pagination "
+	     "passed");
 	return 0;
 }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 
 #include "tracks.h"
 
@@ -35,6 +36,29 @@ bool track_search_results_copy(track_search_results *dst,
 bool track_search_consider_page(track_search_results *results,
                                 const track_page *page, const char *query,
                                 bool match_album);
+
+/* --- matching, length-bounded ------------------------------------------
+ * A cached index stores text packed without terminators, so these take
+ * explicit lengths. The NUL-terminated paths above are written on top of
+ * them: both callers must rank identically, or a warm cache would quietly
+ * disagree with a live scan. */
+
+/* 3 exact, 2 prefix, 1 interior, 0 no match. Case-insensitive. */
+int track_search_match_quality_n(const char *text, size_t textlen,
+                                 const char *query, size_t querylen);
+
+/* Rank one candidate from already-split fields: 0-2 name, 3-5 artist,
+ * 6-8 album, -1 for no match at all. */
+int track_search_rank_fields(const char *name, size_t namelen,
+                             const char *artist, size_t artistlen,
+                             const char *album, size_t albumlen,
+                             const char *query, size_t querylen,
+                             bool match_album);
+
+/* Offer one already-ranked item to the retained set. Keeps the cap, the
+ * tie-break and the `truncated` accounting in one place. */
+bool track_search_consider_hit(track_search_results *results,
+                               const track_item *item, int rank);
 
 /* Convert the retained worst-first heap into display order. */
 void track_search_finalize(track_search_results *results);

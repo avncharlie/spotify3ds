@@ -353,10 +353,16 @@ bool searchindex_builder_finish(searchindex_builder *b, unsigned char **out,
 	hdr.item_total = (uint32_t)(b->item_total > 0 ? b->item_total : b->count);
 	hdr.record_count = (uint32_t)b->count;
 	hdr.payload_len = (uint32_t)b->len;
-	hdr.crc32 = crc32_of(b->buf, b->len);
+	hdr.crc32 = 0;
 
+	/* Cover the header as well as the payload. Leaving it out would let the
+	 * snapshot id - the field the whole freshness check rests on - be altered
+	 * without detection, turning a damaged entry into a valid-looking index
+	 * that claims the wrong version of the playlist. */
 	memcpy(blob, &hdr, sizeof hdr);
 	memcpy(blob + sizeof hdr, b->buf, b->len);
+	hdr.crc32 = crc32_of(blob, total);
+	memcpy(blob, &hdr, sizeof hdr);
 	*out = blob;
 	*outlen = total;
 	return true;
@@ -376,7 +382,17 @@ searchindex *searchindex_open(unsigned char *blob, size_t len)
 		return NULL;
 	if (hdr.record_count == 0 || hdr.record_count > SEARCHINDEX_TRACKS_MAX)
 		return NULL;
-	if (crc32_of(blob + sizeof hdr, hdr.payload_len) != hdr.crc32)
+	/* Recompute over the whole blob with the crc field zeroed, matching how
+	 * it was written. */
+	const uint32_t want_crc = hdr.crc32;
+	searchindex_hdr probe = hdr;
+	probe.crc32 = 0;
+	unsigned char saved[sizeof(searchindex_hdr)];
+	memcpy(saved, blob, sizeof saved);
+	memcpy(blob, &probe, sizeof probe);
+	const uint32_t got_crc = crc32_of(blob, len);
+	memcpy(blob, saved, sizeof saved);
+	if (got_crc != want_crc)
 		return NULL;
 
 	searchindex *ix = calloc(1, sizeof *ix);
@@ -403,6 +419,11 @@ void searchindex_free(searchindex *ix)
 const char *searchindex_snapshot(const searchindex *ix)
 {
 	return ix ? ix->snapshot : "";
+}
+
+const unsigned char *searchindex_blob(const searchindex *ix)
+{
+	return ix ? ix->blob : NULL;
 }
 
 int searchindex_count(const searchindex *ix) { return ix ? ix->count : 0; }

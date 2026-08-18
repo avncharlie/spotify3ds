@@ -26,7 +26,7 @@
  * tie-break between equally ranked hits.
  */
 
-#define SEARCHINDEX_VERSION 1
+#define SEARCHINDEX_VERSION 2
 
 /* A playlist beyond this cannot be indexed: source_index is stored as u16 and
  * a wrap would silently corrupt the tie-break order. Spotify's own ceiling is
@@ -67,6 +67,9 @@ searchindex *searchindex_open(unsigned char *blob, size_t len);
 void         searchindex_free(searchindex *index);
 
 const char *searchindex_snapshot(const searchindex *index);
+
+/* The bytes this index was opened from, for writing it back out. */
+const unsigned char *searchindex_blob(const searchindex *index);
 int         searchindex_count(const searchindex *index);
 size_t      searchindex_bytes(const searchindex *index);
 

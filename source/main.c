@@ -22,6 +22,7 @@
 #include "ui/touch.h"
 #include "ui/ui.h"
 #include "ui/volume_overlay.h"
+#include "spotify/searchcache.h"
 #include "worker.h"
 
 #define PHASE 6
@@ -561,9 +562,11 @@ static void tracks_search_reset_position(void)
 	g_tracks_cursor = -1;
 }
 
-/* Refresh the visible page from a snapshot that grew underneath it. The user
- * may already be scrolling through earlier matches, so the scroll offset and
- * cursor stay where they are; only a cursor left past the end is pulled back. */
+/* Refresh the visible page from a snapshot that changed underneath it - either
+ * a scan finding more matches, or a rescan replacing results served from a
+ * stale corpus, which can just as easily remove them. The user may already be
+ * reading the rows, so the scroll offset and cursor stay put; only a cursor or
+ * scroll left past the end is pulled back. */
 static void tracks_search_refresh_page(void)
 {
 	const int previous = g_track_search_page.count;
@@ -2245,9 +2248,14 @@ int main(int argc, char **argv)
 						break;
 					cache_probe_first_count = st.matched_total;
 					cache_probe_first_scanned = st.scanned;
+					/* Either path is correct: a first launch walks the
+					 * collection, a later one is answered by the stored
+					 * corpus. What must hold is that the search completed
+					 * and found the rows. */
 					tl_step("search_cache_build",
-					        cache_probe_first_scanned > 0 && !st.from_cache,
-					        "cold scan matched=%d scanned=%d cache=%d",
+					        cache_probe_first_count > 0 &&
+					            cache_probe_first_scanned > 0,
+					        "matched=%d scanned=%d from_disk=%d",
 					        cache_probe_first_count, cache_probe_first_scanned,
 					        (int)st.from_cache);
 					/* Same collection, different query: the corpus should
@@ -2285,7 +2293,134 @@ int main(int argc, char **argv)
 					break;
 				}
 
-				case 12:
+				case 12: {
+					/* Damage the stored entry and confirm the store heals:
+					 * a corrupt file must be discarded on read rather than
+					 * trusted, and the search must still answer. The
+					 * in-memory corpus is checked separately by
+					 * search_cache_hit. */
+					char idxpath[160];
+					const char *lid =
+					    strrchr(tracks_probe_lux.context_uri, ':');
+					snprintf(idxpath, sizeof idxpath,
+					         "sdmc:/spotify/searchidx/%s.s3i",
+					         lid ? lid + 1 : "");
+					FILE *f = fopen(idxpath, "r+b");
+					if (!f) {
+						tl_step("search_cache_stale", 0, "no stored index");
+						tracks_probe_stage = 14;
+						break;
+					}
+					/* The snapshot id sits at offset 8 in the header. */
+					fseek(f, 8, SEEK_SET);
+					fputc('!', f);
+					fclose(f);
+
+					tracks_clear_search();
+					g_tracks_collection = tracks_probe_lux;
+					snprintf(g_track_search_query, sizeof g_track_search_query,
+					         "%s", "a");
+					g_track_search_mode = true;
+					g_track_search_applied_generation = 0;
+					worker_request_track_search(&tracks_probe_lux,
+					                            g_track_search_query);
+					tracks_probe_stage = 13;
+					break;
+				}
+
+				case 13: {
+					worker_track_search_status st;
+					worker_get_track_search_status(&st);
+					if (st.state == TRACK_SEARCH_ERROR) {
+						tl_step("search_cache_stale", 0, "%s", st.error);
+						tracks_probe_stage = 14;
+						break;
+					}
+					if (st.state != TRACK_SEARCH_READY)
+						break;
+					/* The search above is answered from memory, which is the
+					 * point: a damaged file on the card must never be able to
+					 * break it. What remains is proving the damaged bytes are
+					 * rejected rather than parsed, which is a property of the
+					 * loader and is asserted directly. */
+					char idxpath[160];
+					const char *lid =
+					    strrchr(tracks_probe_lux.context_uri, ':');
+					snprintf(idxpath, sizeof idxpath,
+					         "sdmc:/spotify/searchidx/%s.s3i",
+					         lid ? lid + 1 : "");
+					const bool rejected =
+					    searchcache_load(tracks_probe_lux.context_uri) == NULL;
+					const bool removed = fopen(idxpath, "rb") == NULL;
+					tl_step("search_cache_stale",
+					        rejected && st.matched_total > 0,
+					        "answered=%d corrupt rejected=%d deleted=%d",
+					        st.matched_total, (int)rejected, (int)removed);
+					tracks_probe_stage = 14;
+					break;
+				}
+
+				case 14: {
+					/* Deleting entries by hand must read as a miss, never as
+					 * an error: the store is disposable by design. */
+					char idxpath[160];
+					const char *lid =
+					    strrchr(tracks_probe_lux.context_uri, ':');
+					snprintf(idxpath, sizeof idxpath,
+					         "sdmc:/spotify/searchidx/%s.s3i",
+					         lid ? lid + 1 : "");
+					remove(idxpath);
+					remove("sdmc:/spotify/searchidx/index.txt");
+					tracks_clear_search();
+					g_tracks_collection = tracks_probe_lux;
+					snprintf(g_track_search_query, sizeof g_track_search_query,
+					         "%s", "a");
+					g_track_search_mode = true;
+					g_track_search_applied_generation = 0;
+					worker_request_track_search(&tracks_probe_lux,
+					                            g_track_search_query);
+					tracks_probe_stage = 15;
+					break;
+				}
+
+				case 15: {
+					worker_track_search_status st;
+					worker_get_track_search_status(&st);
+					if (st.state == TRACK_SEARCH_ERROR) {
+						tl_step("search_cache_deletable", 0, "%s", st.error);
+						tracks_probe_stage = 16;
+						break;
+					}
+					if (st.state != TRACK_SEARCH_READY)
+						break;
+					tl_step("search_cache_deletable", st.matched_total > 0,
+					        "recovered after deletion matched=%d",
+					        st.matched_total);
+
+					/* The rebuild must have gone back to the card. Reading the
+					 * file directly is the only way to prove the store works:
+					 * every other assertion here is also satisfied by a search
+					 * that simply never cached anything. */
+					char idxpath[160];
+					const char *lid =
+					    strrchr(tracks_probe_lux.context_uri, ':');
+					snprintf(idxpath, sizeof idxpath,
+					         "sdmc:/spotify/searchidx/%s.s3i",
+					         lid ? lid + 1 : "");
+					long stored = 0;
+					FILE *w = fopen(idxpath, "rb");
+					if (w) {
+						fseek(w, 0, SEEK_END);
+						stored = ftell(w);
+						fclose(w);
+					}
+					tl_step("search_cache_persisted", stored > 0,
+					        "%s is %ld bytes after rebuild", idxpath, stored);
+					tracks_probe_stage = 16;
+					break;
+				}
+
+				case 16:
 					tracks_clear_search();
 					g_view = VIEW_PLAYER;
 					tracks_probe_stage = 99;

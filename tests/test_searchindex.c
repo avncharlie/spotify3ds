@@ -275,6 +275,20 @@ static void test_corruption_is_a_miss(void)
 	copy[4] = 0xFE;
 	assert(searchindex_open(copy, len) == NULL);
 
+	/* A corrupted header must be caught too. The snapshot id lives here and
+	 * is what the freshness check compares, so leaving the header outside the
+	 * crc would let a damaged entry pass as a valid index claiming the wrong
+	 * version of the playlist. */
+	for (size_t off = 4; off < 92; off += 7) {
+		memcpy(copy, good, len);
+		copy[off] ^= 0x40;
+		assert(searchindex_open(copy, len) == NULL);
+	}
+	/* Specifically the snapshot field at offset 8. */
+	memcpy(copy, good, len);
+	copy[8] = '!';
+	assert(searchindex_open(copy, len) == NULL);
+
 	/* Header only, and shorter than a header. */
 	memcpy(copy, good, len);
 	assert(searchindex_open(copy, 96) == NULL);

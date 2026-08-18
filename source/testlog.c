@@ -47,7 +47,12 @@ void tl_init(int phase)
 	 * a real card, and the previous session's lines are rarely what a problem
 	 * is diagnosed from - the current run is. The launch before this one is
 	 * kept alongside, since a fault that only shows up after a relaunch does
-	 * need both. */
+	 * need both, and never more than that.
+	 *
+	 * The remove is load-bearing: rename does not replace an existing file on
+	 * this filesystem, as searchcache found, so without it log.prev.txt would
+	 * hold whatever the first launch left and never move again. */
+	remove(PREV_LOG_PATH);
 	rename(LOG_PATH, PREV_LOG_PATH);
 	s_log = fopen(LOG_PATH, "w");
 

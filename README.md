@@ -124,11 +124,24 @@ edge, row tint, and an equalizer over its artwork. The bars animate while
 playing and remain fixed while paused. The same equalizer marks the current
 collection on the Player shelf, which is always pinned to the leftmost tile.
 
-Ordinary browsing keeps only the current 50-track page in RAM. A whole-
-collection search scans every source page, discards nonmatches immediately, and
-retains at most 500 ranked matches (about 383 KiB). Track ordering is always
-fetched fresh from Spotify. Album-cover thumbnails use the content-addressed SD
-artwork cache.
+Ordinary browsing keeps only the current 50-track page in RAM, always fetched
+fresh from Spotify, so playlist edits show up the moment a page is opened.
+
+Searching a collection is the expensive case: it walks every page, which is
+about 18 seconds for a 1791-track playlist. Nonmatches are discarded as they
+arrive and at most 500 ranked matches are retained (about 383 KiB), with
+results appearing as they are found rather than at the end. The searchable text
+is also packed into an index - roughly 112 bytes a track, so that same playlist
+occupies about 196 KiB - which is kept in memory and written to
+`sdmc:/spotify/searchidx`, capped at 100 playlists.
+
+Later searches are answered from that index, and Spotify's `snapshot_id` is
+checked afterwards to confirm it still matches the playlist; if it does not,
+the collection is walked again and the results on screen are replaced. Nothing
+in the store is load-bearing - a missing, damaged or hand-deleted entry simply
+reads as a miss - so deleting any or all of those files at any time is safe.
+
+Album-cover thumbnails use the content-addressed SD artwork cache.
 
 ## Requirements
 

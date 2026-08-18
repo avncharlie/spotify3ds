@@ -2192,7 +2192,7 @@ static void do_current_metadata(void)
 	char owner[128] = "";
 	const bool ok = playlist_metadata(uri, item.name, sizeof item.name, owner,
 	                                  sizeof owner, item.art_url,
-	                                  sizeof item.art_url);
+	                                  sizeof item.art_url, NULL, 0);
 	if (ok) {
 		snprintf(item.subtitle, sizeof item.subtitle,
 		         "Playlist" SUB_SEP "%.115s",

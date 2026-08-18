@@ -69,9 +69,16 @@ typedef collection_item recent_item;
 player_result recents_fetch(recent_list *out, char *err, int errlen);
 
 /* Resolve one playlist's display metadata through the name cache, fetching it
- * from Spotify only on a miss. Blocking; worker thread only. */
+ * from Spotify only on a miss. Blocking; worker thread only.
+ *
+ * `snapshot` is Spotify's version identifier for the playlist and may be NULL
+ * when the caller only wants the label. Asking for it forces the request:
+ * the name cache holds entries for a fortnight, and a fortnight-old snapshot
+ * would confirm a stale cache instead of catching it. Name, owner and art are
+ * still written back to the cache on the way past. */
 bool playlist_metadata(const char *uri, char *name, int namelen, char *owner,
-                       int ownerlen, char *art, int artlen);
+                       int ownerlen, char *art, int artlen, char *snapshot,
+                       int snaplen);
 
 /* GET /v1/me/playlists?limit=50. Blocking; worker thread only.
  *

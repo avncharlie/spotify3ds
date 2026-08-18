@@ -40,6 +40,9 @@
 #define CLR_FOOTDIV C2D_Color32(0x32, 0x32, 0x32, 0xFF)
 #define CLR_NAME    C2D_Color32(0xE8, 0xE8, 0xE8, 0xFF)
 #define CLR_CAPTION C2D_Color32(0x8A, 0x8A, 0x8A, 0xFF)
+/* Dimmer than the caption grey to offset the extra ink in a thicker stroke -
+ * see the delete mark below for why it cannot simply be drawn thinner. */
+#define CLR_DELETE  C2D_Color32(0x66, 0x66, 0x66, 0xFF)
 #define CLR_SUB     C2D_Color32(0x8A, 0x8A, 0x8A, 0xFF)
 #define CLR_GREEN   C2D_Color32(0x1D, 0xB9, 0x54, 0xFF)
 #define CLR_GREEN_PRESS C2D_Color32(0x28, 0xD8, 0x68, 0xFF)
@@ -182,14 +185,22 @@ void search_popover_draw(const search_popover_args *a)
 		/* Forget just this one. Drawn small and quiet so it does not compete
 		 * with the query, but given a full-height column to hit: the mark is
 		 * the target's centre, not its extent. */
+		/* Thick enough that the solid core survives, not for the weight.
+		 * ui_polyline spends a fixed half pixel a side on its fade, so a
+		 * 1.6px stroke left a 0.6px core - narrower than a pixel, and which
+		 * pixels a diagonal of that width covers depends on where it happens
+		 * to cross the grid. Each row sits 28px lower, samples the grid at a
+		 * different phase, and drew a subtly different cross. At 2.2px the
+		 * core is 1.2px and lands the same way every time; the colour comes
+		 * down to keep the mark as quiet as it was. */
 		const bool del_pressed = a->pressed_id == SEARCH_POP_DEL0 + i;
 		const float dx = PANEL_X + PANEL_W - DEL_W / 2.0f;
 		const float dy = top + ROW_H / 2.0f;
-		const u32 dclr = del_pressed ? CLR_GREEN_PRESS : CLR_CAPTION;
+		const u32 dclr = del_pressed ? CLR_GREEN_PRESS : CLR_DELETE;
 		const float down[4] = {dx - 3.5f, dy - 3.5f, dx + 3.5f, dy + 3.5f};
 		const float up[4] = {dx + 3.5f, dy - 3.5f, dx - 3.5f, dy + 3.5f};
-		ui_polyline(down, 2, 1.6f, dclr);
-		ui_polyline(up, 2, 1.6f, dclr);
+		ui_polyline(down, 2, 2.2f, dclr);
+		ui_polyline(up, 2, 2.2f, dclr);
 	}
 
 }

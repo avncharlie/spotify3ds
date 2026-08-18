@@ -10,6 +10,7 @@
 #include "spotify/auth.h"
 #include "spotify/lyrics.h"
 #include "spotify/recents.h"
+#include "spotify/searchindex.h"
 #include "spotify/tracks.h"
 #include "testlog.h"
 
@@ -77,7 +78,9 @@ typedef struct {
 	u64                  next_publish_at;
 	unsigned             sequence;
 	bool                 active;
+	bool                 from_cache;
 	track_search_results results;
+	searchindex_builder *builder;
 } track_search_job;
 
 static track_search_request        s_track_search_want;
@@ -87,6 +90,14 @@ static worker_track_search_status  s_track_search_status;
 static worker_track_search_payload s_track_search_ready;
 static bool                        s_track_search_have;
 static track_search_job            s_track_search_job;
+
+/* The corpus for the collection searched most recently. Refining a query -
+ * search, clear, search again - is the common case, and re-walking the whole
+ * playlist for each is what made that slow. Only one is kept: a second would
+ * double the footprint for a case that rarely comes up, and a CIA launch has
+ * less headroom to spare than the homebrew launcher. */
+static searchindex *s_search_index;
+static char         s_search_index_uri[128];
 
 /* The lock must be usable before worker_start runs, because main.c can go
  * fatal on a path that never starts the worker at all (e.g. net_init failing). */
@@ -786,6 +797,11 @@ void worker_stop(void)
 		s_thread = NULL;
 	}
 	track_search_results_free(&s_track_search_job.results);
+	searchindex_builder_free(s_track_search_job.builder);
+	s_track_search_job.builder = NULL;
+	searchindex_free(s_search_index);
+	s_search_index = NULL;
+	s_search_index_uri[0] = '\0';
 	worker_track_search_payload_free(&s_track_search_ready);
 }
 
@@ -1702,6 +1718,14 @@ static bool track_search_current(unsigned generation)
 	return current;
 }
 
+/* Abandon a half-built index. A partial one must never be kept: it would look
+ * complete and answer without the tracks the scan never reached. */
+static void track_search_drop_builder(track_search_job *job)
+{
+	searchindex_builder_free(job->builder);
+	job->builder = NULL;
+}
+
 static void track_search_fail(track_search_job *job, player_result result,
 	                          const char *error)
 {
@@ -1715,6 +1739,7 @@ static void track_search_fail(track_search_job *job, player_result result,
 		s_track_search_status.payload_ready = false;
 	}
 	LightLock_Unlock(&s_lock);
+	track_search_drop_builder(job);
 	track_search_results_free(&job->results);
 	job->active = false;
 }
@@ -1772,7 +1797,11 @@ static void do_track_search(bool higher_priority_work)
 	}
 	LightLock_Unlock(&s_lock);
 	if (pending) {
+		/* Free before the memset, not after: it would otherwise zero the
+		 * pointer to a builder the previous request left running and leak
+		 * everything it had packed. */
 		track_search_results_free(&s_track_search_job.results);
+		searchindex_builder_free(s_track_search_job.builder);
 		memset(&s_track_search_job, 0, sizeof s_track_search_job);
 		track_search_results_init(&s_track_search_job.results);
 		s_track_search_job.collection = request.collection;
@@ -1780,11 +1809,51 @@ static void do_track_search(bool higher_priority_work)
 		         request.query);
 		s_track_search_job.generation = request.generation;
 		s_track_search_job.active = true;
+
+		/* The corpus for this collection may already be in memory from an
+		 * earlier query, in which case the answer needs no network at all. */
+		if (s_search_index &&
+		    strcmp(s_search_index_uri, request.collection.context_uri) == 0) {
+			if (searchindex_search(s_search_index, &s_track_search_job.collection,
+			                       s_track_search_job.query,
+			                       &s_track_search_job.results)) {
+				s_track_search_job.source_total =
+				    searchindex_count(s_search_index);
+				s_track_search_job.from_cache = true;
+				LightLock_Lock(&s_lock);
+				if (s_track_search_job.generation == s_track_search_generation) {
+					s_track_search_status.scanned =
+					    s_track_search_job.source_total;
+					s_track_search_status.source_total =
+					    s_track_search_job.source_total;
+					s_track_search_status.matched_total =
+					    s_track_search_job.results.matched_total;
+					s_track_search_status.retained_count =
+					    s_track_search_job.results.count;
+					s_track_search_status.truncated =
+					    s_track_search_job.results.truncated;
+					s_track_search_status.from_cache = true;
+				}
+				LightLock_Unlock(&s_lock);
+				track_search_publish(&s_track_search_job, false);
+				track_search_results_free(&s_track_search_job.results);
+				s_track_search_job.active = false;
+				return;
+			}
+			/* Out of memory mid-scan: fall through to the network rather
+			 * than failing the search. */
+			track_search_results_free(&s_track_search_job.results);
+			track_search_results_init(&s_track_search_job.results);
+		}
+		s_track_search_job.builder = searchindex_builder_new(
+		    &s_track_search_job.collection, "",
+		    s_track_search_job.collection.item_total);
 	}
 	track_search_job *job = &s_track_search_job;
 	if (!job->active)
 		return;
 	if (!track_search_current(job->generation)) {
+		track_search_drop_builder(job);
 		track_search_results_free(&job->results);
 		job->active = false;
 		return;
@@ -1802,6 +1871,7 @@ static void do_track_search(bool higher_priority_work)
 	    &job->collection, job->next_offset, page, err, sizeof err);
 	if (!track_search_current(job->generation)) {
 		free(page);
+		track_search_drop_builder(job);
 		track_search_results_free(&job->results);
 		job->active = false;
 		return;
@@ -1829,6 +1899,12 @@ static void do_track_search(bool higher_priority_work)
 		free(page);
 		track_search_fail(job, PLAYER_ERROR, "Out of memory retaining matches");
 		return;
+	}
+	if (job->builder && !searchindex_builder_add_page(job->builder, page)) {
+		/* Indexing is an optimisation; losing it must never cost the user
+		 * their search. */
+		searchindex_builder_free(job->builder);
+		job->builder = NULL;
 	}
 	const bool matched_more = job->results.matched_total > matched_before;
 	int next_offset = page->offset + page->count;
@@ -1864,6 +1940,31 @@ static void do_track_search(bool higher_priority_work)
 	}
 
 	track_search_publish(job, false);
+
+	/* Keep the corpus for the next query on this collection. Installed only
+	 * on a complete scan: a partial index would validate and then silently
+	 * answer without the tracks it never saw. */
+	if (job->builder) {
+		unsigned char *blob = NULL;
+		size_t         len = 0;
+		if (searchindex_builder_finish(job->builder, &blob, &len)) {
+			searchindex *fresh = searchindex_open(blob, len);
+			if (fresh) {
+				searchindex_free(s_search_index);
+				s_search_index = fresh;
+				snprintf(s_search_index_uri, sizeof s_search_index_uri, "%.127s",
+				         job->collection.context_uri);
+				tl_log("search: indexed %d tracks (%u bytes) for %s",
+				       searchindex_count(fresh), (unsigned)len,
+				       job->collection.name);
+			} else {
+				free(blob);
+			}
+		}
+		searchindex_builder_free(job->builder);
+		job->builder = NULL;
+	}
+
 	track_search_results_free(&job->results);
 	job->active = false;
 }

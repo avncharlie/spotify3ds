@@ -151,6 +151,9 @@ typedef struct {
 	int                retained_count;
 	bool               truncated;
 	bool               payload_ready;
+	/* Answered from the retained corpus rather than by walking the
+	 * collection again, so `scanned` reflects the index, not the network. */
+	bool               from_cache;
 	char               error[160];
 } worker_track_search_status;
 

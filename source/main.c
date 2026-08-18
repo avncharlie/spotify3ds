@@ -953,6 +953,9 @@ int main(int argc, char **argv)
 	int      search_probe_partial_count = 0;
 	int      search_probe_partial_scanned = 0;
 	int      search_probe_partial_total = 0;
+	int      cache_probe_first_count = 0;
+	int      cache_probe_first_scanned = 0;
+	u64      cache_probe_started = 0;
 
 	while (aptMainLoop()) {
 		hidScanInput();
@@ -2216,6 +2219,73 @@ int main(int argc, char **argv)
 				}
 
 				case 9:
+					/* A small collection, so the scan can actually finish
+					 * inside the frame budget: the retained corpus is only
+					 * installed on a complete walk. */
+					tracks_clear_search();
+					g_tracks_collection = tracks_probe_lux;
+					snprintf(g_track_search_query, sizeof g_track_search_query,
+					         "%s", "a");
+					g_track_search_mode = true;
+					g_track_search_applied_generation = 0;
+					worker_request_track_search(&tracks_probe_lux,
+					                            g_track_search_query);
+					tracks_probe_stage = 10;
+					break;
+
+				case 10: {
+					worker_track_search_status st;
+					worker_get_track_search_status(&st);
+					if (st.state == TRACK_SEARCH_ERROR) {
+						tl_step("search_cache_build", 0, "%s", st.error);
+						tracks_probe_stage = 12;
+						break;
+					}
+					if (st.state != TRACK_SEARCH_READY)
+						break;
+					cache_probe_first_count = st.matched_total;
+					cache_probe_first_scanned = st.scanned;
+					tl_step("search_cache_build",
+					        cache_probe_first_scanned > 0 && !st.from_cache,
+					        "cold scan matched=%d scanned=%d cache=%d",
+					        cache_probe_first_count, cache_probe_first_scanned,
+					        (int)st.from_cache);
+					/* Same collection, different query: the corpus should
+					 * answer without touching the network. */
+					tracks_clear_search();
+					g_tracks_collection = tracks_probe_lux;
+					snprintf(g_track_search_query, sizeof g_track_search_query,
+					         "%s", "e");
+					g_track_search_mode = true;
+					g_track_search_applied_generation = 0;
+					cache_probe_started = osGetTime();
+					worker_request_track_search(&tracks_probe_lux,
+					                            g_track_search_query);
+					tracks_probe_stage = 11;
+					break;
+				}
+
+				case 11: {
+					worker_track_search_status st;
+					worker_get_track_search_status(&st);
+					if (st.state == TRACK_SEARCH_ERROR) {
+						tl_step("search_cache_hit", 0, "%s", st.error);
+						tracks_probe_stage = 12;
+						break;
+					}
+					if (st.state != TRACK_SEARCH_READY)
+						break;
+					const u64 took = osGetTime() - cache_probe_started;
+					/* from_cache is the whole assertion: it is set only on the
+					 * path that never issues a page request. */
+					tl_step("search_cache_hit", st.from_cache,
+					        "cache=%d matched=%d in %ums", (int)st.from_cache,
+					        st.matched_total, (unsigned)took);
+					tracks_probe_stage = 12;
+					break;
+				}
+
+				case 12:
 					tracks_clear_search();
 					g_view = VIEW_PLAYER;
 					tracks_probe_stage = 99;

@@ -503,6 +503,34 @@ static void test_fuzz_corrupt_blobs(void)
 	free(good);
 }
 
+/* An index built while the metadata request was failing carries no version.
+ * It must still be searchable in memory, but it can never be confirmed
+ * against Spotify - so nothing may treat a blank version as proof of change,
+ * or every later search would rescan the whole collection and never settle. */
+static void test_unversioned_index(void)
+{
+	collection_item c = playlist_of("NoSnapshot", 1);
+	track_page page;
+	memset(&page, 0, sizeof page);
+	page.collection = c;
+	page.total = 1;
+	page.count = 1;
+	page.items[0] = item(0, "Song", "Artist", "Album", "");
+
+	/* Built with an empty snapshot, as the cold path does when
+	 * playlist_metadata fails. */
+	searchindex *ix = build(&c, &page, 1, "");
+	assert(searchindex_snapshot(ix)[0] == '\0');
+
+	/* Still usable for this session. */
+	track_search_results r;
+	track_search_results_init(&r);
+	assert(searchindex_search(ix, &c, "song", &r));
+	assert(r.count == 1);
+	track_search_results_free(&r);
+	searchindex_free(ix);
+}
+
 int main(void)
 {
 	test_round_trip();
@@ -513,6 +541,7 @@ int main(void)
 	test_alignment_and_bounds();
 	test_oversized_lengths_rejected();
 	test_fuzz_corrupt_blobs();
+	test_unversioned_index();
 	puts("search index: round-trip, live equivalence, albums, tamper, fuzz, "
 	     "and alignment passed");
 	return 0;

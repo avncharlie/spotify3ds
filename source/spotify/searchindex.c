@@ -1,5 +1,6 @@
 #include "searchindex.h"
 
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -74,6 +75,9 @@ typedef struct __attribute__((packed)) {
 } record_hdr;
 
 _Static_assert(sizeof(record_hdr) == 10, "record layout changed - bump version");
+_Static_assert(offsetof(searchindex_hdr, snapshot_id) ==
+                   SEARCHINDEX_SNAPSHOT_OFFSET,
+               "SEARCHINDEX_SNAPSHOT_OFFSET no longer matches the header");
 
 #define REC_FLAG_PLAYABLE 0x01
 #define REC_FLAG_LOCAL    0x02

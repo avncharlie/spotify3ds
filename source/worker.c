@@ -1921,7 +1921,16 @@ static void do_search_validate(void)
 		tl_log("search: could not verify %s, keeping cached corpus", name);
 		return;
 	}
-	if (held[0] && strcmp(fresh, held) == 0) {
+	if (!held[0]) {
+		/* The corpus predates knowing the version - built while the metadata
+		 * request was failing. It cannot be confirmed or refuted, so treat it
+		 * the same as being unable to ask rather than as proof of a change:
+		 * concluding "changed" here would rescan on every single search and
+		 * never reach a state where it stopped. */
+		tl_log("search: %s has no stored version, keeping cached corpus", name);
+		return;
+	}
+	if (strcmp(fresh, held) == 0) {
 		/* Current. The stored copy can still be missing - deleted by hand, or
 		 * never written because this corpus only ever lived in memory - so
 		 * put it back rather than making the next launch walk again. */
@@ -2028,9 +2037,13 @@ static void do_track_search(bool higher_priority_work)
 		}
 
 		if (j->collection.kind == COLLECTION_PLAYLIST) {
-			/* Nothing cached. Take the snapshot before the walk starts, so the
-			 * index this scan builds can be checked next time; taking it
-			 * afterwards would stamp a version the pages may predate. */
+			/* Nothing cached. Take the snapshot before the walk, not after.
+			 * The walk takes tens of seconds, and a playlist edited part-way
+			 * through leaves the index holding pages from both sides of the
+			 * edit. Stamped with the version from before, that index looks
+			 * stale and is rebuilt on the next search - one wasted scan.
+			 * Stamped with the version from after, it would look current
+			 * forever while being wrong. Predating is the safe direction. */
 			char name[128] = "", owner[128] = "", art[256] = "";
 			playlist_metadata(j->collection.context_uri, name, sizeof name,
 			                  owner, sizeof owner, art, sizeof art,
@@ -2143,10 +2156,19 @@ static void do_track_search(bool higher_priority_work)
 		unsigned char *blob = NULL;
 		size_t         len = 0;
 		if (searchindex_builder_finish(job->builder, &blob, &len)) {
-			/* Store before adopting: searchindex_open takes the blob, and the
+			/* Only persist what can later be checked. An index built while
+			 * the metadata request was failing carries no snapshot, and an
+			 * unverifiable entry is worse than none: every later search would
+			 * see a blank version, conclude the playlist had changed, and walk
+			 * the whole thing again - amplifying load in exactly the
+			 * conditions that made the request fail. Keeping it in memory for
+			 * this session is still worth it.
+			 *
+			 * Store before adopting: searchindex_open takes the blob, and the
 			 * write needs the bytes. Both happen after the results are on
 			 * screen, since the card costs ~140ms. */
-			searchcache_store(job->collection.context_uri, blob, len);
+			if (job->snapshot[0])
+				searchcache_store(job->collection.context_uri, blob, len);
 			searchindex *fresh = searchindex_open(blob, len);
 			if (fresh) {
 				searchindex_free(s_search_index);

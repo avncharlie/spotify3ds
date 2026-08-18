@@ -39,6 +39,11 @@
 
 #define SEARCHINDEX_SNAPSHOT_MAX 63
 
+/* Byte offset of snapshot_id within the on-disk header (magic, version and
+ * flags precede it). Lets a caller check an entry carries a version without
+ * parsing the whole thing. Asserted against the real layout in searchindex.c. */
+#define SEARCHINDEX_SNAPSHOT_OFFSET 8
+
 typedef struct searchindex searchindex;
 typedef struct searchindex_builder searchindex_builder;
 

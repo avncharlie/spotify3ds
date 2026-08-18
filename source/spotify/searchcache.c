@@ -205,6 +205,14 @@ void searchcache_store(const char *context_uri, const unsigned char *blob,
 {
 	if (s_writes_disabled || !blob || !len || len > SEARCHINDEX_BYTES_MAX)
 		return;
+	/* An entry carrying no version can never be checked against Spotify, and
+	 * a search reading one later would have to guess. Refuse it here as well
+	 * as at the call site, so a future caller cannot reintroduce it. The
+	 * snapshot sits at a fixed offset in the header, so this needs no
+	 * parsing. */
+	if (len <= SEARCHINDEX_SNAPSHOT_OFFSET ||
+	    blob[SEARCHINDEX_SNAPSHOT_OFFSET] == '\0')
+		return;
 	char id[40];
 	if (!playlist_id(context_uri, id, sizeof id))
 		return;

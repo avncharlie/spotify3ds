@@ -86,7 +86,15 @@ static player_result fetch_network(const collection_item *collection, int offset
 		return PLAYER_FORBIDDEN;
 	}
 	if (r.status != 200 || !r.body || !r.body_len) {
-		snprintf(err, errlen, "tracks http %d", r.status);
+		/* A 429 names how long it wants, and that runs to hours. Saying only
+		 * the number reads as though trying again shortly might work. */
+		char wait[32];
+		if (r.status == 429 && http_retry_after_str(r.retry_after, wait,
+		                                            sizeof wait))
+			snprintf(err, errlen, "tracks http %d - retry after %s", r.status,
+			         wait);
+		else
+			snprintf(err, errlen, "tracks http %d", r.status);
 		http_free(&r);
 		return PLAYER_ERROR;
 	}

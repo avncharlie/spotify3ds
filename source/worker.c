@@ -2108,13 +2108,20 @@ static void do_track_search(bool higher_priority_work)
 	if (result != PLAYER_OK) {
 		free(page);
 		if (strstr(err, "http 429")) {
+			/* The error carries however long Spotify asked for, which runs
+			 * to hours rather than seconds. Say so rather than promising a
+			 * retry shortly, and wait it out instead of asking again every
+			 * five seconds - hammering a server that has just said no is
+			 * what earns a longer block. */
+			const char *after = strstr(err, "retry after ");
 			LightLock_Lock(&s_lock);
 			if (job->generation == s_track_search_generation)
 				snprintf(s_track_search_status.error,
 				         sizeof s_track_search_status.error,
-				         "Rate limited; retrying shortly");
+				         "Rate limited%s%s", after ? " - try again in " : "",
+				         after ? after + 12 : "");
 			LightLock_Unlock(&s_lock);
-			job->next_request_at = osGetTime() + 5000;
+			job->next_request_at = osGetTime() + (after ? 60000 : 5000);
 			return;
 		}
 		track_search_fail(job, result, err);
@@ -2133,6 +2140,7 @@ static void do_track_search(bool higher_priority_work)
 		track_search_fail(job, PLAYER_ERROR, "Out of memory retaining matches");
 		return;
 	}
+	// build search index using whole page
 	if (job->builder && !searchindex_builder_add_page(job->builder, page)) {
 		/* Indexing is an optimisation; losing it must never cost the user
 		 * their search. */

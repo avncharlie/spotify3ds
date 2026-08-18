@@ -76,6 +76,20 @@ static bool gb_append_str(growbuf *g, const char *src)
 
 /* Case-insensitive header lookup within the header block. Returns a pointer to
  * the value (past ": ") or NULL. */
+bool http_retry_after_str(long seconds, char *out, int outlen)
+{
+	if (seconds < 0 || outlen <= 0)
+		return false;
+	const long mins = seconds / 60;
+	if (mins >= 60)
+		snprintf(out, (size_t)outlen, "%ldh %ldm", mins / 60, mins % 60);
+	else if (mins >= 1)
+		snprintf(out, (size_t)outlen, "%ldm", mins);
+	else
+		snprintf(out, (size_t)outlen, "%lds", seconds);
+	return true;
+}
+
 static const char *find_header(const char *headers, size_t headers_len,
 	                           const char *name)
 {
@@ -254,6 +268,8 @@ bool http_request_progress(const char *host, const char *method,
                            http_response *out, char *err, int errlen)
 {
 	memset(out, 0, sizeof *out);
+	/* Zero would read as "retry immediately"; absent is not the same thing. */
+	out->retry_after = -1;
 
 	/* One retry: a pooled connection can be closed by the peer between us
 	 * taking it and writing to it, which is indistinguishable from a transport
@@ -400,6 +416,16 @@ static bool http_exchange(const char *host, const char *method,
 	const char *te = find_header(raw.buf, headers_len, "Transfer-Encoding");
 	const char *cl = find_header(raw.buf, headers_len, "Content-Length");
 	const char *conn = find_header(raw.buf, headers_len, "Connection");
+
+	/* Kept because a 429 from Spotify can name a wait measured in hours, and
+	 * a caller that cannot see it has nothing useful to tell the user. */
+	out->retry_after = -1;
+	const char *ra = find_header(raw.buf, headers_len, "Retry-After");
+	if (ra) {
+		size_t secs = 0;
+		if (parse_decimal_header(ra, headers_end, &secs))
+			out->retry_after = (long)secs;
+	}
 
 	/* Only keep the connection if we can find the end of this body without
 	 * relying on the close itself. Anything else and we would have no way to

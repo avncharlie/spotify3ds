@@ -7,7 +7,20 @@ typedef struct {
 	int    status;    /* HTTP status code, e.g. 200 / 204 / 401 */
 	char  *body;      /* NUL-terminated; NULL when there is no body */
 	size_t body_len;
+	/* Seconds Spotify says to wait, from Retry-After on a 429; -1 when the
+	 * header was absent or unparseable. Worth surfacing because the value
+	 * runs to hours, and a message that does not say so reads as though
+	 * trying again shortly might work. */
+	long   retry_after;
 } http_response;
+
+/* Render a Retry-After into something worth reading: "2h 14m", or just
+ * "14m" under an hour, or "45s" under a minute. Writes nothing and returns
+ * false when the wait is unknown, so a caller can leave its message alone.
+ *
+ * Spotify's rate limiting is measured in hours, and a bare status code reads
+ * as though trying again shortly might work. */
+bool http_retry_after_str(long seconds, char *out, int outlen);
 
 /* Decoded response-body progress. `total_known` is false for chunked and
  * close-delimited responses; framing bytes are never included in received. */

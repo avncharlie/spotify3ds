@@ -1568,6 +1568,12 @@ int main(int argc, char **argv)
 				}
 			} else if (touch.clicked == TRACK_BTN_SEARCH) {
 				tracks_edit_search();
+			} else if (touch.clicked == TRACK_BTN_CLEAR_SEARCH) {
+				/* B also leaves the collection, so the X is the only
+				 * unambiguous way back to the full track list. The buffered
+				 * page is still there, so this is the same cheap return B
+				 * makes rather than a refetch. */
+				tracks_clear_search();
 			} else if ((touch.clicked == TRACK_BTN_RETRY ||
 			            (keys_down & KEY_X)) &&
 			           (g_track_search_mode

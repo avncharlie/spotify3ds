@@ -295,20 +295,52 @@ void screen_tracks_draw(const screen_tracks_args *a)
 	/* Fixed page caption: rows are drawn first so this strip masks anything
 	 * scrolling beneath it, just like the fixed navigation header above. */
 	C2D_DrawRectSolid(0, HEADER_H, 0, BOT_W, CAPTION_H, CLR_HEADER);
-	const char *caption = a->search_mode
-	                          ? (a->loading ? "SEARCHING" : "RESULTS")
-	                          : "TRACKS";
-	ui_text_tracked(a->buf, caption, PAD_X,
-	                ui_baseline(HEADER_H +
-	                                (CAPTION_H - ui_px(TY_MICRO)) / 2,
-	                            TY_MICRO),
-	                TY_MICRO, 1.1f, CLR_CAPTION);
-	if (a->search_mode && a->search_query && a->search_query[0])
-		ui_text(a->buf, a->search_query, 96.0f,
-		        ui_baseline(HEADER_H +
-		                        (CAPTION_H - ui_px(TY_MICRO)) / 2,
+	const float cap_mid = HEADER_H + CAPTION_H / 2.0f;
+	if (a->search_mode) {
+		/* The same affordance the Library filter bar uses: what was searched,
+		 * how much it found, and a way out that is not the back button - which
+		 * here also means "leave the collection". */
+		const bool clear_pressed = a->pressed_id == TRACK_BTN_CLEAR_SEARCH;
+		ui_disc(PAD_X + 4.0f, cap_mid - 1.0f, 4.0f, CLR_GREEN);
+		ui_disc(PAD_X + 4.0f, cap_mid - 1.0f, 2.5f, CLR_HEADER);
+		const float handle[4] = {PAD_X + 7.0f, cap_mid + 2.0f, PAD_X + 10.5f,
+		                         cap_mid + 5.5f};
+		ui_polyline(handle, 2, 1.6f, CLR_GREEN);
+
+		if (a->search_query && a->search_query[0])
+			ui_text(a->buf, a->search_query, PAD_X + 18.0f,
+			        ui_baseline(HEADER_H + (CAPTION_H - ui_px(TY_MICRO)) / 2,
+			                    TY_MICRO),
+			        TY_MICRO, 120.0f, CLR_GREEN);
+
+		char found[32];
+		if (a->loading)
+			snprintf(found, sizeof found, "%d found", a->search_matched_total);
+		else
+			snprintf(found, sizeof found, "%d match%s", a->search_matched_total,
+			         a->search_matched_total == 1 ? "" : "es");
+		const float fw = ui_text_width(a->buf, found, TY_MICRO);
+		ui_text(a->buf, found, BOT_W - 34.0f - fw - 6.0f,
+		        ui_baseline(HEADER_H + (CAPTION_H - ui_px(TY_MICRO)) / 2,
 		                    TY_MICRO),
-		        TY_MICRO, 90.0f, CLR_GREEN);
+		        TY_MICRO, fw, CLR_SUB);
+
+		const u32 xclr = clear_pressed ? CLR_GREEN_PRESS : CLR_NAME;
+		const float x0 = BOT_W - 26.0f, x1 = BOT_W - 16.0f;
+		const float y0 = cap_mid - 5.0f, y1 = cap_mid + 5.0f;
+		const float down[4] = {x0, y0, x1, y1};
+		const float up[4] = {x1, y0, x0, y1};
+		ui_polyline(down, 2, 2.0f, xclr);
+		ui_polyline(up, 2, 2.0f, xclr);
+		tb_add(a->tb, BOT_W - 40.0f, HEADER_H, 40.0f, CAPTION_H,
+		       TRACK_BTN_CLEAR_SEARCH);
+	} else {
+		ui_text_tracked(a->buf, "TRACKS", PAD_X,
+		                ui_baseline(HEADER_H +
+		                                (CAPTION_H - ui_px(TY_MICRO)) / 2,
+		                            TY_MICRO),
+		                TY_MICRO, 1.1f, CLR_CAPTION);
+	}
 	/* Rows have taken over the screen while the scan continues, so the caption
 	 * strip carries the progress the placeholder panel would have shown. */
 	if (a->search_mode && a->loading && a->ready) {
@@ -322,16 +354,14 @@ void screen_tracks_draw(const screen_tracks_args *a)
 			C2D_DrawRectSolid(0, bar_y, 0, BOT_W * ratio, 2, CLR_GREEN);
 		}
 	}
-	if (a->ready && a->page) {
+	/* Only while browsing: the search bar owns this strip otherwise, and its
+	 * match count already says how much was found. */
+	if (a->ready && a->page && !a->search_mode) {
 		char range[48];
 		const int first = count ? a->page->offset + 1 : 0;
 		const int last = a->page->offset + count;
-		if (a->search_mode && a->search_truncated)
-			snprintf(range, sizeof range, "%d-%d/%d (%d)", first, last,
-			         a->page->total, a->search_matched_total);
-		else
-			snprintf(range, sizeof range, "%d-%d / %d", first, last,
-			         a->page->total);
+		snprintf(range, sizeof range, "%d-%d / %d", first, last,
+		         a->page->total);
 		const float rw = ui_text_width(a->buf, range, TY_MICRO);
 		ui_text(a->buf, range, BOT_W - PAD_X - rw,
 		        ui_baseline(HEADER_H +

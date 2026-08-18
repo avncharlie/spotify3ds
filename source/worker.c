@@ -1753,8 +1753,20 @@ bool worker_take_track_search(worker_track_search_payload *out)
 	worker_track_search_payload_init(&claimed);
 	ensure_lock();
 	LightLock_Lock(&s_lock);
-	const bool have = s_track_search_have;
-	if (have) {
+	/* Only hand over what the current request produced. The caller used to
+	 * decide this from a status it had copied moments earlier, which let a
+	 * request issued in between - the rescan after a playlist changes, most
+	 * of all - publish under a newer generation than that copy knew about.
+	 * The caller then rejected its own results and freed them, and since
+	 * taking the payload clears it, nothing ever republished: the screen kept
+	 * the stale list for good. Deciding here, under the lock that owns the
+	 * generation, cannot go stale. */
+	const bool have = s_track_search_have &&
+	                  s_track_search_ready.generation == s_track_search_generation;
+	/* A superseded payload is moved out too, so it cannot sit here blocking
+	 * the results the newer request is about to publish. Either way the
+	 * freeing happens outside the lock. */
+	if (s_track_search_have) {
 		worker_track_search_payload_move(&claimed, &s_track_search_ready);
 		s_track_search_have = false;
 		s_track_search_status.payload_ready = false;

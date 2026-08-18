@@ -1190,8 +1190,12 @@ int main(int argc, char **argv)
 				worker_track_search_payload incoming;
 				worker_track_search_payload_init(&incoming);
 				if (worker_take_track_search(&incoming)) {
+					/* The worker only hands over what the current request
+					 * produced, so the generation is already settled. What is
+					 * left to check is that it belongs to what this screen is
+					 * showing - the collection can change under a search that
+					 * was already in flight. */
 					const bool current =
-					    incoming.generation == g_track_search_status.generation &&
 					    strcmp(incoming.context_uri,
 					           g_tracks_collection.context_uri) == 0 &&
 					    strcmp(incoming.query, g_track_search_query) == 0;
@@ -2474,7 +2478,7 @@ int main(int argc, char **argv)
 					if (stored <= 0) {
 						if (persist_wait_started == 0)
 							persist_wait_started = osGetTime();
-						if (osGetTime() - persist_wait_started < 5000)
+						if (osGetTime() - persist_wait_started < 2000)
 							break; /* still waiting for the write */
 					}
 					tl_step("search_cache_persisted", stored > 0,
@@ -2554,13 +2558,26 @@ int main(int argc, char **argv)
 						           "aged-for-test") != 0;
 						searchindex_free(cur);
 					}
-					if (osGetTime() - cache_probe_started < 15000 &&
-					    !cache_probe_saw_network)
+					/* Refreshing the card is only half of it. The rescan
+					 * publishes under a newer generation than the search that
+					 * triggered it, and a claim that rejected the payload on
+					 * that basis threw the results away while leaving the card
+					 * correct - the screen kept the stale list and nothing
+					 * republished. So the rows the user is actually looking at
+					 * have to come from the rebuilt index. */
+					const bool rows_refreshed =
+					    g_track_search_applied_generation != 0 &&
+					    g_track_search_page.count > 0 &&
+					    st.state == TRACK_SEARCH_READY;
+					if (osGetTime() - cache_probe_started < 8000 &&
+					    !(cache_probe_saw_network && rows_refreshed))
 						break;
-					tl_step("search_rescan_on_change", cache_probe_saw_network,
-					        "served from cache=%d then refreshed on disk=%d",
+					tl_step("search_rescan_on_change",
+					        cache_probe_saw_network && rows_refreshed,
+					        "served from cache=%d refreshed on disk=%d rows=%d",
 					        cache_probe_first_scanned > 0,
-					        (int)cache_probe_saw_network);
+					        (int)cache_probe_saw_network,
+					        g_track_search_page.count);
 					tracks_probe_stage = 18;
 					break;
 				}

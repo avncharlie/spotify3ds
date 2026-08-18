@@ -337,6 +337,11 @@ bool searchindex_builder_add_page(searchindex_builder *b,
 	return true;
 }
 
+int searchindex_builder_count(const searchindex_builder *b)
+{
+	return b ? b->count : 0;
+}
+
 bool searchindex_builder_finish(searchindex_builder *b, unsigned char **out,
                                 size_t *outlen)
 {

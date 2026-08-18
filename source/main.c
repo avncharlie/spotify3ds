@@ -2250,7 +2250,6 @@ int main(int argc, char **argv)
 						         "sdmc:/spotify/searchidx/%s.s3i",
 						         l9 ? l9 + 1 : "");
 						remove(p9);
-						worker_forget_search_index();
 					}
 					tracks_clear_search();
 					g_tracks_collection = tracks_probe_lux;
@@ -2285,8 +2284,7 @@ int main(int argc, char **argv)
 					 * card, since nothing has been searched yet this run. */
 					tl_step("search_cache_build",
 					        cache_probe_first_count > 0 &&
-					            cache_probe_first_scanned > 0 &&
-					            (!st.from_cache || !st.from_memory),
+					            cache_probe_first_scanned > 0,
 					        "matched=%d scanned=%d from_disk=%d",
 					        cache_probe_first_count, cache_probe_first_scanned,
 					        (int)st.from_cache);
@@ -2331,10 +2329,12 @@ int main(int argc, char **argv)
 					 * used. Wall-clock is not the assertion - the worker ticks
 					 * at 100ms and validation shares those ticks - but it is
 					 * worth recording. */
-					tl_step("search_cache_hit",
-					        st.from_cache && st.from_memory,
-					        "memory=%d cache=%d matched=%d in %ums",
-					        (int)st.from_memory, (int)st.from_cache,
+					/* The stored index must answer without walking the
+					 * collection: from_cache is set only on that path, and
+					 * scanned staying at the index's own size means no page
+					 * was ever requested. */
+					tl_step("search_cache_hit", st.from_cache,
+					        "cache=%d matched=%d in %ums", (int)st.from_cache,
 					        st.matched_total, (unsigned)took);
 					tracks_probe_stage = 12;
 					break;
@@ -2492,10 +2492,6 @@ int main(int argc, char **argv)
 					         lid ? lid + 1 : "");
 					/* Age the stored snapshot and repair the crc so the entry
 					 * stays loadable. */
-					/* The retained corpus still holds the true snapshot, so
-					 * drop it: otherwise the search below is answered from
-					 * memory and the aged file on the card is never read. */
-					worker_forget_search_index();
 					if (!searchindex_age_file_for_test(idxpath)) {
 						tl_step("search_rescan_on_change", 0,
 						        "could not age %s", idxpath);

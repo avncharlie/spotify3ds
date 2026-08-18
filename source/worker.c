@@ -94,21 +94,20 @@ static worker_track_search_payload s_track_search_ready;
 static bool                        s_track_search_have;
 static track_search_job            s_track_search_job;
 
-/* The corpus for the collection searched most recently. Refining a query -
- * search, clear, search again - is the common case, and re-walking the whole
- * playlist for each is what made that slow. Only one is kept: a second would
- * double the footprint for a case that rarely comes up, and a CIA launch has
- * less headroom to spare than the homebrew launcher. */
-static searchindex *s_search_index;
-static char         s_search_index_uri[128];
+/* Searches are answered from the stored index and nothing is kept between
+ * them. An in-memory copy alongside the card was faster by tens of
+ * milliseconds against an eighteen-second scan, and every way the two could
+ * disagree - one holding a version the other did not, one being evicted while
+ * the other answered - was a bug. One copy cannot disagree with itself. */
 
 /* Set when results were served from a corpus whose currency has not been
  * confirmed yet. Validation runs on a later tick rather than inline, because
  * it costs a request and the query that triggered it is routinely cancelled
  * before one completes - the user types on. */
 static char            s_search_validate_uri[128];
-/* Set by the render thread; acted on by the worker between searches. */
-static bool            s_search_forget;
+/* The version the served index carried, captured when it answered: validation
+ * runs later, by which point the index itself is long freed. */
+static char            s_search_validate_snapshot[SEARCHINDEX_SNAPSHOT_MAX + 1];
 static collection_item s_search_validate_collection;
 static char            s_search_validate_query[TRACK_SEARCH_QUERY_MAX + 1];
 static unsigned        s_search_validate_generation;
@@ -819,9 +818,6 @@ void worker_stop(void)
 	track_search_results_free(&s_track_search_job.results);
 	searchindex_builder_free(s_track_search_job.builder);
 	s_track_search_job.builder = NULL;
-	searchindex_free(s_search_index);
-	s_search_index = NULL;
-	s_search_index_uri[0] = '\0';
 	worker_track_search_payload_free(&s_track_search_ready);
 }
 
@@ -1721,18 +1717,6 @@ static bool reissue_track_search(const collection_item *collection,
 	return current;
 }
 
-void worker_forget_search_index(void)
-{
-	/* Called from the render thread, while the worker may be part-way through
-	 * walking this very corpus. Freeing it here would pull the blob out from
-	 * under that walk, so only ask - the worker drops it at a point where it
-	 * is not reading it. */
-	ensure_lock();
-	LightLock_Lock(&s_lock);
-	s_search_forget = true;
-	LightLock_Unlock(&s_lock);
-}
-
 void worker_cancel_track_search(void)
 {
 	worker_track_search_payload discarded;
@@ -1796,8 +1780,7 @@ static bool track_search_current(unsigned generation)
  * could not be run at all, in which case the caller falls back to the network.
  * `validated` records whether the corpus was known current when it was used. */
 static bool track_search_answer_from_index(track_search_job *job,
-	                                       const searchindex *index,
-	                                       bool from_memory)
+	                                       const searchindex *index)
 {
 	if (!searchindex_search(index, &job->collection, job->query, &job->results)) {
 		track_search_results_free(&job->results);
@@ -1814,7 +1797,6 @@ static bool track_search_answer_from_index(track_search_job *job,
 		s_track_search_status.retained_count = job->results.count;
 		s_track_search_status.truncated = job->results.truncated;
 		s_track_search_status.from_cache = true;
-		s_track_search_status.from_memory = from_memory;
 	}
 	LightLock_Unlock(&s_lock);
 	track_search_publish(job, false);
@@ -1909,47 +1891,31 @@ static void do_search_validate(void)
 	playlist_metadata(uri, name, sizeof name, owner, sizeof owner, art,
 	                  sizeof art, fresh, sizeof fresh);
 
-	/* The corpus may have been replaced while the request was in flight. */
-	if (!s_search_index || strcmp(s_search_index_uri, uri) != 0)
-		return;
-
-	const char *held = searchindex_snapshot(s_search_index);
+	const char *held = s_search_validate_snapshot;
 	if (!fresh[0]) {
-		/* Could not ask - offline, or the playlist is gone. Keep what is
-		 * held: the alternative is discarding a corpus that is probably
-		 * still fine and leaving the user with nothing. */
-		tl_log("search: could not verify %s, keeping cached corpus", name);
+		/* Could not ask - offline, or the playlist is gone. Nothing to do:
+		 * the stored index stays as it is and the next search checks again. */
+		tl_log("search: could not verify %s, keeping stored index", name);
 		return;
 	}
 	if (!held[0]) {
-		/* The corpus predates knowing the version - built while the metadata
-		 * request was failing. It cannot be confirmed or refuted, so treat it
-		 * the same as being unable to ask rather than as proof of a change:
-		 * concluding "changed" here would rescan on every single search and
-		 * never reach a state where it stopped. */
-		tl_log("search: %s has no stored version, keeping cached corpus", name);
+		/* Served an index with no version. Nothing is stored without one, so
+		 * this should not happen; treating it as a change would rescan on
+		 * every search and never settle, so leave it alone and say so. */
+		tl_log("search: %s answered without a version, not rescanning", name);
 		return;
 	}
-	if (strcmp(fresh, held) == 0) {
-		/* Current. The stored copy can still be missing - deleted by hand, or
-		 * never written because this corpus only ever lived in memory - so
-		 * put it back rather than making the next launch walk again. */
-		if (!searchcache_has(uri))
-			searchcache_store(uri, searchindex_blob(s_search_index),
-			                  searchindex_bytes(s_search_index));
-		return;
-	}
+	if (strcmp(fresh, held) == 0)
+		return; /* current - nothing to do */
 
 	tl_log("search: %s changed, rescanning", name);
 	searchcache_evict(uri);
-	searchindex_free(s_search_index);
-	s_search_index = NULL;
-	s_search_index_uri[0] = '\0';
 
-	/* Dropping the corpus is not enough. The search that used it has already
-	 * finished and handed back its results, so without reissuing it the user
-	 * is left looking at the stale answer with nothing on screen to say so -
-	 * and no amount of waiting corrects it.
+	/* Evicting is not enough. The search that used it has already
+	 * The search that used it has already finished and handed back its
+	 * results, so without reissuing it the user is left looking at the stale
+	 * answer with nothing on screen to say so - and no amount of waiting
+	 * corrects it.
 	 *
 	 * Only reissue while the user is still on the same query; if they have
 	 * moved on, a newer request already governs. */
@@ -1963,19 +1929,12 @@ static void do_track_search(bool higher_priority_work)
 {
 	track_search_request request;
 	LightLock_Lock(&s_lock);
-	const bool forget = s_search_forget;
-	s_search_forget = false;
 	const bool pending = s_track_search_pending;
 	if (pending) {
 		request = s_track_search_want;
 		s_track_search_pending = false;
 	}
 	LightLock_Unlock(&s_lock);
-	if (forget) {
-		searchindex_free(s_search_index);
-		s_search_index = NULL;
-		s_search_index_uri[0] = '\0';
-	}
 	if (pending) {
 		/* Free before the memset, not after: it would otherwise zero the
 		 * pointer to a builder the previous request left running and leak
@@ -1999,37 +1958,29 @@ static void do_track_search(bool higher_priority_work)
 		 * the user a refresh is happening, so there is no second indicator to
 		 * keep in step. */
 		bool served = false;
-		if (s_search_index &&
-		    strcmp(s_search_index_uri, j->collection.context_uri) == 0)
-			served = track_search_answer_from_index(j, s_search_index, true);
-
-		if (!served) {
-			searchindex *disk = searchcache_load(j->collection.context_uri);
-			if (disk) {
-				served = track_search_answer_from_index(j, disk, false);
-				if (served) {
-					/* Promote to the in-memory slot so refining the query
-					 * costs neither network nor card. */
-					searchindex_free(s_search_index);
-					s_search_index = disk;
-					snprintf(s_search_index_uri, sizeof s_search_index_uri,
-					         "%.127s", j->collection.context_uri);
-				} else {
-					searchindex_free(disk);
-				}
-			}
+		char served_snapshot[SEARCHINDEX_SNAPSHOT_MAX + 1] = "";
+		searchindex *stored = searchcache_load(j->collection.context_uri);
+		if (stored) {
+			served = track_search_answer_from_index(j, stored);
+			snprintf(served_snapshot, sizeof served_snapshot, "%s",
+			         searchindex_snapshot(stored));
+			/* Released straight away. Holding it would make refining a query
+			 * cheaper, but it is the card's copy that gets validated and
+			 * evicted, and a second copy outliving those is how the two came
+			 * to disagree. */
+			searchindex_free(stored);
 		}
 
-		/* Whether the corpus is still current is a property of the
+		/* Whether the stored index is still current is a property of the
 		 * collection, not of this query. Checking it inline would tie a
 		 * ~300ms request to a generation the user invalidates every time they
-		 * retype, so the check is deferred to the tick loop, where it can
-		 * outlive the query that triggered it. */
-		/* Only playlists carry a version to check. An album is immutable and
-		 * is never stored, so arming this for one would send a
-		 * /v1/playlists/<album id> request that can only 404 - once per repeat
-		 * search, forever, since asking for a snapshot deliberately bypasses
-		 * the name cache. */
+		 * retype, so it is deferred to the tick loop, where it can outlive the
+		 * query that triggered it.
+		 *
+		 * Playlists only. An album is immutable and is never stored, so
+		 * arming this for one would send a /v1/playlists/<album id> request
+		 * that can only 404 - once per repeat search, forever, since asking
+		 * for a snapshot deliberately bypasses the name cache. */
 		if (served && j->collection.kind == COLLECTION_PLAYLIST) {
 			snprintf(s_search_validate_uri, sizeof s_search_validate_uri,
 			         "%.127s", j->collection.context_uri);
@@ -2037,6 +1988,8 @@ static void do_track_search(bool higher_priority_work)
 			snprintf(s_search_validate_query, sizeof s_search_validate_query,
 			         "%.63s", j->query);
 			s_search_validate_generation = j->generation;
+			snprintf(s_search_validate_snapshot,
+			         sizeof s_search_validate_snapshot, "%s", served_snapshot);
 			j->active = false;
 			return;
 		}
@@ -2166,26 +2119,18 @@ static void do_track_search(bool higher_priority_work)
 			 * unverifiable entry is worse than none: every later search would
 			 * see a blank version, conclude the playlist had changed, and walk
 			 * the whole thing again - amplifying load in exactly the
-			 * conditions that made the request fail. Keeping it in memory for
-			 * this session is still worth it.
+			 * conditions that made the request fail. This search still returns
+			 * its results; the next one simply scans again.
 			 *
-			 * Store before adopting: searchindex_open takes the blob, and the
-			 * write needs the bytes. Both happen after the results are on
-			 * screen, since the card costs ~140ms. */
-			if (job->snapshot[0])
+			 * Written after the results are on screen, since the card costs
+			 * ~140ms. */
+			if (job->snapshot[0]) {
 				searchcache_store(job->collection.context_uri, blob, len);
-			searchindex *fresh = searchindex_open(blob, len);
-			if (fresh) {
-				searchindex_free(s_search_index);
-				s_search_index = fresh;
-				snprintf(s_search_index_uri, sizeof s_search_index_uri, "%.127s",
-				         job->collection.context_uri);
 				tl_log("search: indexed %d tracks (%u bytes) for %s",
-				       searchindex_count(fresh), (unsigned)len,
+				       searchindex_builder_count(job->builder), (unsigned)len,
 				       job->collection.name);
-			} else {
-				free(blob);
 			}
+			free(blob);
 		}
 		searchindex_builder_free(job->builder);
 		job->builder = NULL;

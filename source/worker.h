@@ -154,11 +154,6 @@ typedef struct {
 	/* Answered from the retained corpus rather than by walking the
 	 * collection again, so `scanned` reflects the index, not the network. */
 	bool               from_cache;
-	/* True when the corpus came from the in-memory copy rather than being
-	 * read back off the card. Lets the smoketest tell the two tiers apart,
-	 * which is otherwise invisible: both answer without touching the
-	 * network. */
-	bool               from_memory;
 	char               error[160];
 } worker_track_search_status;
 
@@ -180,10 +175,6 @@ void worker_track_search_payload_move(worker_track_search_payload *dst,
 
 unsigned worker_request_track_search(const collection_item *collection,
                                      const char *query);
-
-/* Drop the retained corpus, so the next search reads from the card or walks
- * the collection again. The stored copy is left alone. */
-void worker_forget_search_index(void);
 void worker_cancel_track_search(void);
 void worker_get_track_search_status(worker_track_search_status *out);
 bool worker_take_track_search(worker_track_search_payload *out);

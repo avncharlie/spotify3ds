@@ -58,6 +58,9 @@ bool searchindex_builder_add_page(searchindex_builder *builder,
                                   const track_page *page);
 void searchindex_builder_free(searchindex_builder *builder);
 
+/* How many records have been packed so far. */
+int searchindex_builder_count(const searchindex_builder *builder);
+
 /* Hand over the finished blob. The builder keeps nothing; the caller owns
  * `out` and must free it. Fails if nothing was added or the cap was hit. */
 bool searchindex_builder_finish(searchindex_builder *builder,

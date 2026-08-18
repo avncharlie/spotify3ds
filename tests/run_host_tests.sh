@@ -29,7 +29,16 @@ CFLAGS=(-std=c11 -Wall -Wextra -Werror -I"$ROOT/source")
 	"$ROOT/source/spotify/tracks_search.c" \
 	-o "$TMP/test_tracks_search"
 
+# The index is a binary format read back off an SD card, so it is worth
+# proving it never reads outside the blob it was handed.
+"$CC" "${CFLAGS[@]}" -fsanitize=address,undefined \
+	"$ROOT/tests/test_searchindex.c" \
+	"$ROOT/source/spotify/searchindex.c" \
+	"$ROOT/source/spotify/tracks_search.c" \
+	-o "$TMP/test_searchindex"
+
 "$TMP/test_artcache_shard"
 "$TMP/test_http"
 "$TMP/test_lyrics"
 "$TMP/test_tracks_search"
+"$TMP/test_searchindex"

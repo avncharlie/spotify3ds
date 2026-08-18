@@ -175,6 +175,7 @@ bool track_search_consider_page(track_search_results *results,
 	                            const track_page *page, const char *query,
 	                            bool match_album)
 {
+	// Rank tracks on page and place in result heap
 	if (!results || !page || !query || !query[0])
 		return false;
 	if (page->total > results->source_total)

@@ -2125,6 +2125,7 @@ static void do_track_search(bool higher_priority_work)
 	 * with came from the library listing and may predate an edit. */
 	searchindex_builder_set_item_total(job->builder, page->total);
 	const int matched_before = job->results.matched_total;
+	// rank tracks in page against query and store in results heap
 	if (!track_search_consider_page(
 	        &job->results, page, job->query,
 	        job->collection.kind == COLLECTION_PLAYLIST)) {

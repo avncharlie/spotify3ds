@@ -147,16 +147,17 @@ static bool                  g_search_popover;
 /* Assemble the panel's args from the store. Returns false when there is
  * nothing to show, which is also the signal not to draw it at all. */
 static bool search_popover_fill(search_popover_args *out, C2D_TextBuf buf,
-	                            const touch_state *t)
+	                            const touch_state *t,
+	                            searchhistory_scope scope)
 {
 	memset(out, 0, sizeof *out);
 	out->buf = buf;
 	out->tb = &g_tb;
 	out->pressed_id = t->down ? t->press_id : -1;
-	const int have = searchhistory_count();
+	const int have = searchhistory_count(scope);
 	out->count = have < SEARCHHISTORY_SHOWN ? have : SEARCHHISTORY_SHOWN;
 	for (int i = 0; i < out->count; i++)
-		out->queries[i] = searchhistory_at(i);
+		out->queries[i] = searchhistory_at(scope, i);
 	return out->count > 0;
 }
 
@@ -538,8 +539,8 @@ static void library_edit_search(void)
 	while (end > start && isspace((unsigned char)end[-1]))
 		*--end = '\0';
 	library_run_search(start);
-	searchhistory_push(start);
-	searchhistory_flush();
+	searchhistory_push(SEARCHHISTORY_LIBRARY, start);
+	searchhistory_flush(SEARCHHISTORY_LIBRARY);
 }
 
 static const collection_item *list_selected_item(int id, const recent_list *rl,
@@ -708,8 +709,8 @@ static void tracks_edit_search(void)
 		return;
 	}
 	tracks_run_search(start);
-	searchhistory_push(start);
-	searchhistory_flush();
+	searchhistory_push(SEARCHHISTORY_TRACKS, start);
+	searchhistory_flush(SEARCHHISTORY_TRACKS);
 }
 
 static void tracks_open(const collection_item *item)
@@ -1468,10 +1469,17 @@ int main(int argc, char **argv)
 		 * consumed here, or the one press would both close the panel and walk
 		 * out of the view behind it. */
 		const bool popover_had_input = g_search_popover;
+		/* Which history the panel is showing: the library filters names it
+		 * already holds, a collection search scans tracks over the network,
+		 * and a query from one is noise in the other. */
+		const searchhistory_scope pop_scope = input_view == VIEW_LIST
+		                                          ? SEARCHHISTORY_LIBRARY
+		                                          : SEARCHHISTORY_TRACKS;
 		if (g_search_popover) {
 			if (touch.clicked >= SEARCH_POP_ROW0 &&
 			    touch.clicked < SEARCH_POP_ROW0 + SEARCHHISTORY_SHOWN) {
-				const char *q = searchhistory_at(touch.clicked - SEARCH_POP_ROW0);
+				const char *q =
+				    searchhistory_at(pop_scope, touch.clicked - SEARCH_POP_ROW0);
 				if (q) {
 					/* Copied out first: running the search pushes it back to
 					 * the front of the store, which moves what `q` points at. */
@@ -1480,7 +1488,7 @@ int main(int argc, char **argv)
 					/* Dismissed before the search starts, so the panel is
 					 * already gone if the request stalls for a moment. */
 					g_search_popover = false;
-					searchhistory_push(chosen);
+					searchhistory_push(pop_scope, chosen);
 					if (input_view == VIEW_LIST)
 						library_run_search(chosen);
 					else
@@ -1490,13 +1498,19 @@ int main(int argc, char **argv)
 				}
 			} else if (touch.clicked == SEARCH_POP_CLEAR) {
 				g_search_popover = false;
-				searchhistory_clear();
-			} else if (touch.clicked == SEARCH_POP_TYPE) {
-				g_search_popover = false;
-				if (input_view == VIEW_LIST)
-					library_edit_search();
-				else
-					tracks_edit_search();
+				searchhistory_clear(pop_scope);
+			} else if (touch.clicked >= SEARCH_POP_DEL0 &&
+			           touch.clicked < SEARCH_POP_DEL0 + SEARCHHISTORY_SHOWN) {
+				/* Forget one and stay open: deleting several in a row is the
+				 * likely intent, and reopening the panel each time would make
+				 * that tedious. Written straight away - the panel is not
+				 * waiting on anything, and the alternative is losing it if the
+				 * app never reaches another keyboard search. */
+				searchhistory_remove(pop_scope,
+				                     touch.clicked - SEARCH_POP_DEL0);
+				searchhistory_flush(pop_scope);
+				if (searchhistory_count(pop_scope) == 0)
+					g_search_popover = false;
 			} else if (touch.clicked == SEARCH_POP_DISMISS ||
 			           (keys_down & KEY_B)) {
 				g_search_popover = false;
@@ -1593,7 +1607,7 @@ int main(int argc, char **argv)
 				/* Nothing to recall yet: fall through to the keyboard rather
 				 * than opening a panel whose only content is a way out of
 				 * itself. */
-				if (searchhistory_count() > 0)
+				if (searchhistory_count(SEARCHHISTORY_LIBRARY) > 0)
 					g_search_popover = true;
 				else
 					library_edit_search();
@@ -1680,7 +1694,7 @@ int main(int argc, char **argv)
 					g_tracks_cursor = -1;
 				}
 			} else if (touch.long_pressed == TRACK_BTN_SEARCH) {
-				if (searchhistory_count() > 0)
+				if (searchhistory_count(SEARCHHISTORY_TRACKS) > 0)
 					g_search_popover = true;
 				else
 					tracks_edit_search();
@@ -2099,8 +2113,14 @@ int main(int argc, char **argv)
 		/* Opened here; the count is asserted after the draw below, which is
 		 * the only point in the frame where the rects actually exist. */
 		if (g_smoketest && frames == 700) {
-			searchhistory_push("daft punk");
-			searchhistory_push("ella mai");
+			/* Fill past what the panel shows, so the count asserted below is
+			 * the worst case rather than whatever a previous run left. */
+			searchhistory_push(SEARCHHISTORY_TRACKS, "daft punk");
+			searchhistory_push(SEARCHHISTORY_TRACKS, "ella mai");
+			searchhistory_push(SEARCHHISTORY_TRACKS, "adventure of a lifetime");
+			searchhistory_push(SEARCHHISTORY_TRACKS, "kaiser chiefs");
+			searchhistory_push(SEARCHHISTORY_TRACKS, "tame impala");
+			searchhistory_push(SEARCHHISTORY_TRACKS, "fleetwood mac");
 			g_search_popover = true;
 		}
 
@@ -2844,7 +2864,9 @@ int main(int argc, char **argv)
 
 			search_popover_args pop;
 			const bool pop_open =
-			    g_search_popover && search_popover_fill(&pop, textbuf, &touch);
+			    g_search_popover &&
+			    search_popover_fill(&pop, textbuf, &touch,
+			                        SEARCHHISTORY_LIBRARY);
 			/* Registered before the screen adds its own rects: touch_hit takes
 			 * the first match, so the panel only wins by going in first. */
 			if (pop_open)
@@ -2892,7 +2914,9 @@ int main(int argc, char **argv)
 			    search_done && g_track_search_page.count == 0;
 			search_popover_args pop;
 			const bool pop_open =
-			    g_search_popover && search_popover_fill(&pop, textbuf, &touch);
+			    g_search_popover &&
+			    search_popover_fill(&pop, textbuf, &touch,
+			                        SEARCHHISTORY_TRACKS);
 			/* Registered before the screen adds its own rects: touch_hit takes
 			 * the first match, so the panel only wins by going in first. */
 			if (pop_open)
@@ -3035,15 +3059,16 @@ int main(int argc, char **argv)
 			 * count that merely fits is not enough - the header's own buttons
 			 * register whatever happens, so a panel registering nothing at
 			 * all still leaves a plausible-looking total. */
-			const int want = (searchhistory_count() < SEARCHHISTORY_SHOWN
-			                      ? searchhistory_count()
-			                      : SEARCHHISTORY_SHOWN) +
-			                 3;
+			const int stored = searchhistory_count(SEARCHHISTORY_TRACKS);
+			const int shown =
+			    stored < SEARCHHISTORY_SHOWN ? stored : SEARCHHISTORY_SHOWN;
+			/* A row and its delete each, plus CLEAR and the dismiss catcher. */
+			const int want = shown * 2 + 2;
 			tl_step("search_popover",
 			        g_tb.n >= want && g_tb.n < TOUCH_MAX_RECTS &&
-			            searchhistory_count() >= 2,
+			            stored >= 2,
 			        "rects=%d/%d want>=%d history=%d", g_tb.n, TOUCH_MAX_RECTS,
-			        want, searchhistory_count());
+			        want, searchhistory_count(SEARCHHISTORY_TRACKS));
 			g_search_popover = false;
 		}
 

@@ -19,12 +19,17 @@
 #define PANEL_X   (314.0f - PANEL_W)
 #define PANEL_Y   38.0f
 #define NOTCH_CX  302.0f
-#define NOTCH_HW  8.0f
+#define NOTCH_HW  5.0f
 #define NOTCH_TOP 30.0f
 #define ROW_H     28.0f
 #define HDR_H     22.0f
-#define FOOT_H    26.0f
 #define PAD_X     12.0f
+/* Touch column for the per-row delete. Wide enough to hit deliberately even
+ * though the mark drawn inside it is small. */
+#define DEL_W     26.0f
+/* The corner arc used to reach past the notch's base, so the notch appeared to
+ * float over the curve rather than grow out of a straight edge. */
+#define CORNER_R  4.0f
 
 #define CLR_SCRIM   C2D_Color32(0x00, 0x00, 0x00, 0x98)
 #define CLR_PANEL   C2D_Color32(0x1B, 0x1B, 0x1B, 0xFF)
@@ -41,7 +46,7 @@
 
 static float panel_h(int count)
 {
-	return HDR_H + (float)count * ROW_H + FOOT_H;
+	return HDR_H + (float)count * ROW_H;
 }
 
 static void rounded_rect(float x, float y, float w, float h, float r, u32 clr)
@@ -88,19 +93,21 @@ void search_popover_add_hits(const search_popover_args *a)
 {
 	if (!a || !a->tb || a->count <= 0)
 		return;
-	const float h = panel_h(a->count);
 
-	for (int i = 0; i < a->count; i++)
-		tb_add(a->tb, PANEL_X, PANEL_Y + HDR_H + (float)i * ROW_H, PANEL_W,
-		       ROW_H, SEARCH_POP_ROW0 + i);
+	for (int i = 0; i < a->count; i++) {
+		const float top = PANEL_Y + HDR_H + (float)i * ROW_H;
+		/* Delete first, so it wins the overlap: the row rect spans the whole
+		 * width behind it and touch_hit takes whichever was added first. */
+		tb_add(a->tb, PANEL_X + PANEL_W - DEL_W, top, DEL_W, ROW_H,
+		       SEARCH_POP_DEL0 + i);
+		tb_add(a->tb, PANEL_X, top, PANEL_W - DEL_W, ROW_H,
+		       SEARCH_POP_ROW0 + i);
+	}
 
 	/* The header's right half; the full 22px of it, since the word itself is
 	 * only 12px tall. */
 	tb_add(a->tb, PANEL_X + PANEL_W / 2.0f, PANEL_Y, PANEL_W / 2.0f, HDR_H,
 	       SEARCH_POP_CLEAR);
-
-	tb_add(a->tb, PANEL_X, PANEL_Y + h - FOOT_H - 2.0f, PANEL_W, FOOT_H + 2.0f,
-	       SEARCH_POP_TYPE);
 
 	/* Last, and covering everything: a tap on the panel matches one of the
 	 * rects above first, and anything else falls through to here. Registered
@@ -116,10 +123,11 @@ void search_popover_draw(const search_popover_args *a)
 	const float h = panel_h(a->count);
 
 	C2D_DrawRectSolid(0.0f, 0.0f, 0.0f, BOT_W, BOT_H, CLR_SCRIM);
-	rounded_rect(PANEL_X + 3.0f, PANEL_Y + 5.0f, PANEL_W, h, 8.0f, CLR_SHADOW);
-	rounded_rect(PANEL_X, PANEL_Y, PANEL_W, h, 8.0f, CLR_BORDER);
+	rounded_rect(PANEL_X + 3.0f, PANEL_Y + 5.0f, PANEL_W, h, CORNER_R,
+	             CLR_SHADOW);
+	rounded_rect(PANEL_X, PANEL_Y, PANEL_W, h, CORNER_R, CLR_BORDER);
 	rounded_rect(PANEL_X + 1.0f, PANEL_Y + 1.0f, PANEL_W - 2.0f, h - 2.0f,
-	             7.0f, CLR_PANEL);
+	             CORNER_R - 1.0f, CLR_PANEL);
 
 	/* Drawn after the panel so it covers the top border and the two read as
 	 * one shape. A triangle, not a polyline: a stroke would outline it rather
@@ -132,7 +140,7 @@ void search_popover_draw(const search_popover_args *a)
 	                 NOTCH_TOP + 0.5f, CLR_PANEL, 0.0f);
 
 	const float text_x = PANEL_X + PAD_X;
-	const float text_w = PANEL_W - 2.0f * PAD_X;
+	const float text_w = PANEL_W - PAD_X - DEL_W;
 
 	ui_text_tracked(a->buf, "RECENT", text_x,
 	                ui_baseline(PANEL_Y + (HDR_H - ui_px(TY_MICRO)) / 2.0f,
@@ -146,7 +154,7 @@ void search_popover_draw(const search_popover_args *a)
 	const float clear_w = ui_text_width(a->buf, "CLEAR", TY_MICRO);
 	ui_text(a->buf, "CLEAR", PANEL_X + PANEL_W - PAD_X - clear_w,
 	        ui_baseline(PANEL_Y + (HDR_H - ui_px(TY_MICRO)) / 2.0f, TY_MICRO),
-	        TY_MICRO, clear_w, clear_pressed ? CLR_GREEN_PRESS : CLR_SUB);
+	        TY_MICRO, clear_w, clear_pressed ? CLR_GREEN_PRESS : CLR_GREEN);
 
 	for (int i = 0; i < a->count; i++) {
 		const float top = PANEL_Y + HDR_H + (float)i * ROW_H;
@@ -170,13 +178,18 @@ void search_popover_draw(const search_popover_args *a)
 			        ui_baseline(top + (ROW_H - ui_px(TY_ROW_NAME)) / 2.0f,
 			                    TY_ROW_NAME),
 			        TY_ROW_NAME, text_w, CLR_NAME);
+
+		/* Forget just this one. Drawn small and quiet so it does not compete
+		 * with the query, but given a full-height column to hit: the mark is
+		 * the target's centre, not its extent. */
+		const bool del_pressed = a->pressed_id == SEARCH_POP_DEL0 + i;
+		const float dx = PANEL_X + PANEL_W - DEL_W / 2.0f;
+		const float dy = top + ROW_H / 2.0f;
+		const u32 dclr = del_pressed ? CLR_GREEN_PRESS : CLR_CAPTION;
+		const float down[4] = {dx - 3.5f, dy - 3.5f, dx + 3.5f, dy + 3.5f};
+		const float up[4] = {dx + 3.5f, dy - 3.5f, dx - 3.5f, dy + 3.5f};
+		ui_polyline(down, 2, 1.6f, dclr);
+		ui_polyline(up, 2, 1.6f, dclr);
 	}
 
-	const float foot_top = PANEL_Y + h - FOOT_H;
-	C2D_DrawRectSolid(PANEL_X + 1.0f, foot_top, 0.0f, PANEL_W - 2.0f, 1.0f,
-	                  CLR_FOOTDIV);
-	const bool type_pressed = a->pressed_id == SEARCH_POP_TYPE;
-	ui_text(a->buf, "TYPE INSTEAD", text_x,
-	        ui_baseline(foot_top + (FOOT_H - ui_px(TY_MICRO)) / 2.0f, TY_MICRO),
-	        TY_MICRO, text_w, type_pressed ? CLR_GREEN_PRESS : CLR_GREEN);
 }

@@ -17,8 +17,8 @@
 enum {
 	SEARCH_POP_DISMISS = 1900, /* anywhere outside the panel */
 	SEARCH_POP_CLEAR,
-	SEARCH_POP_TYPE,
 	SEARCH_POP_ROW0 = 1910, /* .. + SEARCHHISTORY_SHOWN - 1 */
+	SEARCH_POP_DEL0 = 1930, /* the same, one per row */
 };
 
 typedef struct {

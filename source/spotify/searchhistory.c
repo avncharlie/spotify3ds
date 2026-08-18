@@ -4,7 +4,10 @@
 #include <stdio.h>
 #include <string.h>
 
-#define HISTORY_PATH "sdmc:/spotify/searches.txt"
+static const char *const s_path[SEARCHHISTORY_SCOPES] = {
+	[SEARCHHISTORY_LIBRARY] = "sdmc:/spotify/searches-library.txt",
+	[SEARCHHISTORY_TRACKS] = "sdmc:/spotify/searches-tracks.txt",
+};
 
 /* One query per line, newest first. Simpler than the name cache's format on
  * purpose: that one carries a timestamp because its entries expire, and tabs
@@ -13,9 +16,14 @@
  * search but a newline cannot survive the round trip anyway, which is what
  * makes one-per-line safe. */
 
-static searchhistory_store s_store;
-static bool                s_loaded;
-static bool                s_dirty;
+static searchhistory_store s_store[SEARCHHISTORY_SCOPES];
+static bool                s_loaded[SEARCHHISTORY_SCOPES];
+static bool                s_dirty[SEARCHHISTORY_SCOPES];
+
+static bool valid(searchhistory_scope scope)
+{
+	return scope >= 0 && scope < SEARCHHISTORY_SCOPES;
+}
 
 static bool blank(const char *s)
 {
@@ -59,6 +67,16 @@ void searchhistory_store_push(searchhistory_store *s, const char *query)
 	         query);
 }
 
+void searchhistory_store_remove(searchhistory_store *s, int index)
+{
+	if (!s || index < 0 || index >= s->count)
+		return;
+	memmove(&s->q[index], &s->q[index + 1],
+	        (size_t)(s->count - index - 1) * sizeof s->q[0]);
+	s->count--;
+	memset(s->q[s->count], 0, sizeof s->q[0]);
+}
+
 void searchhistory_store_clear(searchhistory_store *s)
 {
 	if (s)
@@ -67,17 +85,18 @@ void searchhistory_store_clear(searchhistory_store *s)
 
 /* --- file-backed singleton --------------------------------------------- */
 
-static void load(void)
+static void load(searchhistory_scope scope)
 {
-	if (s_loaded)
+	if (!valid(scope) || s_loaded[scope])
 		return;
-	s_loaded = true;
+	s_loaded[scope] = true;
 
-	FILE *f = fopen(HISTORY_PATH, "r");
+	searchhistory_store *st = &s_store[scope];
+	FILE *f = fopen(s_path[scope], "r");
 	if (!f)
 		return;
 	char line[SEARCHHISTORY_QUERY_MAX + 8];
-	while (s_store.count < SEARCHHISTORY_MAX && fgets(line, sizeof line, f)) {
+	while (st->count < SEARCHHISTORY_MAX && fgets(line, sizeof line, f)) {
 		char *nl = strchr(line, '\n');
 		if (nl) {
 			*nl = '\0';
@@ -92,56 +111,77 @@ static void load(void)
 		if (!line[0] || blank(line))
 			continue;
 		/* Straight in, preserving file order: push would reverse it. */
-		snprintf(s_store.q[s_store.count], sizeof s_store.q[0], "%.*s",
+		snprintf(st->q[st->count], sizeof st->q[0], "%.*s",
 		         SEARCHHISTORY_QUERY_MAX - 1, line);
-		s_store.count++;
+		st->count++;
 	}
 	fclose(f);
 }
 
-int searchhistory_count(void)
+int searchhistory_count(searchhistory_scope scope)
 {
-	load();
-	return s_store.count;
+	if (!valid(scope))
+		return 0;
+	load(scope);
+	return s_store[scope].count;
 }
 
-const char *searchhistory_at(int index)
+const char *searchhistory_at(searchhistory_scope scope, int index)
 {
-	load();
-	if (index < 0 || index >= s_store.count)
+	if (!valid(scope))
 		return NULL;
-	return s_store.q[index];
+	load(scope);
+	if (index < 0 || index >= s_store[scope].count)
+		return NULL;
+	return s_store[scope].q[index];
 }
 
-void searchhistory_push(const char *query)
+void searchhistory_push(searchhistory_scope scope, const char *query)
 {
-	load();
-	searchhistory_store_push(&s_store, query);
+	if (!valid(scope))
+		return;
+	load(scope);
+	searchhistory_store_push(&s_store[scope], query);
 	/* Dirty whenever the push was accepted. A promotion leaves the count
 	 * unchanged but reorders the file, so the count is not the test - the
 	 * query reaching the front is. */
-	if (s_store.count > 0 && same_query(s_store.q[0], query))
-		s_dirty = true;
+	if (s_store[scope].count > 0 && same_query(s_store[scope].q[0], query))
+		s_dirty[scope] = true;
 }
 
-void searchhistory_flush(void)
+void searchhistory_flush(searchhistory_scope scope)
 {
-	load();
-	if (!s_dirty)
+	if (!valid(scope))
 		return;
-	FILE *f = fopen(HISTORY_PATH, "w");
+	load(scope);
+	if (!s_dirty[scope])
+		return;
+	FILE *f = fopen(s_path[scope], "w");
 	if (!f)
 		return; /* best effort: the next search simply offers less */
-	for (int i = 0; i < s_store.count; i++)
-		fprintf(f, "%s\n", s_store.q[i]);
+	for (int i = 0; i < s_store[scope].count; i++)
+		fprintf(f, "%s\n", s_store[scope].q[i]);
 	fclose(f);
-	s_dirty = false;
+	s_dirty[scope] = false;
 }
 
-void searchhistory_clear(void)
+void searchhistory_remove(searchhistory_scope scope, int index)
 {
-	load();
-	searchhistory_store_clear(&s_store);
-	remove(HISTORY_PATH);
-	s_dirty = false;
+	if (!valid(scope))
+		return;
+	load(scope);
+	const int before = s_store[scope].count;
+	searchhistory_store_remove(&s_store[scope], index);
+	if (s_store[scope].count != before)
+		s_dirty[scope] = true;
+}
+
+void searchhistory_clear(searchhistory_scope scope)
+{
+	if (!valid(scope))
+		return;
+	load(scope);
+	searchhistory_store_clear(&s_store[scope]);
+	remove(s_path[scope]);
+	s_dirty[scope] = false;
 }

@@ -117,6 +117,60 @@ static void test_long_query(void)
 	assert(s.q[0][SEARCHHISTORY_QUERY_MAX - 1] == '\0');
 }
 
+/* Deleting one entry closes the gap rather than leaving a hole, and the
+ * entries either side keep their order. */
+static void test_remove(void)
+{
+	searchhistory_store s;
+	searchhistory_store_clear(&s);
+	searchhistory_store_push(&s, "a");
+	searchhistory_store_push(&s, "b");
+	searchhistory_store_push(&s, "c"); /* c, b, a */
+
+	searchhistory_store_remove(&s, 1); /* drop b */
+	assert(count_of(&s) == 2);
+	assert(strcmp(s.q[0], "c") == 0);
+	assert(strcmp(s.q[1], "a") == 0);
+
+	searchhistory_store_remove(&s, 0);
+	assert(count_of(&s) == 1);
+	assert(strcmp(s.q[0], "a") == 0);
+
+	/* Out of range must not disturb what is there. */
+	searchhistory_store_remove(&s, 5);
+	searchhistory_store_remove(&s, -1);
+	assert(count_of(&s) == 1);
+
+	searchhistory_store_remove(&s, 0);
+	assert(count_of(&s) == 0);
+
+	/* Pushing after emptying still lands at the front. */
+	searchhistory_store_push(&s, "fresh");
+	assert(count_of(&s) == 1 && strcmp(s.q[0], "fresh") == 0);
+}
+
+/* The two scopes must not see each other: a track title recalled into the
+ * library filter would match nothing, which is the whole reason they are
+ * separate. Exercised through the stores directly, since the singletons want
+ * a filesystem. */
+static void test_scopes_are_independent(void)
+{
+	searchhistory_store lib, trk;
+	searchhistory_store_clear(&lib);
+	searchhistory_store_clear(&trk);
+
+	searchhistory_store_push(&lib, "tame impala");
+	searchhistory_store_push(&trk, "borderline");
+
+	assert(count_of(&lib) == 1 && count_of(&trk) == 1);
+	assert(strcmp(lib.q[0], "tame impala") == 0);
+	assert(strcmp(trk.q[0], "borderline") == 0);
+
+	/* Emptying one leaves the other alone. */
+	searchhistory_store_clear(&trk);
+	assert(count_of(&lib) == 1 && count_of(&trk) == 0);
+}
+
 int main(void)
 {
 	test_push_and_order();
@@ -125,6 +179,9 @@ int main(void)
 	test_capacity();
 	test_rejects();
 	test_long_query();
-	puts("search history: order, promotion, case, capacity, and rejects passed");
+	test_remove();
+	test_scopes_are_independent();
+	puts("search history: order, promotion, case, capacity, removal, scopes, "
+	     "and rejects passed");
 	return 0;
 }

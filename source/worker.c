@@ -2094,6 +2094,9 @@ static void do_track_search(bool higher_priority_work)
 		return;
 	}
 	job->source_total = page->total;
+	/* The pages carry the authoritative count; the one the builder started
+	 * with came from the library listing and may predate an edit. */
+	searchindex_builder_set_item_total(job->builder, page->total);
 	const int matched_before = job->results.matched_total;
 	if (!track_search_consider_page(
 	        &job->results, page, job->query,

@@ -315,6 +315,36 @@ static void test_item_total_counts_skipped_rows(void)
 	searchindex_free(ix);
 }
 
+/* The count the builder is created with comes from the library listing, which
+ * can predate an edit by the time a search runs. The pages carry the real
+ * figure, and the index must be stamped with that - otherwise validation
+ * compares a fresh count against a stale one and concludes wrongly. */
+static void test_item_total_follows_the_pages(void)
+{
+	collection_item c = playlist_of("Grew", 1); /* listing says 1 */
+	track_page page;
+	memset(&page, 0, sizeof page);
+	page.collection = c;
+	page.total = 3; /* the pages say 3 */
+	page.count = 3;
+	for (int i = 0; i < 3; i++)
+		page.items[i] = item(i, "Song", "Artist", "Album", "");
+
+	searchindex_builder *b = searchindex_builder_new(&c, "snap", c.item_total);
+	assert(b);
+	searchindex_builder_set_item_total(b, page.total);
+	assert(searchindex_builder_add_page(b, &page));
+	unsigned char *blob = NULL;
+	size_t         len = 0;
+	assert(searchindex_builder_finish(b, &blob, &len));
+	searchindex_builder_free(b);
+
+	searchindex *ix = searchindex_open(blob, len);
+	assert(ix);
+	assert(searchindex_item_total(ix) == 3); /* not the stale 1 */
+	searchindex_free(ix);
+}
+
 /* A damaged file must read exactly like a missing one, never like a valid
  * index with wrong contents. */
 static void test_corruption_is_a_miss(void)
@@ -564,6 +594,7 @@ int main(void)
 	test_album_collection();
 	test_empty_album_on_playlist();
 	test_item_total_counts_skipped_rows();
+	test_item_total_follows_the_pages();
 	test_corruption_is_a_miss();
 	test_alignment_and_bounds();
 	test_oversized_lengths_rejected();

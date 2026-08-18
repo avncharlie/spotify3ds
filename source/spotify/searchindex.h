@@ -61,6 +61,12 @@ void searchindex_builder_free(searchindex_builder *builder);
 /* How many records have been packed so far. */
 int searchindex_builder_count(const searchindex_builder *builder);
 
+/* What Spotify reported the collection held, taken from the pages as they
+ * arrived. The figure passed to _new comes from the library listing and can
+ * be stale by the time a search runs, so the scan corrects it here. */
+void searchindex_builder_set_item_total(searchindex_builder *builder,
+                                        int item_total);
+
 /* Hand over the finished blob. The builder keeps nothing; the caller owns
  * `out` and must free it. Fails if nothing was added or the cap was hit. */
 bool searchindex_builder_finish(searchindex_builder *builder,

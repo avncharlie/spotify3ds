@@ -343,6 +343,12 @@ int searchindex_builder_count(const searchindex_builder *b)
 	return b ? b->count : 0;
 }
 
+void searchindex_builder_set_item_total(searchindex_builder *b, int item_total)
+{
+	if (b && item_total > 0)
+		b->item_total = item_total;
+}
+
 bool searchindex_builder_finish(searchindex_builder *b, unsigned char **out,
                                 size_t *outlen)
 {

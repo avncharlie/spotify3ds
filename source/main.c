@@ -562,11 +562,16 @@ static void tracks_search_reset_position(void)
 	g_tracks_cursor = -1;
 }
 
-/* Refresh the visible page from a snapshot that changed underneath it - either
- * a scan finding more matches, or a rescan replacing results served from a
- * stale corpus, which can just as easily remove them. The user may already be
- * reading the rows, so the scroll offset and cursor stay put; only a cursor or
- * scroll left past the end is pulled back. */
+/* Refresh the visible page from a snapshot that grew underneath it, while a
+ * scan is still finding matches. The user may already be reading the rows, so
+ * the scroll offset and cursor stay put; only a cursor or scroll left past the
+ * end is pulled back.
+ *
+ * A rescan replacing a stale corpus does not come through here. It arrives
+ * under a new generation and rebuilds from the top, which is the right
+ * outcome: the result set itself changed, so a preserved scroll offset would
+ * point at unrelated rows, and a preserved armed row could send a tap to a
+ * different track than the one the user meant. */
 static void tracks_search_refresh_page(void)
 {
 	const int previous = g_track_search_page.count;

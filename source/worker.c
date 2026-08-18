@@ -2025,7 +2025,12 @@ static void do_track_search(bool higher_priority_work)
 		 * ~300ms request to a generation the user invalidates every time they
 		 * retype, so the check is deferred to the tick loop, where it can
 		 * outlive the query that triggered it. */
-		if (served) {
+		/* Only playlists carry a version to check. An album is immutable and
+		 * is never stored, so arming this for one would send a
+		 * /v1/playlists/<album id> request that can only 404 - once per repeat
+		 * search, forever, since asking for a snapshot deliberately bypasses
+		 * the name cache. */
+		if (served && j->collection.kind == COLLECTION_PLAYLIST) {
 			snprintf(s_search_validate_uri, sizeof s_search_validate_uri,
 			         "%.127s", j->collection.context_uri);
 			s_search_validate_collection = j->collection;

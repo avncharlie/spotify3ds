@@ -34,11 +34,24 @@ typedef struct {
 static entry s_entries[SEARCHCACHE_MAX_ENTRIES];
 static int   s_count;
 static bool  s_loaded;
+/* Highest stamp seen on the card, so a write cannot look older than rows that
+ * are already there when the console's clock disagrees. */
+static long  s_newest;
 
+/* The 3DS clock can be unset or wound backwards, so this is only ever a hint
+ * for ordering. A monotonic floor keeps a fresh write from looking older than
+ * rows already on the card, which would otherwise make it the next thing
+ * evicted despite being the most recently used. */
 static long now_seconds(void)
 {
 	const time_t t = time(NULL);
-	return t == (time_t)-1 ? 0 : (long)t;
+	long now = t == (time_t)-1 ? 0 : (long)t;
+	if (now < 0)
+		now = 0;
+	if (now <= s_newest)
+		now = s_newest + 1;
+	s_newest = now;
+	return now;
 }
 
 /* Playlist ids are base-62, so the hex-only artcache helper cannot be reused;
@@ -91,9 +104,16 @@ static void manifest_load(void)
 			continue; /* a mangled row is dropped, not trusted */
 		if (!safe_id(id))
 			continue;
+		/* A negative stamp cannot come from the clock, only from a damaged or
+		 * hand-edited row, and it would make this entry the eviction victim
+		 * every time. Treat it as unknown-age rather than infinitely old. */
+		if (when < 0)
+			when = 0;
 		s_entries[s_count].when = when;
 		snprintf(s_entries[s_count].id, sizeof s_entries[s_count].id, "%s", id);
 		s_count++;
+		if (when > s_newest)
+			s_newest = when;
 	}
 	fclose(f);
 }
@@ -148,6 +168,21 @@ static void evict_oldest(void)
 	remove(path);
 	tl_log("searchcache: evicted %s", s_entries[oldest].id);
 	manifest_drop(oldest);
+	/* Caller saves the manifest as part of the store that triggered this. */
+}
+
+/* Delete an entry and forget it, so a discarded file cannot leave a row
+ * behind. A phantom row would still count against the entry limit and could
+ * absorb an eviction that should have freed a real file. */
+static void drop_entry(const char *id, const char *path)
+{
+	remove(path);
+	manifest_load();
+	const int at = manifest_find(id);
+	if (at >= 0) {
+		manifest_drop(at);
+		manifest_save();
+	}
 }
 
 searchindex *searchcache_load(const char *context_uri)
@@ -170,7 +205,7 @@ searchindex *searchcache_load(const char *context_uri)
 	if (size <= 0 || (size_t)size > SEARCHINDEX_BYTES_MAX ||
 	    fseek(f, 0, SEEK_SET) != 0) {
 		fclose(f);
-		remove(path);
+		drop_entry(id, path);
 		return NULL;
 	}
 
@@ -183,7 +218,7 @@ searchindex *searchcache_load(const char *context_uri)
 	fclose(f);
 	if (got != (size_t)size) {
 		free(blob);
-		remove(path);
+		drop_entry(id, path);
 		return NULL;
 	}
 
@@ -193,7 +228,7 @@ searchindex *searchcache_load(const char *context_uri)
 	searchindex *ix = searchindex_open(blob, (size_t)got);
 	if (!ix) {
 		free(blob);
-		remove(path);
+		drop_entry(id, path);
 		tl_log("searchcache: discarded unreadable entry %s", id);
 		return NULL;
 	}

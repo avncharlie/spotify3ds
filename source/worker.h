@@ -180,6 +180,10 @@ void worker_track_search_payload_move(worker_track_search_payload *dst,
 
 unsigned worker_request_track_search(const collection_item *collection,
                                      const char *query);
+
+/* Drop the retained corpus, so the next search reads from the card or walks
+ * the collection again. The stored copy is left alone. */
+void worker_forget_search_index(void);
 void worker_cancel_track_search(void);
 void worker_get_track_search_status(worker_track_search_status *out);
 bool worker_take_track_search(worker_track_search_payload *out);

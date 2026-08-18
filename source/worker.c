@@ -106,7 +106,12 @@ static char         s_search_index_uri[128];
  * confirmed yet. Validation runs on a later tick rather than inline, because
  * it costs a request and the query that triggered it is routinely cancelled
  * before one completes - the user types on. */
-static char s_search_validate_uri[128];
+static char            s_search_validate_uri[128];
+/* Set by the render thread; acted on by the worker between searches. */
+static bool            s_search_forget;
+static collection_item s_search_validate_collection;
+static char            s_search_validate_query[TRACK_SEARCH_QUERY_MAX + 1];
+static unsigned        s_search_validate_generation;
 
 /* The lock must be usable before worker_start runs, because main.c can go
  * fatal on a path that never starts the worker at all (e.g. net_init failing). */
@@ -1676,6 +1681,58 @@ unsigned worker_request_track_search(const collection_item *collection,
 	return generation;
 }
 
+/* Reissue a search only while `expect` is still the generation in force.
+ * Checking that outside the lock and then calling the ordinary request would
+ * leave a window where the user retypes in between: the request would then
+ * overwrite their newer query with the older one, and because the render
+ * thread matches incoming payloads against the query it is actually showing,
+ * every result would be discarded and the search would never resolve. */
+static bool reissue_track_search(const collection_item *collection,
+	                             const char *query, unsigned expect)
+{
+	if (!collection || !collection->context_uri[0] || !query || !query[0])
+		return false;
+	worker_track_search_payload discarded;
+	worker_track_search_payload_init(&discarded);
+	ensure_lock();
+	LightLock_Lock(&s_lock);
+	const bool current = expect == s_track_search_generation;
+	if (current) {
+		const unsigned generation = ++s_track_search_generation;
+		s_track_search_want.collection = *collection;
+		snprintf(s_track_search_want.query, sizeof s_track_search_want.query,
+		         "%.63s", query);
+		s_track_search_want.generation = generation;
+		s_track_search_pending = true;
+		if (s_track_search_have)
+			worker_track_search_payload_move(&discarded, &s_track_search_ready);
+		s_track_search_have = false;
+		memset(&s_track_search_status, 0, sizeof s_track_search_status);
+		s_track_search_status.state = TRACK_SEARCH_LOADING;
+		s_track_search_status.generation = generation;
+		snprintf(s_track_search_status.context_uri,
+		         sizeof s_track_search_status.context_uri, "%.127s",
+		         collection->context_uri);
+		snprintf(s_track_search_status.query,
+		         sizeof s_track_search_status.query, "%.63s", query);
+	}
+	LightLock_Unlock(&s_lock);
+	worker_track_search_payload_free(&discarded);
+	return current;
+}
+
+void worker_forget_search_index(void)
+{
+	/* Called from the render thread, while the worker may be part-way through
+	 * walking this very corpus. Freeing it here would pull the blob out from
+	 * under that walk, so only ask - the worker drops it at a point where it
+	 * is not reading it. */
+	ensure_lock();
+	LightLock_Lock(&s_lock);
+	s_search_forget = true;
+	LightLock_Unlock(&s_lock);
+}
+
 void worker_cancel_track_search(void)
 {
 	worker_track_search_payload discarded;
@@ -1874,23 +1931,42 @@ static void do_search_validate(void)
 		return;
 	}
 
-	tl_log("search: %s changed, dropping cached corpus", name);
+	tl_log("search: %s changed, rescanning", name);
 	searchcache_evict(uri);
 	searchindex_free(s_search_index);
 	s_search_index = NULL;
 	s_search_index_uri[0] = '\0';
+
+	/* Dropping the corpus is not enough. The search that used it has already
+	 * finished and handed back its results, so without reissuing it the user
+	 * is left looking at the stale answer with nothing on screen to say so -
+	 * and no amount of waiting corrects it.
+	 *
+	 * Only reissue while the user is still on the same query; if they have
+	 * moved on, a newer request already governs. */
+	if (s_search_validate_query[0])
+		reissue_track_search(&s_search_validate_collection,
+		                     s_search_validate_query,
+		                     s_search_validate_generation);
 }
 
 static void do_track_search(bool higher_priority_work)
 {
 	track_search_request request;
 	LightLock_Lock(&s_lock);
+	const bool forget = s_search_forget;
+	s_search_forget = false;
 	const bool pending = s_track_search_pending;
 	if (pending) {
 		request = s_track_search_want;
 		s_track_search_pending = false;
 	}
 	LightLock_Unlock(&s_lock);
+	if (forget) {
+		searchindex_free(s_search_index);
+		s_search_index = NULL;
+		s_search_index_uri[0] = '\0';
+	}
 	if (pending) {
 		/* Free before the memset, not after: it would otherwise zero the
 		 * pointer to a builder the previous request left running and leak
@@ -1943,6 +2019,10 @@ static void do_track_search(bool higher_priority_work)
 		if (served) {
 			snprintf(s_search_validate_uri, sizeof s_search_validate_uri,
 			         "%.127s", j->collection.context_uri);
+			s_search_validate_collection = j->collection;
+			snprintf(s_search_validate_query, sizeof s_search_validate_query,
+			         "%.63s", j->query);
+			s_search_validate_generation = j->generation;
 			j->active = false;
 			return;
 		}

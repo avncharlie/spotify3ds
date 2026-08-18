@@ -959,6 +959,7 @@ int main(int argc, char **argv)
 	int      cache_probe_first_count = 0;
 	int      cache_probe_first_scanned = 0;
 	u64      cache_probe_started = 0;
+	bool     cache_probe_saw_network = false;
 
 	while (aptMainLoop()) {
 		hidScanInput();
@@ -2230,7 +2231,22 @@ int main(int argc, char **argv)
 				case 9:
 					/* A small collection, so the scan can actually finish
 					 * inside the frame budget: the retained corpus is only
-					 * installed on a complete walk. */
+					 * installed on a complete walk.
+					 *
+					 * Start from nothing on the card, so these stages do not
+					 * inherit an index a previous run left behind - which
+					 * would have its own snapshot to validate and could
+					 * trigger a rescan in the middle of them. */
+					{
+						char p9[160];
+						const char *l9 =
+						    strrchr(tracks_probe_lux.context_uri, ':');
+						snprintf(p9, sizeof p9,
+						         "sdmc:/spotify/searchidx/%s.s3i",
+						         l9 ? l9 + 1 : "");
+						remove(p9);
+						worker_forget_search_index();
+					}
 					tracks_clear_search();
 					g_tracks_collection = tracks_probe_lux;
 					snprintf(g_track_search_query, sizeof g_track_search_query,
@@ -2446,7 +2462,93 @@ int main(int argc, char **argv)
 					break;
 				}
 
-				case 16:
+				case 16: {
+					/* The case that actually bites: a structurally valid index
+					 * whose snapshot no longer matches the playlist, which is
+					 * what happens the moment a track is added. Rewriting the
+					 * snapshot through the builder keeps the crc valid, so the
+					 * entry loads cleanly and only the version check can catch
+					 * it. */
+					searchindex *ix =
+					    searchcache_load(tracks_probe_lux.context_uri);
+					if (!ix) {
+						tl_step("search_rescan_on_change", 0,
+						        "no stored index to age");
+						tracks_probe_stage = 18;
+						break;
+					}
+					searchindex_free(ix);
+
+					char idxpath[160];
+					const char *lid =
+					    strrchr(tracks_probe_lux.context_uri, ':');
+					snprintf(idxpath, sizeof idxpath,
+					         "sdmc:/spotify/searchidx/%s.s3i",
+					         lid ? lid + 1 : "");
+					/* Age the stored snapshot and repair the crc so the entry
+					 * stays loadable. */
+					/* The retained corpus still holds the true snapshot, so
+					 * drop it: otherwise the search below is answered from
+					 * memory and the aged file on the card is never read. */
+					worker_forget_search_index();
+					if (!searchindex_age_file_for_test(idxpath)) {
+						tl_step("search_rescan_on_change", 0,
+						        "could not age %s", idxpath);
+						tracks_probe_stage = 18;
+						break;
+					}
+
+					tracks_clear_search();
+					g_tracks_collection = tracks_probe_lux;
+					snprintf(g_track_search_query, sizeof g_track_search_query,
+					         "%s", "a");
+					g_track_search_mode = true;
+					g_track_search_applied_generation = 0;
+					cache_probe_started = osGetTime();
+					cache_probe_first_scanned = -1;
+					worker_request_track_search(&tracks_probe_lux,
+					                            g_track_search_query);
+					tracks_probe_stage = 17;
+					break;
+				}
+
+				case 17: {
+					worker_track_search_status st;
+					worker_get_track_search_status(&st);
+					if (st.from_cache && cache_probe_first_scanned < 0)
+						cache_probe_first_scanned = 1;
+					/* Polling for the rescan's LOADING state is unreliable - a
+					 * seven-track playlist finishes between two frames. The
+					 * durable evidence is what the rescan leaves behind: the
+					 * stored index carries a real snapshot again rather than
+					 * the aged one, which can only happen if the collection
+					 * was actually walked and rewritten. */
+					char idxpath[160];
+					const char *lid =
+					    strrchr(tracks_probe_lux.context_uri, ':');
+					snprintf(idxpath, sizeof idxpath,
+					         "sdmc:/spotify/searchidx/%s.s3i",
+					         lid ? lid + 1 : "");
+					searchindex *cur = searchcache_load(
+					    tracks_probe_lux.context_uri);
+					if (cur) {
+						cache_probe_saw_network =
+						    strcmp(searchindex_snapshot(cur),
+						           "aged-for-test") != 0;
+						searchindex_free(cur);
+					}
+					if (osGetTime() - cache_probe_started < 15000 &&
+					    !cache_probe_saw_network)
+						break;
+					tl_step("search_rescan_on_change", cache_probe_saw_network,
+					        "served from cache=%d then refreshed on disk=%d",
+					        cache_probe_first_scanned > 0,
+					        (int)cache_probe_saw_network);
+					tracks_probe_stage = 18;
+					break;
+				}
+
+				case 18:
 					tracks_clear_search();
 					g_view = VIEW_PLAYER;
 					tracks_probe_stage = 99;

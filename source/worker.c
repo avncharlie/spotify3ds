@@ -1739,7 +1739,8 @@ static bool track_search_current(unsigned generation)
  * could not be run at all, in which case the caller falls back to the network.
  * `validated` records whether the corpus was known current when it was used. */
 static bool track_search_answer_from_index(track_search_job *job,
-	                                       const searchindex *index)
+	                                       const searchindex *index,
+	                                       bool from_memory)
 {
 	if (!searchindex_search(index, &job->collection, job->query, &job->results)) {
 		track_search_results_free(&job->results);
@@ -1756,6 +1757,7 @@ static bool track_search_answer_from_index(track_search_job *job,
 		s_track_search_status.retained_count = job->results.count;
 		s_track_search_status.truncated = job->results.truncated;
 		s_track_search_status.from_cache = true;
+		s_track_search_status.from_memory = from_memory;
 	}
 	LightLock_Unlock(&s_lock);
 	track_search_publish(job, false);
@@ -1914,12 +1916,12 @@ static void do_track_search(bool higher_priority_work)
 		bool served = false;
 		if (s_search_index &&
 		    strcmp(s_search_index_uri, j->collection.context_uri) == 0)
-			served = track_search_answer_from_index(j, s_search_index);
+			served = track_search_answer_from_index(j, s_search_index, true);
 
 		if (!served) {
 			searchindex *disk = searchcache_load(j->collection.context_uri);
 			if (disk) {
-				served = track_search_answer_from_index(j, disk);
+				served = track_search_answer_from_index(j, disk, false);
 				if (served) {
 					/* Promote to the in-memory slot so refining the query
 					 * costs neither network nor card. */

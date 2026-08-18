@@ -2258,14 +2258,28 @@ int main(int argc, char **argv)
 					 * collection, a later one is answered by the stored
 					 * corpus. What must hold is that the search completed
 					 * and found the rows. */
+					/* On a first launch this walks the collection; on a
+					 * later one the stored corpus answers it. Either is
+					 * correct, but a cache hit here must have come off the
+					 * card, since nothing has been searched yet this run. */
 					tl_step("search_cache_build",
 					        cache_probe_first_count > 0 &&
-					            cache_probe_first_scanned > 0,
+					            cache_probe_first_scanned > 0 &&
+					            (!st.from_cache || !st.from_memory),
 					        "matched=%d scanned=%d from_disk=%d",
 					        cache_probe_first_count, cache_probe_first_scanned,
 					        (int)st.from_cache);
-					/* Same collection, different query: the corpus should
-					 * answer without touching the network. */
+					/* Same collection, different query, with the stored copy
+					 * removed so only the in-memory corpus can answer. */
+					{
+						char p2[160];
+						const char *l2 =
+						    strrchr(tracks_probe_lux.context_uri, ':');
+						snprintf(p2, sizeof p2,
+						         "sdmc:/spotify/searchidx/%s.s3i",
+						         l2 ? l2 + 1 : "");
+						remove(p2);
+					}
 					tracks_clear_search();
 					g_tracks_collection = tracks_probe_lux;
 					snprintf(g_track_search_query, sizeof g_track_search_query,
@@ -2290,10 +2304,16 @@ int main(int argc, char **argv)
 					if (st.state != TRACK_SEARCH_READY)
 						break;
 					const u64 took = osGetTime() - cache_probe_started;
-					/* from_cache is the whole assertion: it is set only on the
-					 * path that never issues a page request. */
-					tl_step("search_cache_hit", st.from_cache,
-					        "cache=%d matched=%d in %ums", (int)st.from_cache,
+					/* Deleting the stored entry first makes this specific to
+					 * the in-memory corpus: with nothing on the card to fall
+					 * back to, answering at all proves the retained one was
+					 * used. Wall-clock is not the assertion - the worker ticks
+					 * at 100ms and validation shares those ticks - but it is
+					 * worth recording. */
+					tl_step("search_cache_hit",
+					        st.from_cache && st.from_memory,
+					        "memory=%d cache=%d matched=%d in %ums",
+					        (int)st.from_memory, (int)st.from_cache,
 					        st.matched_total, (unsigned)took);
 					tracks_probe_stage = 12;
 					break;

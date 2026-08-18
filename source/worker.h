@@ -154,6 +154,11 @@ typedef struct {
 	/* Answered from the retained corpus rather than by walking the
 	 * collection again, so `scanned` reflects the index, not the network. */
 	bool               from_cache;
+	/* True when the corpus came from the in-memory copy rather than being
+	 * read back off the card. Lets the smoketest tell the two tiers apart,
+	 * which is otherwise invisible: both answer without touching the
+	 * network. */
+	bool               from_memory;
 	char               error[160];
 } worker_track_search_status;
 

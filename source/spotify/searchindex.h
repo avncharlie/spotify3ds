@@ -79,6 +79,12 @@ const char *searchindex_snapshot(const searchindex *index);
 /* The bytes this index was opened from, for writing it back out. */
 const unsigned char *searchindex_blob(const searchindex *index);
 int         searchindex_count(const searchindex *index);
+
+/* What Spotify reported the collection held when this index was built. Not
+ * the same as the record count: episodes and local files are skipped, so the
+ * two differ legitimately. This is the figure to compare against a fresh
+ * report from Spotify. */
+int         searchindex_item_total(const searchindex *index);
 size_t      searchindex_bytes(const searchindex *index);
 
 /* Rewrite a stored index's snapshot id in place, leaving it structurally

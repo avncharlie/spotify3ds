@@ -120,6 +120,10 @@ static void test_round_trip(void)
 	searchindex *ix = build(&c, &page, 1, "snap-1");
 	assert(searchindex_count(ix) == 6);
 	assert(strcmp(searchindex_snapshot(ix), "snap-1") == 0);
+	/* What Spotify said the collection held, which validation compares
+	 * against a fresh report. Distinct from the record count, since episodes
+	 * and local files are skipped when packing. */
+	assert(searchindex_item_total(ix) == 6);
 
 	/* Recover every record by searching for something all rows match on:
 	 * use a per-row query instead, then check the materialised fields. */
@@ -286,6 +290,28 @@ static void test_empty_album_on_playlist(void)
 	assert(strcmp(cached.hits[0].item.album, live.hits[0].item.album) == 0);
 	track_search_results_free(&live);
 	track_search_results_free(&cached);
+	searchindex_free(ix);
+}
+
+/* Episodes are not packed, so the record count is lower than what Spotify
+ * reported. Validation must compare against the reported total, or a playlist
+ * holding one would look changed on every single search. */
+static void test_item_total_counts_skipped_rows(void)
+{
+	collection_item c = playlist_of("Mixed", 3);
+	track_page page;
+	memset(&page, 0, sizeof page);
+	page.collection = c;
+	page.total = 3;
+	page.count = 3;
+	page.items[0] = item(0, "Song", "Artist", "Album", "");
+	page.items[1] = item(1, "An Episode", "Host", "Show", "");
+	page.items[1].kind = TRACK_ITEM_EPISODE;
+	page.items[2] = item(2, "Another", "Artist", "Album", "");
+
+	searchindex *ix = build(&c, &page, 1, "snap");
+	assert(searchindex_count(ix) == 2);      /* episode skipped */
+	assert(searchindex_item_total(ix) == 3); /* what Spotify reported */
 	searchindex_free(ix);
 }
 
@@ -537,6 +563,7 @@ int main(void)
 	test_equivalence_with_live_scan();
 	test_album_collection();
 	test_empty_album_on_playlist();
+	test_item_total_counts_skipped_rows();
 	test_corruption_is_a_miss();
 	test_alignment_and_bounds();
 	test_oversized_lengths_rejected();

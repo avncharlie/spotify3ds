@@ -108,6 +108,9 @@ static char            s_search_validate_uri[128];
 /* The version the served index carried, captured when it answered: validation
  * runs later, by which point the index itself is long freed. */
 static char            s_search_validate_snapshot[SEARCHINDEX_SNAPSHOT_MAX + 1];
+/* Records in the index that answered. Compared against what Spotify reports
+ * now, because the snapshot alone has been seen lagging an edit. */
+static int             s_search_validate_count;
 static collection_item s_search_validate_collection;
 static char            s_search_validate_query[TRACK_SEARCH_QUERY_MAX + 1];
 static unsigned        s_search_validate_generation;
@@ -1900,10 +1903,21 @@ static void do_search_validate(void)
 
 	char name[128] = "", owner[128] = "", art[256] = "";
 	char fresh[SEARCHINDEX_SNAPSHOT_MAX + 1] = "";
+	int  live_total = -1;
 	playlist_metadata(uri, name, sizeof name, owner, sizeof owner, art,
-	                  sizeof art, fresh, sizeof fresh);
+	                  sizeof art, fresh, sizeof fresh, &live_total);
 
 	const char *held = s_search_validate_snapshot;
+	const int   held_count = s_search_validate_count;
+	/* Two signals, because neither is sufficient alone. The snapshot has been
+	 * observed reporting the version from before a removal while the item
+	 * count had already dropped - so a count that disagrees means the
+	 * playlist changed even when the versions match. The snapshot still
+	 * catches what the count cannot: a track swapped for another. */
+	const bool count_differs =
+	    live_total >= 0 && held_count >= 0 && live_total != held_count;
+	tl_log("validate %s: fresh=%.10s held=%.10s total=%d/%d", name, fresh,
+	       held, live_total, held_count);
 	if (!fresh[0]) {
 		/* Could not ask - offline, or the playlist is gone. Nothing to do:
 		 * the stored index stays as it is and the next search checks again. */
@@ -1917,10 +1931,11 @@ static void do_search_validate(void)
 		tl_log("search: %s answered without a version, not rescanning", name);
 		return;
 	}
-	if (strcmp(fresh, held) == 0)
+	if (strcmp(fresh, held) == 0 && !count_differs)
 		return; /* current - nothing to do */
 
-	tl_log("search: %s changed, rescanning", name);
+	tl_log("search: %s changed (%s), rescanning", name,
+	       count_differs ? "item count" : "version");
 	searchcache_evict(uri);
 
 	/* Evicting is not enough. The search that used it has already
@@ -1931,10 +1946,14 @@ static void do_search_validate(void)
 	 *
 	 * Only reissue while the user is still on the same query; if they have
 	 * moved on, a newer request already governs. */
-	if (s_search_validate_query[0])
-		reissue_track_search(&s_search_validate_collection,
-		                     s_search_validate_query,
-		                     s_search_validate_generation);
+	if (s_search_validate_query[0]) {
+		const bool sent = reissue_track_search(&s_search_validate_collection,
+		                                       s_search_validate_query,
+		                                       s_search_validate_generation);
+		tl_log("search: reissue \"%s\" expect=%u sent=%d",
+		       s_search_validate_query, s_search_validate_generation,
+		       (int)sent);
+	}
 }
 
 static void do_track_search(bool higher_priority_work)
@@ -1970,12 +1989,14 @@ static void do_track_search(bool higher_priority_work)
 		 * the user a refresh is happening, so there is no second indicator to
 		 * keep in step. */
 		bool served = false;
+		int  served_count = -1;
 		char served_snapshot[SEARCHINDEX_SNAPSHOT_MAX + 1] = "";
 		searchindex *stored = searchcache_load(j->collection.context_uri);
 		if (stored) {
 			served = track_search_answer_from_index(j, stored);
 			snprintf(served_snapshot, sizeof served_snapshot, "%s",
 			         searchindex_snapshot(stored));
+			served_count = searchindex_item_total(stored);
 			/* Released straight away. Holding it would make refining a query
 			 * cheaper, but it is the card's copy that gets validated and
 			 * evicted, and a second copy outliving those is how the two came
@@ -2002,6 +2023,9 @@ static void do_track_search(bool higher_priority_work)
 			s_search_validate_generation = j->generation;
 			snprintf(s_search_validate_snapshot,
 			         sizeof s_search_validate_snapshot, "%s", served_snapshot);
+			s_search_validate_count = served_count;
+			tl_log("search: served %s from cache, armed snapshot=%.10s",
+			       j->collection.name, served_snapshot);
 			j->active = false;
 			return;
 		}
@@ -2017,7 +2041,7 @@ static void do_track_search(bool higher_priority_work)
 			char name[128] = "", owner[128] = "", art[256] = "";
 			playlist_metadata(j->collection.context_uri, name, sizeof name,
 			                  owner, sizeof owner, art, sizeof art,
-			                  j->snapshot, sizeof j->snapshot);
+			                  j->snapshot, sizeof j->snapshot, NULL);
 			if (!track_search_current(j->generation)) {
 				j->active = false;
 				return;
@@ -2375,7 +2399,7 @@ static void do_current_metadata(void)
 	char owner[128] = "";
 	const bool ok = playlist_metadata(uri, item.name, sizeof item.name, owner,
 	                                  sizeof owner, item.art_url,
-	                                  sizeof item.art_url, NULL, 0);
+	                                  sizeof item.art_url, NULL, 0, NULL);
 	if (ok) {
 		snprintf(item.subtitle, sizeof item.subtitle,
 		         "Playlist" SUB_SEP "%.115s",

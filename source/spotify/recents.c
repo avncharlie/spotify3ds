@@ -48,13 +48,15 @@ static bool uri_id(const char *uri, char *out, int outlen)
  * than once per launch. */
 bool playlist_metadata(const char *uri, char *name, int namelen, char *owner,
                        int ownerlen, char *art, int artlen, char *snapshot,
-                       int snaplen)
+                       int snaplen, int *item_total)
 {
 	name[0]  = '\0';
 	owner[0] = '\0';
 	art[0]   = '\0';
 	if (snapshot && snaplen > 0)
 		snapshot[0] = '\0';
+	if (item_total)
+		*item_total = -1;
 
 	/* A hit is only useful if it has the artwork too. Entries written before
 	 * the art column existed read back with an empty url, and returning them
@@ -93,7 +95,7 @@ bool playlist_metadata(const char *uri, char *name, int namelen, char *owner,
 	char path[192];
 	snprintf(path, sizeof path,
 	         "/v1/playlists/%s?fields=name,images,owner(display_name)%s", id,
-	         snapshot ? ",snapshot_id" : "");
+	         snapshot ? ",snapshot_id,items(total)" : "");
 
 	char         err[128];
 	http_response r;
@@ -121,6 +123,11 @@ bool playlist_metadata(const char *uri, char *name, int namelen, char *owner,
 	if (snapshot && snaplen > 0)
 		json_get_str(r.body, r.body_len, "snapshot_id", snapshot,
 		             (size_t)snaplen);
+	if (item_total) {
+		long n = 0;
+		if (json_get_int(r.body, r.body_len, "items.total", &n))
+			*item_total = (int)n;
+	}
 
 	http_free(&r);
 
@@ -234,7 +241,7 @@ player_result recents_fetch(recent_list *out, char *err, int errlen)
 			char pname[128] = "", powner[128] = "", part[256] = "";
 
 			if (playlist_metadata(play_uri, pname, sizeof pname, powner,
-			                      sizeof powner, part, sizeof part, NULL, 0)) {
+			                      sizeof powner, part, sizeof part, NULL, 0, NULL)) {
 				snprintf(it->name, sizeof it->name, "%s", pname);
 				snprintf(it->subtitle, sizeof it->subtitle, "Playlist" SUB_SEP "%s",
 				         powner[0] ? powner : artist);

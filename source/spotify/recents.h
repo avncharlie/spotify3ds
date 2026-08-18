@@ -75,10 +75,15 @@ player_result recents_fetch(recent_list *out, char *err, int errlen);
  * when the caller only wants the label. Asking for it forces the request:
  * the name cache holds entries for a fortnight, and a fortnight-old snapshot
  * would confirm a stale cache instead of catching it. Name, owner and art are
- * still written back to the cache on the way past. */
+ * still written back to the cache on the way past.
+ *
+ * `item_total` may be NULL, and is set to -1 when Spotify does not report it.
+ * It is worth having alongside the snapshot: the snapshot has been observed
+ * lagging a removal, reporting the pre-edit version while the item count had
+ * already dropped. Neither signal alone is sufficient. */
 bool playlist_metadata(const char *uri, char *name, int namelen, char *owner,
                        int ownerlen, char *art, int artlen, char *snapshot,
-                       int snaplen);
+                       int snaplen, int *item_total);
 
 /* GET /v1/me/playlists?limit=50. Blocking; worker thread only.
  *

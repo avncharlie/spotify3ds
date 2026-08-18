@@ -89,6 +89,7 @@ struct searchindex {
 	const unsigned char *payload;
 	size_t               payload_len;
 	int                  count;
+	int                  item_total;
 	/* Whether the album column was stored. Taken from the file rather than
 	 * re-derived from the caller's collection, so an empty album on a
 	 * playlist track stays empty instead of inheriting the playlist name. */
@@ -416,6 +417,7 @@ searchindex *searchindex_open(unsigned char *blob, size_t len)
 	ix->payload = blob + sizeof(searchindex_hdr);
 	ix->payload_len = hdr.payload_len;
 	ix->count = (int)hdr.record_count;
+	ix->item_total = (int)hdr.item_total;
 	ix->match_album = (hdr.flags & 1u) != 0;
 	memcpy(ix->snapshot, hdr.snapshot_id, sizeof ix->snapshot);
 	ix->snapshot[SEARCHINDEX_SNAPSHOT_MAX] = '\0';
@@ -441,6 +443,11 @@ const unsigned char *searchindex_blob(const searchindex *ix)
 }
 
 int searchindex_count(const searchindex *ix) { return ix ? ix->count : 0; }
+
+int searchindex_item_total(const searchindex *ix)
+{
+	return ix ? ix->item_total : -1;
+}
 
 size_t searchindex_bytes(const searchindex *ix) { return ix ? ix->len : 0; }
 

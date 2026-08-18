@@ -127,6 +127,15 @@ static int                   g_tracks_armed = -1;
 static int                   g_tracks_cursor = -1;
 static u64                   g_tracks_arm_until;
 static unsigned              g_tracks_applied_generation;
+static bool                  g_track_search_mode;
+static char                  g_track_search_query[TRACK_SEARCH_QUERY_MAX + 1];
+static worker_track_search_status g_track_search_status;
+static worker_track_search_payload g_track_search_payload;
+static track_page            g_track_search_page;
+static unsigned              g_track_search_applied_generation;
+/* Mirrors the Tracks input gate for the smoketest, which otherwise cannot tell
+ * whether on-screen rows actually accept play/queue taps. */
+static bool                  g_tracks_input_ready;
 /* -2: leave unselected, -1: select last row, otherwise page-local index. */
 static int                   g_tracks_select_on_load = -2;
 
@@ -544,11 +553,112 @@ static void tracks_request_page(int offset, int select_on_load)
 	worker_request_tracks(&g_tracks_collection, offset);
 }
 
+static void tracks_search_reset_position(void)
+{
+	g_tracks_scroll = 0.0f;
+	g_tracks_velocity = 0.0f;
+	g_tracks_armed = -1;
+	g_tracks_cursor = -1;
+}
+
+/* Refresh the visible page from a snapshot that grew underneath it. The user
+ * may already be scrolling through earlier matches, so the scroll offset and
+ * cursor stay where they are; only a cursor left past the end is pulled back. */
+static void tracks_search_refresh_page(void)
+{
+	const int previous = g_track_search_page.count;
+	track_search_build_page(&g_track_search_payload.results,
+	                        &g_tracks_collection, g_track_search_page.offset,
+	                        &g_track_search_page);
+	if (g_track_search_page.count == previous)
+		return;
+	if (g_tracks_cursor >= TRACK_ROW0 &&
+	    g_tracks_cursor - TRACK_ROW0 >= g_track_search_page.count) {
+		g_tracks_cursor = g_track_search_page.count > 0
+		                      ? TRACK_ROW0 + g_track_search_page.count - 1
+		                      : -1;
+		if (g_tracks_armed >= TRACK_ROW0)
+			g_tracks_armed = g_tracks_cursor;
+	}
+	const float max = screen_tracks_max_scroll(g_track_search_page.count,
+	                                           g_tracks_armed);
+	if (g_tracks_scroll > max)
+		g_tracks_scroll = max < 0.0f ? 0.0f : max;
+}
+
+static void tracks_search_build_page(int offset, int select_on_load)
+{
+	offset = offset < 0 ? 0 : (offset / TRACK_PAGE_MAX) * TRACK_PAGE_MAX;
+	track_search_build_page(&g_track_search_payload.results,
+	                        &g_tracks_collection, offset,
+	                        &g_track_search_page);
+	tracks_search_reset_position();
+	g_tracks_select_on_load = select_on_load;
+	if (g_track_search_page.count > 0 && select_on_load != -2) {
+		int index = select_on_load < 0 ? g_track_search_page.count - 1
+		                                   : select_on_load;
+		if (index >= g_track_search_page.count)
+			index = g_track_search_page.count - 1;
+		g_tracks_armed = TRACK_ROW0 + index;
+		g_tracks_cursor = g_tracks_armed;
+		g_tracks_arm_until = osGetTime() + LIST_ARM_MS;
+		g_tracks_scroll = screen_tracks_reveal_row(
+		    g_track_search_page.count, g_tracks_armed, g_tracks_armed,
+		    g_tracks_scroll);
+	}
+}
+
+static void tracks_clear_search(void)
+{
+	worker_cancel_track_search();
+	worker_track_search_payload_free(&g_track_search_payload);
+	memset(&g_track_search_status, 0, sizeof g_track_search_status);
+	memset(&g_track_search_page, 0, sizeof g_track_search_page);
+	g_track_search_mode = false;
+	g_track_search_query[0] = '\0';
+	g_track_search_applied_generation = 0;
+	tracks_search_reset_position();
+}
+
+static void tracks_edit_search(void)
+{
+	SwkbdState keyboard;
+	char query[sizeof g_track_search_query];
+	snprintf(query, sizeof query, "%s", g_track_search_query);
+	swkbdInit(&keyboard, SWKBD_TYPE_NORMAL, 2, (int)sizeof query - 1);
+	swkbdSetHintText(&keyboard, "Track, artist, or album");
+	swkbdSetInitialText(&keyboard, query);
+	swkbdSetButton(&keyboard, SWKBD_BUTTON_LEFT, "Cancel", false);
+	swkbdSetButton(&keyboard, SWKBD_BUTTON_RIGHT, "Find", true);
+	if (swkbdInputText(&keyboard, query, sizeof query) != SWKBD_BUTTON_RIGHT)
+		return;
+	char *start = query;
+	while (*start && isspace((unsigned char)*start))
+		start++;
+	char *end = start + strlen(start);
+	while (end > start && isspace((unsigned char)end[-1]))
+		*--end = '\0';
+	if (!start[0]) {
+		tracks_clear_search();
+		return;
+	}
+	worker_track_search_payload_free(&g_track_search_payload);
+	memset(&g_track_search_status, 0, sizeof g_track_search_status);
+	memset(&g_track_search_page, 0, sizeof g_track_search_page);
+	snprintf(g_track_search_query, sizeof g_track_search_query, "%s", start);
+	g_track_search_mode = true;
+	g_track_search_applied_generation = 0;
+	tracks_search_reset_position();
+	worker_request_track_search(&g_tracks_collection, g_track_search_query);
+	worker_get_track_search_status(&g_track_search_status);
+}
+
 static void tracks_open(const collection_item *item)
 {
 	if (!item)
 		return;
 	g_tracks_return_view = g_view == VIEW_PLAYER ? VIEW_PLAYER : VIEW_LIST;
+	tracks_clear_search();
 	g_tracks_collection = *item;
 	g_view = VIEW_TRACKS;
 	g_tracks_applied_generation = 0;
@@ -779,6 +889,7 @@ int main(int argc, char **argv)
 
 	C2D_TextBuf textbuf = C2D_TextBufNew(TEXTBUF_GLYPHS);
 	worker_lyrics_payload_init(&g_lyrics_payload);
+	worker_track_search_payload_init(&g_track_search_payload);
 
 	char err[256];
 	bool net_up = net_init(err, sizeof err);
@@ -837,6 +948,11 @@ int main(int argc, char **argv)
 	char     tracks_probe_item_uri[128] = "";
 	collection_item tracks_probe_good = {0};
 	collection_item tracks_probe_lux = {0};
+	bool     search_probe_saw_partial = false;
+	bool     search_probe_input_live = false;
+	int      search_probe_partial_count = 0;
+	int      search_probe_partial_scanned = 0;
+	int      search_probe_partial_total = 0;
 
 	while (aptMainLoop()) {
 		hidScanInput();
@@ -1055,7 +1171,35 @@ int main(int argc, char **argv)
 
 		if (input_view == VIEW_TRACKS) {
 			worker_get_tracks(&g_tracks_buf);
-			if (g_tracks_buf.state == TRACKS_READY &&
+			if (g_track_search_mode) {
+				worker_get_track_search_status(&g_track_search_status);
+				worker_track_search_payload incoming;
+				worker_track_search_payload_init(&incoming);
+				if (worker_take_track_search(&incoming)) {
+					const bool current =
+					    incoming.generation == g_track_search_status.generation &&
+					    strcmp(incoming.context_uri,
+					           g_tracks_collection.context_uri) == 0 &&
+					    strcmp(incoming.query, g_track_search_query) == 0;
+					if (current) {
+						const bool first =
+						    g_track_search_applied_generation !=
+						    incoming.generation;
+						worker_track_search_payload_move(&g_track_search_payload,
+						                                 &incoming);
+						g_track_search_applied_generation =
+						    g_track_search_payload.generation;
+						/* The first snapshot builds the page from scratch;
+						 * later ones only extend what the user is already
+						 * looking at. */
+						if (first)
+							tracks_search_build_page(0, -2);
+						else
+							tracks_search_refresh_page();
+					}
+				}
+				worker_track_search_payload_free(&incoming);
+			} else if (g_tracks_buf.state == TRACKS_READY &&
 			    g_tracks_buf.generation != g_tracks_applied_generation) {
 				g_tracks_applied_generation = g_tracks_buf.generation;
 				g_tracks_collection = g_tracks_buf.page.collection;
@@ -1393,23 +1537,44 @@ int main(int argc, char **argv)
 
 		/* --- collection track input ------------------------------------ */
 		if (input_view == VIEW_TRACKS) {
-			track_page *const page = &g_tracks_buf.page;
-			const bool ready = g_tracks_buf.state == TRACKS_READY;
+			track_page *const page = g_track_search_mode
+			                               ? &g_track_search_page
+			                               : &g_tracks_buf.page;
+			/* Rows drawn from a partial snapshot must be playable straight
+			 * away, so this matches what the screen shows rather than waiting
+			 * for the scan to finish. */
+			const bool ready =
+			    g_track_search_mode
+			        ? g_track_search_applied_generation != 0 &&
+			              (g_track_search_status.state == TRACK_SEARCH_READY ||
+			               g_track_search_page.count > 0)
+			        : g_tracks_buf.state == TRACKS_READY;
+			g_tracks_input_ready = ready;
 
 			if (touch.clicked == TRACK_BTN_BACK || (keys_down & KEY_B)) {
-				worker_cancel_tracks();
-				g_view = g_tracks_return_view;
-				g_tracks_armed = -1;
-				g_tracks_cursor = -1;
-			} else if (touch.clicked == TRACK_BTN_PLAY_COLLECTION) {
-				tl_log("tracks: play collection %s",
-				       g_tracks_collection.context_uri);
-				worker_play_context(g_tracks_collection.context_uri);
-				opt_set(&g_opt_play, 1);
+				if (g_track_search_mode) {
+					tracks_clear_search();
+				} else {
+					worker_cancel_tracks();
+					g_view = g_tracks_return_view;
+					g_tracks_armed = -1;
+					g_tracks_cursor = -1;
+				}
+			} else if (touch.clicked == TRACK_BTN_SEARCH) {
+				tracks_edit_search();
 			} else if ((touch.clicked == TRACK_BTN_RETRY ||
 			            (keys_down & KEY_X)) &&
-			           g_tracks_buf.state == TRACKS_ERROR) {
-				tracks_request_page(page->offset, -2);
+			           (g_track_search_mode
+			                ? g_track_search_status.state == TRACK_SEARCH_ERROR
+			                : g_tracks_buf.state == TRACKS_ERROR)) {
+				if (g_track_search_mode) {
+					worker_track_search_payload_free(&g_track_search_payload);
+					g_track_search_applied_generation = 0;
+					worker_request_track_search(&g_tracks_collection,
+					                            g_track_search_query);
+				} else {
+					tracks_request_page(page->offset, -2);
+				}
 			} else if (ready) {
 				if (g_tracks_armed >= 0 && osGetTime() >= g_tracks_arm_until)
 					g_tracks_armed = -1;
@@ -1418,18 +1583,33 @@ int main(int argc, char **argv)
 				    touch.clicked == TRACK_BTN_PREV_PAGE || (keys_down & KEY_ZL);
 				const bool next_page =
 				    touch.clicked == TRACK_BTN_NEXT_PAGE || (keys_down & KEY_ZR);
-				if (prev_page && page->offset > 0) {
+				if (g_track_search_mode && prev_page && page->offset > 0) {
+					tracks_search_build_page(page->offset - TRACK_PAGE_MAX, -2);
+				} else if (g_track_search_mode && prev_page &&
+				           page->collection.kind == COLLECTION_PLAYLIST &&
+				           page->total > page->count) {
+					const int last_offset =
+					    ((page->total - 1) / TRACK_PAGE_MAX) * TRACK_PAGE_MAX;
+					tracks_search_build_page(last_offset, -2);
+				} else if (g_track_search_mode && next_page &&
+				           page->offset + page->count < page->total) {
+					tracks_search_build_page(page->offset + TRACK_PAGE_MAX, -2);
+				} else if (g_track_search_mode && next_page &&
+				           page->collection.kind == COLLECTION_PLAYLIST &&
+				           page->offset > 0 && page->total > page->count) {
+					tracks_search_build_page(0, -2);
+				} else if (!g_track_search_mode && prev_page && page->offset > 0) {
 					tracks_request_page(page->offset - TRACK_PAGE_MAX, -2);
-				} else if (prev_page &&
+				} else if (!g_track_search_mode && prev_page &&
 				           page->collection.kind == COLLECTION_PLAYLIST &&
 				           page->total > page->count) {
 					const int last_offset =
 					    ((page->total - 1) / TRACK_PAGE_MAX) * TRACK_PAGE_MAX;
 					tracks_request_page(last_offset, -2);
-				} else if (next_page &&
+				} else if (!g_track_search_mode && next_page &&
 				           page->offset + page->count < page->total) {
 					tracks_request_page(page->offset + TRACK_PAGE_MAX, -2);
-				} else if (next_page &&
+				} else if (!g_track_search_mode && next_page &&
 				           page->collection.kind == COLLECTION_PLAYLIST &&
 				           page->offset > 0 && page->total > page->count) {
 					tracks_request_page(0, -2);
@@ -1443,18 +1623,35 @@ int main(int argc, char **argv)
 						if (g_tracks_cursor >= TRACK_ROW0)
 							idx += direction;
 
-						if (idx < 0 && page->offset > 0) {
+						if (g_track_search_mode && idx < 0 &&
+						    page->offset > 0) {
+							tracks_search_build_page(page->offset - TRACK_PAGE_MAX,
+							                         -1);
+						} else if (g_track_search_mode && idx < 0 &&
+						           page->collection.kind == COLLECTION_PLAYLIST &&
+						           page->total > page->count) {
+							const int last_offset =
+							    ((page->total - 1) / TRACK_PAGE_MAX) * TRACK_PAGE_MAX;
+							tracks_search_build_page(last_offset, -1);
+						} else if (g_track_search_mode && idx >= page->count &&
+						           page->offset + page->count < page->total) {
+							tracks_search_build_page(page->offset + TRACK_PAGE_MAX, 0);
+						} else if (g_track_search_mode && idx >= page->count &&
+						           page->collection.kind == COLLECTION_PLAYLIST &&
+						           page->offset > 0 && page->total > page->count) {
+							tracks_search_build_page(0, 0);
+						} else if (!g_track_search_mode && idx < 0 && page->offset > 0) {
 							tracks_request_page(page->offset - TRACK_PAGE_MAX, -1);
-						} else if (idx < 0 &&
+						} else if (!g_track_search_mode && idx < 0 &&
 						           page->collection.kind == COLLECTION_PLAYLIST &&
 						           page->total > page->count) {
 							const int last_offset =
 							    ((page->total - 1) / TRACK_PAGE_MAX) * TRACK_PAGE_MAX;
 							tracks_request_page(last_offset, -1);
-						} else if (idx >= page->count &&
+						} else if (!g_track_search_mode && idx >= page->count &&
 						           page->offset + page->count < page->total) {
 							tracks_request_page(page->offset + TRACK_PAGE_MAX, 0);
-						} else if (idx >= page->count &&
+						} else if (!g_track_search_mode && idx >= page->count &&
 						           page->collection.kind == COLLECTION_PLAYLIST &&
 						           page->offset > 0 && page->total > page->count) {
 							tracks_request_page(0, 0);
@@ -1959,6 +2156,67 @@ int main(int argc, char **argv)
 						        tracks.page.items[0].art_url[0] ? "yes" : "no");
 					}
 					tl_step("tracks_view", 1, "bounded loading and page views rendered");
+					/* Search the large playlist: streaming only has something
+					 * to show when the scan spans many pages, so a one-page
+					 * collection cannot exercise this path at all. */
+					g_view = VIEW_TRACKS;
+					tracks_clear_search();
+					g_tracks_collection = tracks_probe_good;
+					snprintf(g_track_search_query, sizeof g_track_search_query,
+					         "%s", "a");
+					g_track_search_mode = true;
+					g_track_search_applied_generation = 0;
+					tracks_probe_generation = worker_request_track_search(
+					    &tracks_probe_good, g_track_search_query);
+					tracks_probe_stage = 8;
+					break;
+
+				case 8: {
+					/* Matches must become visible and playable while the scan
+					 * is still running, not only once it finishes. */
+					worker_track_search_status st;
+					worker_get_track_search_status(&st);
+					if (st.state == TRACK_SEARCH_ERROR) {
+						tl_step("search_stream", 0, "%s", st.error);
+						tracks_probe_stage = 9;
+						break;
+					}
+					if (st.state == TRACK_SEARCH_LOADING &&
+					    g_track_search_page.count > 0 &&
+					    !search_probe_saw_partial) {
+						search_probe_saw_partial = true;
+						search_probe_partial_count = g_track_search_page.count;
+						search_probe_partial_scanned = st.scanned;
+						search_probe_partial_total = st.source_total;
+						/* Read the gate the input block actually used: if it
+						 * is false, play and queue taps are dead on screen. */
+						search_probe_input_live = g_tracks_input_ready;
+					}
+					/* Reporting as soon as streaming is proven keeps the probe
+					 * inside the frame budget; scanning ~1800 tracks to the end
+					 * would take longer than the whole smoketest allows. */
+					if (search_probe_saw_partial ||
+					    st.state == TRACK_SEARCH_READY) {
+						const bool partial_mid_scan =
+						    search_probe_saw_partial &&
+						    search_probe_partial_scanned <
+						        search_probe_partial_total;
+						tl_step("search_stream", partial_mid_scan,
+						        "partial=%d rows=%d at %d/%d scanned",
+						        (int)search_probe_saw_partial,
+						        search_probe_partial_count,
+						        search_probe_partial_scanned,
+						        search_probe_partial_total);
+						tl_step("search_stream_input", search_probe_input_live,
+						        "rows interactive while scanning=%d",
+						        (int)search_probe_input_live);
+						tracks_probe_stage = 9;
+					}
+					break;
+				}
+
+				case 9:
+					tracks_clear_search();
 					g_view = VIEW_PLAYER;
 					tracks_probe_stage = 99;
 					break;
@@ -2125,22 +2383,49 @@ int main(int argc, char **argv)
 			screen_list_draw(&la);
 		} else if (g_view == VIEW_TRACKS) {
 			worker_get_tracks(&g_tracks_buf);
+			const bool search_done =
+			    g_track_search_mode &&
+			    g_track_search_status.state == TRACK_SEARCH_READY &&
+			    g_track_search_applied_generation != 0;
+			/* Matches are drawn the moment the first snapshot lands; the scan
+			 * keeps running behind them. */
+			const bool search_ready =
+			    search_done || (g_track_search_mode &&
+			                    g_track_search_applied_generation != 0 &&
+			                    g_track_search_page.count > 0);
+			const char *track_error = g_track_search_mode
+			                              ? g_track_search_status.error
+			                              : g_tracks_buf.error;
+			const bool no_matches =
+			    search_done && g_track_search_page.count == 0;
 			const screen_tracks_args ta = {
 				.buf = textbuf,
 				.tb = &g_tb,
-				.page = &g_tracks_buf.page,
+				.page = g_track_search_mode ? &g_track_search_page
+				                            : &g_tracks_buf.page,
 				.collection_name = g_tracks_collection.name,
 				.back_label = g_tracks_return_view == VIEW_PLAYER ? "Player"
 				                                                  : "Library",
 				.current_track_uri =
 				    snap.have_state ? snap.state.track_uri : "",
-				.error = g_tracks_buf.error,
+				.error = track_error,
 				.playing = playing,
 				.animation_ms = (unsigned)osGetTime(),
 				.elapsed_ms = progress,
 				.duration_ms = duration,
-				.loading = g_tracks_buf.state == TRACKS_LOADING,
-				.ready = g_tracks_buf.state == TRACKS_READY,
+				.loading = g_track_search_mode
+				               ? g_track_search_status.state == TRACK_SEARCH_LOADING
+				               : g_tracks_buf.state == TRACKS_LOADING,
+				.ready = g_track_search_mode ? search_ready
+				                            : g_tracks_buf.state == TRACKS_READY,
+				.search_mode = g_track_search_mode,
+				.search_query = g_track_search_query,
+				.search_scanned = g_track_search_status.scanned,
+				.search_source_total = g_track_search_status.source_total,
+				.search_matched_total = g_track_search_status.matched_total,
+				.search_truncated = g_track_search_status.truncated,
+				.search_animation_ms = (unsigned)osGetTime(),
+				.no_matches = no_matches,
 				.scroll = g_tracks_scroll,
 				.pressed_id = touch.down ? touch.press_id : -1,
 				.armed_id = g_tracks_armed,
@@ -2264,6 +2549,7 @@ int main(int argc, char **argv)
 
 	worker_stop();
 	lyrics_drop_local();
+	worker_track_search_payload_free(&g_track_search_payload);
 	art_free(&g_art);
 	thumbs_free_all();
 	net_exit();

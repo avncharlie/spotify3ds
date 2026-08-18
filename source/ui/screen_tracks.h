@@ -10,7 +10,7 @@ enum {
 	TRACK_BTN_PREV_PAGE,
 	TRACK_BTN_NEXT_PAGE,
 	TRACK_BTN_RETRY,
-	TRACK_BTN_PLAY_COLLECTION,
+	TRACK_BTN_SEARCH,
 	TRACK_ROW0 = 600, /* .. TRACK_ROW0 + TRACK_PAGE_MAX - 1 */
 	TRACK_QUEUE0 = 700, /* .. TRACK_QUEUE0 + TRACK_PAGE_MAX - 1 */
 	TRACK_PLAY0 = 800, /* .. TRACK_PLAY0 + TRACK_PAGE_MAX - 1 */
@@ -30,6 +30,14 @@ typedef struct {
 	long             duration_ms;
 	bool             loading;
 	bool             ready;
+	bool             search_mode;
+	const char      *search_query;
+	int              search_scanned;
+	int              search_source_total;
+	int              search_matched_total;
+	bool             search_truncated;
+	unsigned         search_animation_ms;
+	bool             no_matches;
 	float            scroll;
 	int              pressed_id;
 	int              armed_id;

@@ -71,7 +71,7 @@ static player_result fetch_network(const collection_item *collection, int offset
 		         "/v1/playlists/%s/items?market=from_token&limit=%d&offset=%d&"
 		         "additional_types=track,episode&fields=total,limit,offset,next,"
 		         "items(is_local,item(type,uri,name,duration_ms,is_playable,"
-		         "explicit,artists(name),album(images)))",
+		         "explicit,artists(name),album(name,images)))",
 		         id, TRACK_PAGE_MAX, offset);
 	}
 
@@ -168,6 +168,10 @@ static player_result fetch_network(const collection_item *collection, int offset
 				snprintf(field, sizeof field, "%s.album.images[0].url", base);
 				json_doc_str(d, field, it->art_url, sizeof it->art_url);
 			}
+			snprintf(field, sizeof field, "%s.album.name", base);
+			json_doc_str(d, field, it->album, sizeof it->album);
+		} else {
+			snprintf(it->album, sizeof it->album, "%s", collection->name);
 		}
 		join_artists(d, base, it->artist, sizeof it->artist);
 

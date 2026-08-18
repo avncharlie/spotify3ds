@@ -15,6 +15,7 @@ typedef enum {
 typedef struct {
 	char name[128];
 	char artist[128];
+	char album[128];
 	char uri[128];
 	char art_url[256];
 	long duration_ms;

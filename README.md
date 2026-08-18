@@ -97,8 +97,10 @@ access at <https://spotify.com/account/apps> if the SD card or file is lost.
   row's right queue icon to queue it directly. Moving past a page boundary with
   D-pad up/down also loads the adjacent page automatically. Playlist pagination
   wraps: `ZL`/Up on the first page opens the last page, and `ZR`/Down on the last
-  page opens the first page. The play icon at the right of the header starts
-  the whole album or playlist without leaving Tracks.
+  page opens the first page. Tap the magnifying glass in the header to search
+  the entire album or playlist by track name, artist, then album. Search scans
+  50 source items at a time, retains the best 500 matches, and paginates results
+  locally. The first `B` clears or cancels search; a second `B` leaves Tracks.
 - Lyrics: press `START` from Player, Library, or Tracks. `B` or the top-left
   back control returns to the screen that opened it. Drag or use D-pad/Circle
   Pad up/down to scroll smoothly, then tap `FOLLOW` to resume synchronized
@@ -122,8 +124,9 @@ edge, row tint, and an equalizer over its artwork. The bars animate while
 playing and remain fixed while paused. The same equalizer marks the current
 collection on the Player shelf, which is always pinned to the leftmost tile.
 
-Only the current 50-track page is kept in RAM, so playlists with thousands of
-songs use the same bounded memory as small playlists. Track ordering is always
+Ordinary browsing keeps only the current 50-track page in RAM. A whole-
+collection search scans every source page, discards nonmatches immediately, and
+retains at most 500 ranked matches (about 383 KiB). Track ordering is always
 fetched fresh from Spotify. Album-cover thumbnails use the content-addressed SD
 artwork cache.
 

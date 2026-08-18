@@ -184,19 +184,28 @@ static void draw_row(const screen_tracks_args *a, const track_item *item,
 	const float name_h = ui_px(TY_ROW_NAME);
 	const float sub_h = ui_px(TY_ROW_SUB);
 	const float top = y + (h - name_h - sub_h - 2.0f) / 2.0f;
-	ui_text(a->buf, item->name, tx, ui_baseline(top, TY_ROW_NAME), TY_ROW_NAME,
-	        tw, current ? CLR_GREEN : text_clr);
+	ui_text_highlight(a->buf, item->name,
+	                  a->search_mode ? a->search_query : NULL, tx,
+	                  ui_baseline(top, TY_ROW_NAME), TY_ROW_NAME, tw,
+	                  current ? CLR_GREEN : text_clr, CLR_GREEN);
 
 	const char *subtitle = item->artist;
+	char search_subtitle[260];
+	if (a->search_mode && item->album[0]) {
+		snprintf(search_subtitle, sizeof search_subtitle, "%s%s%s",
+		         item->artist, item->artist[0] ? " - " : "", item->album);
+		subtitle = search_subtitle;
+	}
 	if (item->is_local)
 		subtitle = "Local file - unavailable";
 	else if (item->kind == TRACK_ITEM_EPISODE)
 		subtitle = "Episode - unavailable";
 	else if (!item->playable)
 		subtitle = item->artist[0] ? item->artist : "Unavailable";
-	ui_text(a->buf, subtitle, tx,
-	        ui_baseline(top + name_h + 2.0f, TY_ROW_SUB), TY_ROW_SUB, tw,
-	        item->playable ? CLR_SUB : CLR_DISABLED);
+	ui_text_highlight(a->buf, subtitle,
+	                  a->search_mode ? a->search_query : NULL, tx,
+	                  ui_baseline(top + name_h + 2.0f, TY_ROW_SUB), TY_ROW_SUB,
+	                  tw, item->playable ? CLR_SUB : CLR_DISABLED, CLR_GREEN);
 
 	if (item->playable)
 		clipped_hit(a->tb, PLAY_X, y, PLAY_W, h, play_id);
@@ -228,14 +237,51 @@ void screen_tracks_draw(const screen_tracks_args *a)
 			C2D_DrawRectSolid(IND_X, ty, 0, IND_W, th, CLR_IND_THMB);
 		}
 	} else {
-		const char *message = a->loading ? "Loading tracks..." : a->error;
+		const char *message = a->loading
+		                          ? (a->search_mode
+		                                 ? (a->error && a->error[0]
+		                                        ? a->error
+		                                        : "Searching collection...")
+		                                 : "Loading tracks...")
+		                          : a->no_matches ? "No matches"
+		                                          : a->error;
 		if (!message || !message[0])
 			message = "No tracks";
 		const float maxw = BOT_W - 2 * PAD_X;
 		ui_text(a->buf, message, PAD_X,
 		        ui_baseline(106, TY_ROW_NAME), TY_ROW_NAME, maxw,
-		        a->loading ? CLR_SUB : CLR_ERROR);
-		if (!a->loading && a->error && a->error[0]) {
+		        a->loading || a->no_matches ? CLR_SUB : CLR_ERROR);
+		if (a->loading && a->search_mode) {
+			char progress[64];
+			snprintf(progress, sizeof progress, "%d / %d scanned - %d matches",
+			         a->search_scanned, a->search_source_total,
+			         a->search_matched_total);
+			ui_text(a->buf, progress, PAD_X,
+			        ui_baseline(128, TY_ROW_SUB), TY_ROW_SUB,
+			        BOT_W - 2 * PAD_X, CLR_SUB);
+			const float bar_x = PAD_X;
+			const float bar_y = 151.0f;
+			const float bar_w = BOT_W - 2 * PAD_X;
+			C2D_DrawRectSolid(bar_x, bar_y, 0, bar_w, 5, CLR_IND_TRK);
+			if (a->search_source_total > 0) {
+				float ratio = (float)a->search_scanned /
+				              (float)a->search_source_total;
+				if (ratio > 1.0f)
+					ratio = 1.0f;
+				C2D_DrawRectSolid(bar_x, bar_y, 0, bar_w * ratio, 5, CLR_GREEN);
+			} else {
+				const float segment = 54.0f;
+				const unsigned span = (unsigned)(bar_w - segment);
+				const unsigned cycle = span
+				    ? (a->search_animation_ms / 7) % (span * 2)
+				    : 0;
+				const float offset =
+				    (float)(cycle <= span ? cycle : span * 2 - cycle);
+				C2D_DrawRectSolid(bar_x + offset, bar_y, 0, segment, 5,
+				                  CLR_GREEN);
+			}
+		}
+		if (!a->loading && !a->no_matches && a->error && a->error[0]) {
 			const bool pressed = a->pressed_id == TRACK_BTN_RETRY;
 			rounded_rect(116, 135, 88, 34, 7,
 			             pressed ? CLR_GREEN_PRESS : CLR_GREEN);
@@ -249,16 +295,43 @@ void screen_tracks_draw(const screen_tracks_args *a)
 	/* Fixed page caption: rows are drawn first so this strip masks anything
 	 * scrolling beneath it, just like the fixed navigation header above. */
 	C2D_DrawRectSolid(0, HEADER_H, 0, BOT_W, CAPTION_H, CLR_HEADER);
-	ui_text_tracked(a->buf, "TRACKS", PAD_X,
+	const char *caption = a->search_mode
+	                          ? (a->loading ? "SEARCHING" : "RESULTS")
+	                          : "TRACKS";
+	ui_text_tracked(a->buf, caption, PAD_X,
 	                ui_baseline(HEADER_H +
 	                                (CAPTION_H - ui_px(TY_MICRO)) / 2,
 	                            TY_MICRO),
 	                TY_MICRO, 1.1f, CLR_CAPTION);
+	if (a->search_mode && a->search_query && a->search_query[0])
+		ui_text(a->buf, a->search_query, 96.0f,
+		        ui_baseline(HEADER_H +
+		                        (CAPTION_H - ui_px(TY_MICRO)) / 2,
+		                    TY_MICRO),
+		        TY_MICRO, 90.0f, CLR_GREEN);
+	/* Rows have taken over the screen while the scan continues, so the caption
+	 * strip carries the progress the placeholder panel would have shown. */
+	if (a->search_mode && a->loading && a->ready) {
+		const float bar_y = HEADER_H + CAPTION_H - 2.0f;
+		C2D_DrawRectSolid(0, bar_y, 0, BOT_W, 2, CLR_IND_TRK);
+		if (a->search_source_total > 0) {
+			float ratio = (float)a->search_scanned /
+			              (float)a->search_source_total;
+			if (ratio > 1.0f)
+				ratio = 1.0f;
+			C2D_DrawRectSolid(0, bar_y, 0, BOT_W * ratio, 2, CLR_GREEN);
+		}
+	}
 	if (a->ready && a->page) {
-		char range[32];
+		char range[48];
 		const int first = count ? a->page->offset + 1 : 0;
 		const int last = a->page->offset + count;
-		snprintf(range, sizeof range, "%d-%d / %d", first, last, a->page->total);
+		if (a->search_mode && a->search_truncated)
+			snprintf(range, sizeof range, "%d-%d/%d (%d)", first, last,
+			         a->page->total, a->search_matched_total);
+		else
+			snprintf(range, sizeof range, "%d-%d / %d", first, last,
+			         a->page->total);
 		const float rw = ui_text_width(a->buf, range, TY_MICRO);
 		ui_text(a->buf, range, BOT_W - PAD_X - rw,
 		        ui_baseline(HEADER_H +
@@ -314,12 +387,13 @@ void screen_tracks_draw(const screen_tracks_args *a)
 		}
 	}
 
-	const bool collection_pressed =
-	    a->pressed_id == TRACK_BTN_PLAY_COLLECTION;
-	ui_disc(302, 15, 10, collection_pressed ? CLR_GREEN_PRESS : CLR_GREEN);
-	C2D_DrawTriangle(299, 10, CLR_ACTION, 299, 20, CLR_ACTION, 306, 15,
-	                 CLR_ACTION, 0);
-	tb_add(a->tb, 280, 0, 40, HEADER_H, TRACK_BTN_PLAY_COLLECTION);
+	const bool search_pressed = a->pressed_id == TRACK_BTN_SEARCH;
+	const u32 search_bg = search_pressed ? CLR_GREEN_PRESS : CLR_GREEN;
+	ui_disc(302, 15, 10, search_bg);
+	ui_disc(300, 13, 4, CLR_ACTION);
+	ui_disc(300, 13, 2, search_bg);
+	C2D_DrawLine(303, 16, CLR_ACTION, 307, 20, CLR_ACTION, 2, 0);
+	tb_add(a->tb, 280, 0, 40, HEADER_H, TRACK_BTN_SEARCH);
 
 	ui_progress_bar(a->elapsed_ms, a->duration_ms);
 }

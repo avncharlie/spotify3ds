@@ -61,6 +61,33 @@ static worker_lyrics_status   s_lyrics_status;
 static worker_lyrics_payload  s_lyrics_ready;
 static bool                   s_lyrics_have;
 
+typedef struct {
+	collection_item collection;
+	char            query[TRACK_SEARCH_QUERY_MAX + 1];
+	unsigned        generation;
+} track_search_request;
+
+typedef struct {
+	collection_item      collection;
+	char                 query[TRACK_SEARCH_QUERY_MAX + 1];
+	unsigned             generation;
+	int                  next_offset;
+	int                  source_total;
+	u64                  next_request_at;
+	u64                  next_publish_at;
+	unsigned             sequence;
+	bool                 active;
+	track_search_results results;
+} track_search_job;
+
+static track_search_request        s_track_search_want;
+static bool                        s_track_search_pending;
+static unsigned                    s_track_search_generation;
+static worker_track_search_status  s_track_search_status;
+static worker_track_search_payload s_track_search_ready;
+static bool                        s_track_search_have;
+static track_search_job            s_track_search_job;
+
 /* The lock must be usable before worker_start runs, because main.c can go
  * fatal on a path that never starts the worker at all (e.g. net_init failing). */
 static void ensure_lock(void)
@@ -68,6 +95,8 @@ static void ensure_lock(void)
 	if (!s_lock_ready) {
 		LightLock_Init(&s_lock);
 		worker_lyrics_payload_init(&s_lyrics_ready);
+		worker_track_search_payload_init(&s_track_search_ready);
+		track_search_results_init(&s_track_search_job.results);
 		s_lock_ready = true;
 	}
 }
@@ -179,7 +208,8 @@ static void do_art(void);
 static void do_recents(void);
 static void do_playlists(void);
 static void do_albums(void);
-static void do_tracks(void);
+static bool do_tracks(void);
+static void do_track_search(bool higher_priority_work);
 static void do_lyrics(void);
 static void do_thumbs(void);
 static void do_current_metadata(void);
@@ -669,7 +699,8 @@ static void worker_main(void *arg)
 		/* Download art after polling, so a fresh URL from the poll above is
 		 * picked up in the same iteration rather than 100ms later. */
 		do_art();
-		do_tracks();
+		const bool did_tracks = do_tracks();
+		do_track_search(did_work || did_tracks);
 		do_lyrics();
 
 		/* Lists last: the cover the user is looking at matters more than the
@@ -748,11 +779,14 @@ void worker_stop(void)
 	 * shutdown waits for its cancellation checkpoints. This also releases an
 	 * unclaimed ready document. */
 	worker_cancel_lyrics();
+	worker_cancel_track_search();
 	if (s_thread) {
 		threadJoin(s_thread, U64_MAX);
 		threadFree(s_thread);
 		s_thread = NULL;
 	}
+	track_search_results_free(&s_track_search_job.results);
+	worker_track_search_payload_free(&s_track_search_ready);
 }
 
 static bool enqueue(const queued_cmd *q)
@@ -1542,6 +1576,298 @@ static void do_lyrics(void)
 		tl_log("lyrics: failed (%s)", err);
 }
 
+void worker_track_search_payload_init(worker_track_search_payload *payload)
+{
+	if (!payload)
+		return;
+	memset(payload, 0, sizeof *payload);
+	track_search_results_init(&payload->results);
+}
+
+void worker_track_search_payload_free(worker_track_search_payload *payload)
+{
+	if (!payload)
+		return;
+	track_search_results_free(&payload->results);
+	payload->generation = 0;
+	payload->context_uri[0] = '\0';
+	payload->query[0] = '\0';
+}
+
+void worker_track_search_payload_move(worker_track_search_payload *dst,
+	                                  worker_track_search_payload *src)
+{
+	if (!dst || !src || dst == src)
+		return;
+	worker_track_search_payload_free(dst);
+	track_search_results_move(&dst->results, &src->results);
+	dst->generation = src->generation;
+	dst->sequence = src->sequence;
+	dst->partial = src->partial;
+	snprintf(dst->context_uri, sizeof dst->context_uri, "%.127s",
+	         src->context_uri);
+	snprintf(dst->query, sizeof dst->query, "%.63s", src->query);
+	src->generation = 0;
+	src->sequence = 0;
+	src->partial = false;
+	src->context_uri[0] = '\0';
+	src->query[0] = '\0';
+}
+
+unsigned worker_request_track_search(const collection_item *collection,
+	                                 const char *query)
+{
+	if (!collection || !collection->context_uri[0] || !query || !query[0])
+		return 0;
+	worker_track_search_payload discarded;
+	worker_track_search_payload_init(&discarded);
+	ensure_lock();
+	LightLock_Lock(&s_lock);
+	const unsigned generation = ++s_track_search_generation;
+	s_track_search_want.collection = *collection;
+	snprintf(s_track_search_want.query, sizeof s_track_search_want.query, "%.63s",
+	         query);
+	s_track_search_want.generation = generation;
+	s_track_search_pending = true;
+	if (s_track_search_have)
+		worker_track_search_payload_move(&discarded, &s_track_search_ready);
+	s_track_search_have = false;
+	memset(&s_track_search_status, 0, sizeof s_track_search_status);
+	s_track_search_status.state = TRACK_SEARCH_LOADING;
+	s_track_search_status.generation = generation;
+	snprintf(s_track_search_status.context_uri,
+	         sizeof s_track_search_status.context_uri, "%.127s",
+	         collection->context_uri);
+	snprintf(s_track_search_status.query, sizeof s_track_search_status.query,
+	         "%.63s", query);
+	LightLock_Unlock(&s_lock);
+	worker_track_search_payload_free(&discarded);
+	return generation;
+}
+
+void worker_cancel_track_search(void)
+{
+	worker_track_search_payload discarded;
+	worker_track_search_payload_init(&discarded);
+	ensure_lock();
+	LightLock_Lock(&s_lock);
+	s_track_search_generation++;
+	s_track_search_pending = false;
+	if (s_track_search_have)
+		worker_track_search_payload_move(&discarded, &s_track_search_ready);
+	s_track_search_have = false;
+	memset(&s_track_search_status, 0, sizeof s_track_search_status);
+	s_track_search_status.state = TRACK_SEARCH_IDLE;
+	s_track_search_status.generation = s_track_search_generation;
+	LightLock_Unlock(&s_lock);
+	worker_track_search_payload_free(&discarded);
+}
+
+void worker_get_track_search_status(worker_track_search_status *out)
+{
+	if (!out)
+		return;
+	ensure_lock();
+	LightLock_Lock(&s_lock);
+	*out = s_track_search_status;
+	LightLock_Unlock(&s_lock);
+}
+
+bool worker_take_track_search(worker_track_search_payload *out)
+{
+	if (!out)
+		return false;
+	worker_track_search_payload claimed;
+	worker_track_search_payload_init(&claimed);
+	ensure_lock();
+	LightLock_Lock(&s_lock);
+	const bool have = s_track_search_have;
+	if (have) {
+		worker_track_search_payload_move(&claimed, &s_track_search_ready);
+		s_track_search_have = false;
+		s_track_search_status.payload_ready = false;
+	}
+	LightLock_Unlock(&s_lock);
+	if (have)
+		worker_track_search_payload_move(out, &claimed);
+	worker_track_search_payload_free(&claimed);
+	return have;
+}
+
+static bool track_search_current(unsigned generation)
+{
+	LightLock_Lock(&s_lock);
+	const bool current = generation == s_track_search_generation;
+	LightLock_Unlock(&s_lock);
+	return current;
+}
+
+static void track_search_fail(track_search_job *job, player_result result,
+	                          const char *error)
+{
+	LightLock_Lock(&s_lock);
+	if (job->generation == s_track_search_generation) {
+		s_track_search_status.state = TRACK_SEARCH_ERROR;
+		s_track_search_status.error[0] = '\0';
+		snprintf(s_track_search_status.error,
+		         sizeof s_track_search_status.error, "%.159s",
+		         error && error[0] ? error : player_result_str(result));
+		s_track_search_status.payload_ready = false;
+	}
+	LightLock_Unlock(&s_lock);
+	track_search_results_free(&job->results);
+	job->active = false;
+}
+
+/* Publish what has matched so far. `results` stays owned by the job: the heap
+ * keeps filling from later pages, so the snapshot is a sorted copy rather than
+ * a move. Running out of memory here only costs this update, not the scan. */
+static void track_search_publish(track_search_job *job, bool partial)
+{
+	track_search_results snapshot;
+	track_search_results_init(&snapshot);
+	if (partial) {
+		if (!track_search_results_copy(&snapshot, &job->results))
+			return;
+		track_search_finalize(&snapshot);
+	} else {
+		track_search_finalize(&job->results);
+		track_search_results_move(&snapshot, &job->results);
+	}
+
+	worker_track_search_payload discarded;
+	worker_track_search_payload_init(&discarded);
+	LightLock_Lock(&s_lock);
+	if (job->generation == s_track_search_generation) {
+		if (s_track_search_have)
+			worker_track_search_payload_move(&discarded, &s_track_search_ready);
+		s_track_search_have = false;
+		track_search_results_move(&s_track_search_ready.results, &snapshot);
+		s_track_search_ready.generation = job->generation;
+		s_track_search_ready.sequence = ++job->sequence;
+		s_track_search_ready.partial = partial;
+		snprintf(s_track_search_ready.context_uri,
+		         sizeof s_track_search_ready.context_uri, "%.127s",
+		         job->collection.context_uri);
+		snprintf(s_track_search_ready.query, sizeof s_track_search_ready.query,
+		         "%.63s", job->query);
+		s_track_search_have = true;
+		if (!partial)
+			s_track_search_status.state = TRACK_SEARCH_READY;
+		s_track_search_status.payload_ready = true;
+	}
+	LightLock_Unlock(&s_lock);
+	worker_track_search_payload_free(&discarded);
+	track_search_results_free(&snapshot);
+}
+
+static void do_track_search(bool higher_priority_work)
+{
+	track_search_request request;
+	LightLock_Lock(&s_lock);
+	const bool pending = s_track_search_pending;
+	if (pending) {
+		request = s_track_search_want;
+		s_track_search_pending = false;
+	}
+	LightLock_Unlock(&s_lock);
+	if (pending) {
+		track_search_results_free(&s_track_search_job.results);
+		memset(&s_track_search_job, 0, sizeof s_track_search_job);
+		track_search_results_init(&s_track_search_job.results);
+		s_track_search_job.collection = request.collection;
+		snprintf(s_track_search_job.query, sizeof s_track_search_job.query, "%.63s",
+		         request.query);
+		s_track_search_job.generation = request.generation;
+		s_track_search_job.active = true;
+	}
+	track_search_job *job = &s_track_search_job;
+	if (!job->active)
+		return;
+	if (!track_search_current(job->generation)) {
+		track_search_results_free(&job->results);
+		job->active = false;
+		return;
+	}
+	if (higher_priority_work || osGetTime() < job->next_request_at)
+		return;
+
+	track_page *page = malloc(sizeof *page);
+	if (!page) {
+		track_search_fail(job, PLAYER_ERROR, "Out of memory");
+		return;
+	}
+	char err[256] = "";
+	const player_result result = tracks_fetch_page(
+	    &job->collection, job->next_offset, page, err, sizeof err);
+	if (!track_search_current(job->generation)) {
+		free(page);
+		track_search_results_free(&job->results);
+		job->active = false;
+		return;
+	}
+	if (result != PLAYER_OK) {
+		free(page);
+		if (strstr(err, "http 429")) {
+			LightLock_Lock(&s_lock);
+			if (job->generation == s_track_search_generation)
+				snprintf(s_track_search_status.error,
+				         sizeof s_track_search_status.error,
+				         "Rate limited; retrying shortly");
+			LightLock_Unlock(&s_lock);
+			job->next_request_at = osGetTime() + 5000;
+			return;
+		}
+		track_search_fail(job, result, err);
+		return;
+	}
+	job->source_total = page->total;
+	const int matched_before = job->results.matched_total;
+	if (!track_search_consider_page(
+	        &job->results, page, job->query,
+	        job->collection.kind == COLLECTION_PLAYLIST)) {
+		free(page);
+		track_search_fail(job, PLAYER_ERROR, "Out of memory retaining matches");
+		return;
+	}
+	const bool matched_more = job->results.matched_total > matched_before;
+	int next_offset = page->offset + page->count;
+	if (next_offset <= job->next_offset && job->next_offset < page->total)
+		next_offset = job->next_offset + TRACK_PAGE_MAX;
+	if (next_offset > page->total)
+		next_offset = page->total;
+	job->next_offset = next_offset;
+	const bool done = job->next_offset >= page->total || page->count == 0;
+	free(page);
+
+	LightLock_Lock(&s_lock);
+	if (job->generation == s_track_search_generation) {
+		s_track_search_status.error[0] = '\0';
+		s_track_search_status.scanned = job->next_offset;
+		s_track_search_status.source_total = job->source_total;
+		s_track_search_status.matched_total = job->results.matched_total;
+		s_track_search_status.retained_count = job->results.count;
+		s_track_search_status.truncated = job->results.truncated;
+	}
+	LightLock_Unlock(&s_lock);
+	if (!done) {
+		const u64 now = osGetTime();
+		/* Show matches as they are found instead of making the user wait out
+		 * the whole collection, but rebuilding the page costs the render
+		 * thread a scroll reset, so only refresh once a second. */
+		if (matched_more && now >= job->next_publish_at) {
+			track_search_publish(job, true);
+			job->next_publish_at = now + 1000;
+		}
+		job->next_request_at = now + 500;
+		return;
+	}
+
+	track_search_publish(job, false);
+	track_search_results_free(&job->results);
+	job->active = false;
+}
+
 unsigned worker_request_tracks(const collection_item *collection, int offset)
 {
 	if (!collection || !collection->context_uri[0])
@@ -1589,7 +1915,7 @@ void worker_get_tracks(worker_tracks_snapshot *out)
 	LightLock_Unlock(&s_lock);
 }
 
-static void do_tracks(void)
+static bool do_tracks(void)
 {
 	track_request request;
 	LightLock_Lock(&s_lock);
@@ -1601,7 +1927,7 @@ static void do_tracks(void)
 	}
 	LightLock_Unlock(&s_lock);
 	if (!pending)
-		return;
+		return false;
 
 	track_page *page = malloc(sizeof *page);
 	if (!page) {
@@ -1612,7 +1938,7 @@ static void do_tracks(void)
 			snprintf(s_tracks.error, sizeof s_tracks.error, "Out of memory");
 		}
 		LightLock_Unlock(&s_lock);
-		return;
+		return true;
 	}
 
 	char err[256] = "";
@@ -1639,6 +1965,7 @@ static void do_tracks(void)
 		tl_log("tracks offset=%d: %s (%s)", request.offset,
 		       player_result_str(pr), err);
 	free(page);
+	return true;
 }
 
 void worker_play_context(const char *context_uri)

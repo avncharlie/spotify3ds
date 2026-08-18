@@ -6,6 +6,7 @@
 #include "spotify/player.h"
 #include "spotify/recents.h"
 #include "spotify/tracks.h"
+#include "spotify/tracks_search.h"
 
 /* Background network thread.
  *
@@ -131,6 +132,49 @@ typedef struct {
 unsigned worker_request_tracks(const collection_item *collection, int offset);
 void     worker_cancel_tracks(void);
 void     worker_get_tracks(worker_tracks_snapshot *out);
+
+typedef enum {
+	TRACK_SEARCH_IDLE = 0,
+	TRACK_SEARCH_LOADING,
+	TRACK_SEARCH_READY,
+	TRACK_SEARCH_ERROR,
+} track_search_state;
+
+typedef struct {
+	track_search_state state;
+	unsigned           generation;
+	char               context_uri[128];
+	char               query[TRACK_SEARCH_QUERY_MAX + 1];
+	int                scanned;
+	int                source_total;
+	int                matched_total;
+	int                retained_count;
+	bool               truncated;
+	bool               payload_ready;
+	char               error[160];
+} worker_track_search_status;
+
+/* `partial` marks a snapshot published mid-scan. Later pages can outrank what
+ * it holds, so the ordering is only final once the scan reports READY. */
+typedef struct {
+	track_search_results results;
+	unsigned             generation;
+	unsigned             sequence;
+	bool                 partial;
+	char                 context_uri[128];
+	char                 query[TRACK_SEARCH_QUERY_MAX + 1];
+} worker_track_search_payload;
+
+void worker_track_search_payload_init(worker_track_search_payload *payload);
+void worker_track_search_payload_free(worker_track_search_payload *payload);
+void worker_track_search_payload_move(worker_track_search_payload *dst,
+                                      worker_track_search_payload *src);
+
+unsigned worker_request_track_search(const collection_item *collection,
+                                     const char *query);
+void worker_cancel_track_search(void);
+void worker_get_track_search_status(worker_track_search_status *out);
+bool worker_take_track_search(worker_track_search_payload *out);
 
 /* --- lyrics ------------------------------------------------------------
  * Status is cheap to copy every frame. The dynamic document is kept in a

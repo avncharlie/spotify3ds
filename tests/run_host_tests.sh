@@ -24,6 +24,12 @@ CFLAGS=(-std=c11 -Wall -Wextra -Werror -I"$ROOT/source")
 	"$ROOT/source/spotify/json.c" \
 	-o "$TMP/test_lyrics"
 
+"$CC" "${CFLAGS[@]}" \
+	"$ROOT/tests/test_tracks_search.c" \
+	"$ROOT/source/spotify/tracks_search.c" \
+	-o "$TMP/test_tracks_search"
+
 "$TMP/test_artcache_shard"
 "$TMP/test_http"
 "$TMP/test_lyrics"
+"$TMP/test_tracks_search"

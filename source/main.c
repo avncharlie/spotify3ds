@@ -955,7 +955,7 @@ int main(int argc, char **argv)
 	char     tracks_probe_expected[128] = "";
 	char     tracks_probe_item_uri[128] = "";
 	collection_item tracks_probe_good = {0};
-	collection_item tracks_probe_lux = {0};
+	collection_item tracks_probe_small = {0};
 	bool     search_probe_saw_partial = false;
 	bool     search_probe_input_live = false;
 	int      search_probe_partial_count = 0;
@@ -964,6 +964,8 @@ int main(int argc, char **argv)
 	int      cache_probe_first_count = 0;
 	int      cache_probe_first_scanned = 0;
 	u64      cache_probe_started = 0;
+	u64      persist_wait_started = 0;
+	bool     deletable_reported = false;
 	bool     cache_probe_saw_network = false;
 
 	while (aptMainLoop()) {
@@ -1997,7 +1999,7 @@ int main(int argc, char **argv)
 					worker_get_playlists(&g_playlists_buf);
 					worker_get_recents(&g_recents_buf);
 					if (collection_named("good music", &tracks_probe_good) &&
-					    collection_named("lux picks", &tracks_probe_lux)) {
+					    collection_named("album of the life", &tracks_probe_small)) {
 						g_tracks_collection = tracks_probe_good;
 						g_view = VIEW_TRACKS;
 						tracks_probe_generation =
@@ -2005,7 +2007,7 @@ int main(int argc, char **argv)
 						tracks_probe_stage = 1;
 					} else if (frames > 900) {
 						tl_step("tracks_fixtures", 0,
-						        "missing good music or lux picks");
+						        "missing good music or album of the life");
 						tracks_probe_stage = 99;
 					}
 					break;
@@ -2080,9 +2082,9 @@ int main(int argc, char **argv)
 					            track_page_offsets_valid(&tracks.page),
 					        "offset=%d count=%d", tracks.page.offset,
 					        tracks.page.count);
-					g_tracks_collection = tracks_probe_lux;
+					g_tracks_collection = tracks_probe_small;
 					tracks_probe_generation =
-					    worker_request_tracks(&tracks_probe_lux, 0);
+					    worker_request_tracks(&tracks_probe_small, 0);
 					tracks_probe_stage = 4;
 					break;
 
@@ -2091,16 +2093,16 @@ int main(int argc, char **argv)
 					    tracks.state == TRACKS_LOADING)
 						break;
 					if (tracks.state != TRACKS_READY) {
-						tl_step("tracks_lux", 0, "%s", tracks.error);
+						tl_step("tracks_small", 0, "%s", tracks.error);
 						tracks_probe_stage = 99;
 						break;
 					}
-					tracks_probe_lux = tracks.page.collection;
+					tracks_probe_small = tracks.page.collection;
 					int art_count = 0;
 					for (int i = 0; i < tracks.page.count; i++)
 						if (tracks.page.items[i].art_url[0])
 							art_count++;
-					tl_step("tracks_lux",
+					tl_step("tracks_small",
 					        tracks.page.count > 0 &&
 					            tracks.page.total < tracks_probe_good.item_total &&
 					            track_page_offsets_valid(&tracks.page) && art_count > 0,
@@ -2245,19 +2247,19 @@ int main(int argc, char **argv)
 					{
 						char p9[160];
 						const char *l9 =
-						    strrchr(tracks_probe_lux.context_uri, ':');
+						    strrchr(tracks_probe_small.context_uri, ':');
 						snprintf(p9, sizeof p9,
 						         "sdmc:/spotify/searchidx/%s.s3i",
 						         l9 ? l9 + 1 : "");
 						remove(p9);
 					}
 					tracks_clear_search();
-					g_tracks_collection = tracks_probe_lux;
+					g_tracks_collection = tracks_probe_small;
 					snprintf(g_track_search_query, sizeof g_track_search_query,
 					         "%s", "a");
 					g_track_search_mode = true;
 					g_track_search_applied_generation = 0;
-					worker_request_track_search(&tracks_probe_lux,
+					worker_request_track_search(&tracks_probe_small,
 					                            g_track_search_query);
 					tracks_probe_stage = 10;
 					break;
@@ -2293,20 +2295,20 @@ int main(int argc, char **argv)
 					{
 						char p2[160];
 						const char *l2 =
-						    strrchr(tracks_probe_lux.context_uri, ':');
+						    strrchr(tracks_probe_small.context_uri, ':');
 						snprintf(p2, sizeof p2,
 						         "sdmc:/spotify/searchidx/%s.s3i",
 						         l2 ? l2 + 1 : "");
 						remove(p2);
 					}
 					tracks_clear_search();
-					g_tracks_collection = tracks_probe_lux;
+					g_tracks_collection = tracks_probe_small;
 					snprintf(g_track_search_query, sizeof g_track_search_query,
 					         "%s", "e");
 					g_track_search_mode = true;
 					g_track_search_applied_generation = 0;
 					cache_probe_started = osGetTime();
-					worker_request_track_search(&tracks_probe_lux,
+					worker_request_track_search(&tracks_probe_small,
 					                            g_track_search_query);
 					tracks_probe_stage = 11;
 					break;
@@ -2348,7 +2350,7 @@ int main(int argc, char **argv)
 					 * search_cache_hit. */
 					char idxpath[160];
 					const char *lid =
-					    strrchr(tracks_probe_lux.context_uri, ':');
+					    strrchr(tracks_probe_small.context_uri, ':');
 					snprintf(idxpath, sizeof idxpath,
 					         "sdmc:/spotify/searchidx/%s.s3i",
 					         lid ? lid + 1 : "");
@@ -2364,12 +2366,12 @@ int main(int argc, char **argv)
 					fclose(f);
 
 					tracks_clear_search();
-					g_tracks_collection = tracks_probe_lux;
+					g_tracks_collection = tracks_probe_small;
 					snprintf(g_track_search_query, sizeof g_track_search_query,
 					         "%s", "a");
 					g_track_search_mode = true;
 					g_track_search_applied_generation = 0;
-					worker_request_track_search(&tracks_probe_lux,
+					worker_request_track_search(&tracks_probe_small,
 					                            g_track_search_query);
 					tracks_probe_stage = 13;
 					break;
@@ -2392,12 +2394,12 @@ int main(int argc, char **argv)
 					 * loader and is asserted directly. */
 					char idxpath[160];
 					const char *lid =
-					    strrchr(tracks_probe_lux.context_uri, ':');
+					    strrchr(tracks_probe_small.context_uri, ':');
 					snprintf(idxpath, sizeof idxpath,
 					         "sdmc:/spotify/searchidx/%s.s3i",
 					         lid ? lid + 1 : "");
 					const bool rejected =
-					    searchcache_load(tracks_probe_lux.context_uri) == NULL;
+					    searchcache_load(tracks_probe_small.context_uri) == NULL;
 					const bool removed = fopen(idxpath, "rb") == NULL;
 					tl_step("search_cache_stale",
 					        rejected && st.matched_total > 0,
@@ -2412,19 +2414,19 @@ int main(int argc, char **argv)
 					 * an error: the store is disposable by design. */
 					char idxpath[160];
 					const char *lid =
-					    strrchr(tracks_probe_lux.context_uri, ':');
+					    strrchr(tracks_probe_small.context_uri, ':');
 					snprintf(idxpath, sizeof idxpath,
 					         "sdmc:/spotify/searchidx/%s.s3i",
 					         lid ? lid + 1 : "");
 					remove(idxpath);
 					remove("sdmc:/spotify/searchidx/index.txt");
 					tracks_clear_search();
-					g_tracks_collection = tracks_probe_lux;
+					g_tracks_collection = tracks_probe_small;
 					snprintf(g_track_search_query, sizeof g_track_search_query,
 					         "%s", "a");
 					g_track_search_mode = true;
 					g_track_search_applied_generation = 0;
-					worker_request_track_search(&tracks_probe_lux,
+					worker_request_track_search(&tracks_probe_small,
 					                            g_track_search_query);
 					tracks_probe_stage = 15;
 					break;
@@ -2440,17 +2442,25 @@ int main(int argc, char **argv)
 					}
 					if (st.state != TRACK_SEARCH_READY)
 						break;
-					tl_step("search_cache_deletable", st.matched_total > 0,
-					        "recovered after deletion matched=%d",
-					        st.matched_total);
+					if (!deletable_reported) {
+						deletable_reported = true;
+						tl_step("search_cache_deletable", st.matched_total > 0,
+						        "recovered after deletion matched=%d",
+						        st.matched_total);
+					}
 
 					/* The rebuild must have gone back to the card. Reading the
 					 * file directly is the only way to prove the store works:
 					 * every other assertion here is also satisfied by a search
-					 * that simply never cached anything. */
+					 * that simply never cached anything.
+					 *
+					 * The write trails the results deliberately - it costs
+					 * ~140ms and must not hold up the UI - so give it a moment
+					 * to land rather than reading the instant the search
+					 * reports ready. */
 					char idxpath[160];
 					const char *lid =
-					    strrchr(tracks_probe_lux.context_uri, ':');
+					    strrchr(tracks_probe_small.context_uri, ':');
 					snprintf(idxpath, sizeof idxpath,
 					         "sdmc:/spotify/searchidx/%s.s3i",
 					         lid ? lid + 1 : "");
@@ -2460,6 +2470,12 @@ int main(int argc, char **argv)
 						fseek(w, 0, SEEK_END);
 						stored = ftell(w);
 						fclose(w);
+					}
+					if (stored <= 0) {
+						if (persist_wait_started == 0)
+							persist_wait_started = osGetTime();
+						if (osGetTime() - persist_wait_started < 5000)
+							break; /* still waiting for the write */
 					}
 					tl_step("search_cache_persisted", stored > 0,
 					        "%s is %ld bytes after rebuild", idxpath, stored);
@@ -2475,7 +2491,7 @@ int main(int argc, char **argv)
 					 * entry loads cleanly and only the version check can catch
 					 * it. */
 					searchindex *ix =
-					    searchcache_load(tracks_probe_lux.context_uri);
+					    searchcache_load(tracks_probe_small.context_uri);
 					if (!ix) {
 						tl_step("search_rescan_on_change", 0,
 						        "no stored index to age");
@@ -2486,7 +2502,7 @@ int main(int argc, char **argv)
 
 					char idxpath[160];
 					const char *lid =
-					    strrchr(tracks_probe_lux.context_uri, ':');
+					    strrchr(tracks_probe_small.context_uri, ':');
 					snprintf(idxpath, sizeof idxpath,
 					         "sdmc:/spotify/searchidx/%s.s3i",
 					         lid ? lid + 1 : "");
@@ -2500,14 +2516,14 @@ int main(int argc, char **argv)
 					}
 
 					tracks_clear_search();
-					g_tracks_collection = tracks_probe_lux;
+					g_tracks_collection = tracks_probe_small;
 					snprintf(g_track_search_query, sizeof g_track_search_query,
 					         "%s", "a");
 					g_track_search_mode = true;
 					g_track_search_applied_generation = 0;
 					cache_probe_started = osGetTime();
 					cache_probe_first_scanned = -1;
-					worker_request_track_search(&tracks_probe_lux,
+					worker_request_track_search(&tracks_probe_small,
 					                            g_track_search_query);
 					tracks_probe_stage = 17;
 					break;
@@ -2526,12 +2542,12 @@ int main(int argc, char **argv)
 					 * was actually walked and rewritten. */
 					char idxpath[160];
 					const char *lid =
-					    strrchr(tracks_probe_lux.context_uri, ':');
+					    strrchr(tracks_probe_small.context_uri, ':');
 					snprintf(idxpath, sizeof idxpath,
 					         "sdmc:/spotify/searchidx/%s.s3i",
 					         lid ? lid + 1 : "");
 					searchindex *cur = searchcache_load(
-					    tracks_probe_lux.context_uri);
+					    tracks_probe_small.context_uri);
 					if (cur) {
 						cache_probe_saw_network =
 						    strcmp(searchindex_snapshot(cur),

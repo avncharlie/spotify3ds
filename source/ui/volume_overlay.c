@@ -26,21 +26,23 @@ static void rounded_rect(float x, float y, float w, float h, float r, u32 clr)
 	ui_disc(x + w - r, y + h - r, r, clr);
 }
 
+/* The arc is a quadratic Bezier. Eight chords already track it to within
+ * 0.05px, so the choppiness was never the flattening - it was drawing them as
+ * separate hard-edged quads. Stroking the whole curve as one anti-aliased
+ * strip removes both the stair-stepping and the notches at the joints. */
+#define WAVE_SEGMENTS 8
+
 static void draw_wave(float x, float cy, float radius, float bulge, u32 clr)
 {
-	float px = x;
-	float py = cy - radius;
-	for (int i = 1; i <= 8; i++) {
-		const float t = i / 8.0f;
+	float pts[(WAVE_SEGMENTS + 1) * 2];
+	for (int i = 0; i <= WAVE_SEGMENTS; i++) {
+		const float t = (float)i / (float)WAVE_SEGMENTS;
 		const float inv = 1.0f - t;
-		const float nx = inv * inv * x + 2.0f * inv * t * (x + bulge) +
-		                 t * t * x;
-		const float ny = inv * inv * (cy - radius) + 2.0f * inv * t * cy +
+		pts[i * 2] = inv * inv * x + 2.0f * inv * t * (x + bulge) + t * t * x;
+		pts[i * 2 + 1] = inv * inv * (cy - radius) + 2.0f * inv * t * cy +
 		                 t * t * (cy + radius);
-		C2D_DrawLine(px, py, clr, nx, ny, clr, 2.0f, 0.0f);
-		px = nx;
-		py = ny;
 	}
+	ui_polyline(pts, WAVE_SEGMENTS + 1, 2.0f, clr);
 }
 
 static void draw_speaker(float x, float cy, bool waves, u32 clr)
@@ -55,10 +57,10 @@ static void draw_speaker(float x, float cy, bool waves, u32 clr)
 		draw_wave(x + 14.0f, cy, 5.5f, 4.0f, clr);
 		draw_wave(x + 17.0f, cy, 9.0f, 6.0f, clr);
 	} else {
-		C2D_DrawLine(x + 15.5f, cy - 5.0f, clr, x + 22.0f, cy + 5.0f, clr,
-		             2.2f, 0.0f);
-		C2D_DrawLine(x + 22.0f, cy - 5.0f, clr, x + 15.5f, cy + 5.0f, clr,
-		             2.2f, 0.0f);
+		const float down[4] = {x + 15.5f, cy - 5.0f, x + 22.0f, cy + 5.0f};
+		const float up[4] = {x + 22.0f, cy - 5.0f, x + 15.5f, cy + 5.0f};
+		ui_polyline(down, 2, 2.2f, clr);
+		ui_polyline(up, 2, 2.2f, clr);
 	}
 }
 

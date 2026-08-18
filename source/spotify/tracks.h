@@ -34,8 +34,15 @@ typedef struct {
 	int             total;
 } track_page;
 
-/* Fetch one normalized page. Ordering is deliberately never persisted: album
- * and playlist edits should appear whenever a page is opened. Blocking; worker
- * thread only. Artwork bytes are cached separately by artcache. */
+/* Fetch one normalized page. Ordering is deliberately never persisted here:
+ * album and playlist edits should appear whenever a page is opened. Blocking;
+ * worker thread only. Artwork bytes are cached separately by artcache.
+ *
+ * Search is the one exception, and only behind a check: searchindex keeps the
+ * searchable text of a whole collection, and serves it only after Spotify's
+ * snapshot_id confirms the playlist has not changed. Browsing never reads it.
+ * Even a stale index cannot play the wrong track - playback resolves by uri,
+ * not by position - so ordering there affects at most the tie-break between
+ * equally ranked matches. */
 player_result tracks_fetch_page(const collection_item *collection, int offset,
                                 track_page *out, char *err, int errlen);

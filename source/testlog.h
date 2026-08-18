@@ -13,7 +13,9 @@
  * diagnosable failure and a mystery.
  */
 
-/* Open sdmc:/testresult.txt (truncating) and sdmc:/spotify/log.txt (appending). */
+/* Open sdmc:/testresult.txt and sdmc:/spotify/log.txt, both truncating. The
+ * previous log is kept as log.prev.txt, so a fault that only appears after a
+ * relaunch can still be read back. */
 void tl_init(int phase);
 
 /* Free-form debug line -> log.txt only. printf-style. */

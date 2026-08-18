@@ -8,6 +8,7 @@
 #define RESULT_PATH "sdmc:/testresult.txt"
 #define LOG_DIR     "sdmc:/spotify"
 #define LOG_PATH    "sdmc:/spotify/log.txt"
+#define PREV_LOG_PATH "sdmc:/spotify/log.prev.txt"
 
 static FILE *s_result;
 static FILE *s_log;
@@ -41,7 +42,14 @@ void tl_init(int phase)
 	mkdir(LOG_DIR, 0777); /* harmless if it already exists */
 
 	s_result = fopen(RESULT_PATH, "w");
-	s_log    = fopen(LOG_PATH, "a");
+
+	/* One launch per file. Appending forever grew this past five megabytes on
+	 * a real card, and the previous session's lines are rarely what a problem
+	 * is diagnosed from - the current run is. The launch before this one is
+	 * kept alongside, since a fault that only shows up after a relaunch does
+	 * need both. */
+	rename(LOG_PATH, PREV_LOG_PATH);
+	s_log = fopen(LOG_PATH, "w");
 
 	tl_log("---- phase %d start ----", phase);
 }

@@ -400,17 +400,41 @@ static void do_poll(void)
 
 	/* Log every poll outcome, not just failures: "nothing playing" on screen
 	 * could be a genuine 204 or a masked error, and on hardware this is the
-	 * only way to tell them apart. */
-	if (pr == PLAYER_OK)
-		tl_log("poll ok: %s - %s (playing=%d item=%s context=%s device=%s "
-		       "volume=%ld supported=%d)",
-		       st.track, st.artist, (int)st.is_playing, st.track_uri,
-		       st.context_uri[0] ? st.context_uri : "-",
-		       st.device_id[0] ? st.device_id : "-",
-		       st.volume_known ? st.volume_percent : -1L,
-		       (int)st.supports_volume);
-	else
+	 * only way to tell them apart.
+	 *
+	 * Only when it says something new, though. A poll repeats every three
+	 * seconds while a track plays, and logging each one buried everything
+	 * else - seventy per cent of a five megabyte log was identical lines. An
+	 * unchanged poll carries no information the previous one did not.
+	 *
+	 * Repeats are still summarised on the next change, and every twentieth is
+	 * logged regardless, so a stalled poller still leaves a trail rather than
+	 * looking the same as a dead one. */
+	if (pr == PLAYER_OK) {
+		/* Matches tl_log's own buffer, so a line that would be truncated
+		 * there is compared in the same truncated form here. */
+		static char     last[512];
+		static unsigned repeats;
+		char            now[512];
+		snprintf(now, sizeof now,
+		         "poll ok: %.80s - %.60s (playing=%d item=%.60s context=%.60s "
+		         "device=%.40s volume=%ld supported=%d)",
+		         st.track, st.artist, (int)st.is_playing, st.track_uri,
+		         st.context_uri[0] ? st.context_uri : "-",
+		         st.device_id[0] ? st.device_id : "-",
+		         st.volume_known ? st.volume_percent : -1L,
+		         (int)st.supports_volume);
+		if (strcmp(now, last) == 0 && ++repeats % 20 != 0)
+			return;
+		if (repeats && strcmp(now, last) != 0) {
+			tl_log("poll: unchanged x%u", repeats);
+			repeats = 0;
+		}
+		snprintf(last, sizeof last, "%s", now);
+		tl_log("%s", now);
+	} else {
 		tl_log("poll: %s (%s)", player_result_str(pr), err);
+	}
 }
 
 static void do_cmd(const queued_cmd *q)

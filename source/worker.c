@@ -1917,6 +1917,9 @@ static void track_search_publish(track_search_job *job, bool partial)
  * that raised the question, so retyping does not keep cancelling the check.
  * The rebuild is a plain re-request, which the existing search path then
  * serves and re-indexes exactly as a cold search would. */
+
+// At this point we've displayed cached search results. Check now if the
+// playlist has changed and if we need to redo the search or not.
 static void do_search_validate(void)
 {
 	if (!s_search_validate_uri[0])
@@ -1957,6 +1960,9 @@ static void do_search_validate(void)
 	}
 	if (strcmp(fresh, held) == 0 && !count_differs)
 		return; /* current - nothing to do */
+
+	// Either the Spotify snapshot changed or we've seen the count change.
+	// Now we have to do a new search (and build a new searchcache).
 
 	tl_log("search: %s changed (%s), rescanning", name,
 	       count_differs ? "item count" : "version");

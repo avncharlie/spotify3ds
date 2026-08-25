@@ -1,0 +1,310 @@
+name: Setup app release
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag, or commit to build in artifact mode
+        required: true
+        default: main
+        type: string
+      destination:
+        description: Upload temporary artifacts or update a draft release
+        required: true
+        default: artifact
+        type: choice
+        options:
+          - artifact
+          - draft
+      release_tag:
+        description: Existing tag to build and release in draft mode
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.25.x"
+  FYNE_TOOLS_VERSION: "v1.7.0"
+  APP_ID: com.avncharlie.spotify3ds.setup
+
+jobs:
+  validate:
+    runs-on: ubuntu-22.04
+    outputs:
+      build_ref: ${{ steps.metadata.outputs.build_ref }}
+      version: ${{ steps.metadata.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.destination == 'draft' && inputs.release_tag || inputs.ref }}
+      - id: metadata
+        name: Validate release inputs
+        shell: bash
+        env:
+          DESTINATION: ${{ inputs.destination }}
+          INPUT_REF: ${{ inputs.ref }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          build_ref="$INPUT_REF"
+          version="0.0.0"
+          if [[ "$DESTINATION" == "draft" ]]; then
+            if [[ -z "$RELEASE_TAG" ]]; then
+              echo "release_tag is required in draft mode" >&2
+              exit 1
+            fi
+            git rev-parse --verify "refs/tags/$RELEASE_TAG^{commit}" >/dev/null
+            build_ref="$RELEASE_TAG"
+            candidate="${RELEASE_TAG#v}"
+            if [[ "$candidate" =~ ^([0-9]+\.[0-9]+\.[0-9]+) ]]; then
+              version="${BASH_REMATCH[1]}"
+            fi
+          fi
+          echo "build_ref=$build_ref" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: Install Linux GUI dependencies
+        run: sudo apt-get update && sudo apt-get install -y libgl1-mesa-dev xorg-dev
+      - name: Test
+        run: go test ./...
+
+  linux:
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            platform: linux-x64
+          - runner: ubuntu-22.04-arm
+            platform: linux-arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.build_ref }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: Install GUI dependencies
+        run: sudo apt-get update && sudo apt-get install -y libgl1-mesa-dev xorg-dev
+      - name: Build
+        run: go build -trimpath -ldflags="-s -w" -o Spotify3DS-Setup ./cmd/spotify3ds-setup
+      - name: Inspect dependencies
+        run: |
+          file Spotify3DS-Setup
+          ldd Spotify3DS-Setup
+      - name: Package
+        shell: bash
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          archive="Spotify3DS-Setup-${PLATFORM}.tar.gz"
+          tar -czf "$archive" Spotify3DS-Setup
+          tar -tzf "$archive"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.platform }}
+          path: Spotify3DS-Setup-${{ matrix.platform }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  windows:
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2025
+            platform: windows-x64
+          - runner: windows-11-arm
+            platform: windows-arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.build_ref }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: Install Fyne packaging tool
+        shell: pwsh
+        run: go install fyne.io/tools/cmd/fyne@${{ env.FYNE_TOOLS_VERSION }}
+      - name: Build executable with icon
+        shell: pwsh
+        env:
+          APP_VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          $fyne = Join-Path (go env GOPATH) "bin/fyne.exe"
+          Push-Location "cmd/spotify3ds-setup"
+          & $fyne package `
+            --os windows `
+            --name Spotify3DS-Setup `
+            --app-id $env:APP_ID `
+            --app-version $env:APP_VERSION `
+            --app-build $env:GITHUB_RUN_NUMBER `
+            --icon "../../assets/icon-setup-1024.png" `
+            --release
+          Pop-Location
+          Copy-Item "cmd/spotify3ds-setup/Spotify3DS-Setup.exe" .
+      - name: Inspect executable
+        shell: pwsh
+        run: |
+          go version -m "Spotify3DS-Setup.exe"
+          Get-AuthenticodeSignature "Spotify3DS-Setup.exe" | Format-List
+      - name: Package
+        shell: pwsh
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          $archive = "Spotify3DS-Setup-$env:PLATFORM.zip"
+          Compress-Archive -Path "Spotify3DS-Setup.exe" -DestinationPath $archive
+          if (-not (Test-Path $archive)) { throw "Archive was not created" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.platform }}
+          path: Spotify3DS-Setup-${{ matrix.platform }}.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  macos-slices:
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            architecture: x64
+          - runner: macos-15
+            architecture: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.build_ref }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: Build
+        run: go build -trimpath -ldflags="-s -w" -o Spotify3DS-Setup ./cmd/spotify3ds-setup
+      - name: Inspect architecture
+        run: file Spotify3DS-Setup
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-slice-${{ matrix.architecture }}
+          path: Spotify3DS-Setup
+          if-no-files-found: error
+          retention-days: 1
+
+  macos:
+    needs:
+      - validate
+      - macos-slices
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.build_ref }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-slice-x64
+          path: slices/x64
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-slice-arm64
+          path: slices/arm64
+      - name: Create universal executable
+        run: |
+          chmod +x slices/x64/Spotify3DS-Setup slices/arm64/Spotify3DS-Setup
+          lipo -create \
+            slices/x64/Spotify3DS-Setup \
+            slices/arm64/Spotify3DS-Setup \
+            -output Spotify3DS-Setup
+          chmod +x Spotify3DS-Setup
+          lipo -archs Spotify3DS-Setup | grep -q "x86_64 arm64"
+      - name: Install Fyne packaging tool
+        run: go install fyne.io/tools/cmd/fyne@${{ env.FYNE_TOOLS_VERSION }}
+      - name: Build app bundle
+        env:
+          APP_VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          "$(go env GOPATH)/bin/fyne" package \
+            --os darwin \
+            --executable Spotify3DS-Setup \
+            --name "Spotify3DS Setup" \
+            --app-id "$APP_ID" \
+            --app-version "$APP_VERSION" \
+            --app-build "$GITHUB_RUN_NUMBER" \
+            --icon assets/icon-setup-1024.png \
+            --release
+      - name: Ad-hoc sign and verify
+        run: |
+          codesign --force --deep --sign - "Spotify3DS Setup.app"
+          codesign --verify --deep --strict --verbose=2 "Spotify3DS Setup.app"
+          lipo -archs "Spotify3DS Setup.app/Contents/MacOS/Spotify3DS-Setup" | grep -q "x86_64 arm64"
+          plutil -lint "Spotify3DS Setup.app/Contents/Info.plist"
+      - name: Package
+        run: |
+          ditto -c -k --keepParent \
+            "Spotify3DS Setup.app" \
+            Spotify3DS-Setup-macos-universal.zip
+          unzip -l Spotify3DS-Setup-macos-universal.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-macos-universal
+          path: Spotify3DS-Setup-macos-universal.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs:
+      - validate
+      - linux
+      - windows
+      - macos
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: package-*
+          path: dist
+          merge-multiple: true
+      - name: Generate checksums
+        working-directory: dist
+        run: |
+          sha256sum Spotify3DS-Setup-* > SHA256SUMS
+          cat SHA256SUMS
+      - name: Upload dry-run artifact
+        if: inputs.destination == 'artifact'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Spotify3DS-Setup-release-test
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+      - name: Create or update draft release
+        if: inputs.destination == 'draft'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release_tag }}
+          name: ${{ inputs.release_tag }}
+          draft: true
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: dist/*

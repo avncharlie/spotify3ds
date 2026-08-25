@@ -2,6 +2,9 @@ package setupassets
 
 import _ "embed"
 
+//go:embed icon-setup-1024.png
+var SetupIcon []byte
+
 //go:embed latest-release-qr.png
 var CIAQRCode []byte
 

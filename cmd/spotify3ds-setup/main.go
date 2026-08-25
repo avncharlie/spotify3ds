@@ -111,6 +111,7 @@ type wizard struct {
 
 func main() {
 	a := app.NewWithID("com.avncharlie.spotify3ds.setup")
+	a.SetIcon(fyne.NewStaticResource("spotify3ds-setup.png", setupassets.SetupIcon))
 	a.Settings().SetTheme(setupTheme{Theme: theme.DefaultTheme()})
 	w := &wizard{
 		app: a, window: a.NewWindow("Spotify3DS Setup"),

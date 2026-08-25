@@ -215,6 +215,27 @@ sudo dkp-pacman -S 3ds-zlib 3ds-mbedtls 3ds-libjpeg-turbo
 go test ./...              # setup wizard, scopes, and credential QR protocol
 ```
 
+### Setup app releases
+
+`.github/workflows/setup-release.yml` packages the setup app for Windows x64
+and ARM64, Linux x64 and ARM64, and a universal macOS app. Its default
+`artifact` destination is a seven-day dry run that creates no release. The
+`draft` destination requires an existing tag and creates or updates an
+unpublished draft release.
+
+```sh
+# Dry run from main.
+gh workflow run setup-release.yml \
+  -f ref=main -f destination=artifact
+
+# Build a tag and upload the packages to a draft release.
+gh workflow run setup-release.yml \
+  -f ref=v1.0.0 -f destination=draft -f release_tag=v1.0.0
+```
+
+The draft remains private until it is reviewed and published manually with
+`gh release edit v1.0.0 --draft=false --latest` or through GitHub's release UI.
+
 For hardware, leave the console at the Homebrew Launcher before running the
 `--hw` command. You can also store its address in `.hwip` or export
 `SPOTIFY3DS_IP`, then use `./dev.sh --hw`. Do not add `--test` for an interactive

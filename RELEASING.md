@@ -40,7 +40,6 @@ A successful run assembles these files:
 | `Spotify3DS-Setup-linux-x64.tar.gz` | Linux x64 executable. |
 | `Spotify3DS-Setup-linux-arm64.tar.gz` | Linux ARM64 executable. |
 | `Spotify3DS-Setup-macos-universal.zip` | Universal x64/ARM64 macOS app, ad-hoc signed. |
-| `SHA256SUMS` | SHA-256 hashes used to detect corrupt or changed downloads. |
 
 Windows packages are not Authenticode-signed. The macOS app has a free ad-hoc
 signature for bundle integrity, but it is not Developer ID signed or notarized.
@@ -74,8 +73,7 @@ validate
    them with `lipo`, creates the `.app`, ad-hoc signs it, verifies both
    architectures, and creates a ZIP with `ditto`.
 6. `publish` starts only after every required package job succeeds. It downloads
-   the five packages, creates `SHA256SUMS`, and sends the result to the selected
-   destination.
+   the five packages and sends them to the selected destination.
 
 The strategy uses `fail-fast: false`, so one platform failure does not
 immediately cancel the other platform builds. The final `publish` job does not
@@ -147,21 +145,16 @@ gh run view RUN_ID --log-failed
 | `gh run view` | Shows the jobs and steps in one run. |
 | `gh run view --log-failed` | Prints logs from failed steps for diagnosis. |
 
-After a successful artifact run, download and verify its final bundle:
+After a successful artifact run, download and inspect its final bundle:
 
 ```sh
 gh run download RUN_ID \
   --name Spotify3DS-Setup-release-test \
   --dir /tmp/spotify3ds-release-test
-
-cd /tmp/spotify3ds-release-test
-shasum -a 256 -c SHA256SUMS       # macOS
-sha256sum -c SHA256SUMS            # Linux
 ```
 
-`gh run download` downloads the named artifact from that run. The checksum
-command recalculates every package hash and should print `OK` for all five
-packages.
+`gh run download` downloads the named artifact from that run. Confirm that it
+contains all five packages listed above.
 
 Artifact mode creates no tag and no GitHub Release. The final artifact and the
 per-platform package artifacts are retained for seven days. The temporary
@@ -209,7 +202,7 @@ clear.
 The platform build is identical to artifact mode. The difference is the final
 step: `softprops/action-gh-release` uses the run's temporary `GITHUB_TOKEN` to
 create or update an unpublished release for the tag, generate release notes,
-and upload the six files.
+and upload the five setup-app packages.
 
 Follow the run and inspect the resulting draft:
 
@@ -220,23 +213,26 @@ gh release view v1.0.0 \
   --json tagName,name,isDraft,isPrerelease,url,assets
 ```
 
-Confirm that `isDraft` is `true` and that all six expected files are listed.
+Confirm that `isDraft` is `true` and that all five expected packages are listed.
 You can also open the repository's **Releases** page; collaborators can see the
 draft, but ordinary visitors cannot.
 
 ### 3. Review the packages and release
 
-Download the draft assets and verify their checksums:
+Download the draft assets for testing:
 
 ```sh
 gh release download v1.0.0 --dir /tmp/spotify3ds-v1.0.0
-cd /tmp/spotify3ds-v1.0.0
-shasum -a 256 -c SHA256SUMS       # macOS
-sha256sum -c SHA256SUMS            # Linux
 ```
 
 Review the generated release title and notes in GitHub. Test packages on real
-systems when practical.
+systems when practical. GitHub records a SHA-256 digest for each uploaded asset;
+you can inspect those values with:
+
+```sh
+gh release view v1.0.0 --json assets \
+  --jq '.assets[] | {name, size, digest}'
+```
 
 If this will be the public project release, build and test the 3DS application
 using the normal development process, then attach the CIA to the same draft:
@@ -336,7 +332,7 @@ CLI commands.
 | Windows `Build executable with icon` | Fyne packaging or native cgo compilation failed. |
 | macOS `Create universal executable` | One architecture slice is missing or invalid. |
 | macOS `Ad-hoc sign and verify` | Bundle creation, signing, plist validation, or architecture verification failed. |
-| `publish` | A package is missing, checksum generation failed, artifact upload failed, or GitHub rejected a draft-release operation. |
+| `publish` | A package is missing, artifact upload failed, or GitHub rejected a draft-release operation. |
 
 Open the failed job, expand the red step, and read from the first concrete error
 rather than the final `Process completed with exit code 1` message. Use

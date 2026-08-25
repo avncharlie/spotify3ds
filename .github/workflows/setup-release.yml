@@ -305,11 +305,6 @@ jobs:
           pattern: package-*
           path: dist
           merge-multiple: true
-      - name: Generate checksums
-        working-directory: dist
-        run: |
-          sha256sum Spotify3DS-Setup-* > SHA256SUMS
-          cat SHA256SUMS
       - name: Upload dry-run artifact
         if: inputs.destination == 'artifact'
         uses: actions/upload-artifact@v4

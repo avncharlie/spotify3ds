@@ -191,7 +191,7 @@ and ARM64, Linux x64 and ARM64, and a universal macOS app. Its default
 unpublished draft release.
 
 See [RELEASING.md](RELEASING.md) for the complete beginner-oriented process,
-command reference, package verification steps, and troubleshooting guide.
+command reference, asset review steps, and troubleshooting guide.
 
 ```sh
 # Dry run from main.

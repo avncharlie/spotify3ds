@@ -45,6 +45,9 @@ typedef struct {
 bool worker_start(char *err, int errlen);
 void worker_stop(void);
 
+/* Restart after setup installs a validated replacement creds.cfg. */
+bool worker_restart(char *err, int errlen);
+
 /* Put the UI into the fatal state from the caller's side. Needed because
  * worker_start can fail before the thread ever runs, and the in-thread
  * set_fatal path would then never be reached - which is how a dead worker came

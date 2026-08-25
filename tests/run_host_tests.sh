@@ -29,6 +29,11 @@ CFLAGS=(-std=c11 -Wall -Wextra -Werror -I"$ROOT/source")
 	"$ROOT/source/spotify/tracks_search.c" \
 	-o "$TMP/test_tracks_search"
 
+"$CC" "${CFLAGS[@]}" \
+	"$ROOT/tests/test_setup_qr.c" \
+	"$ROOT/source/setup/setup_qr.c" \
+	-o "$TMP/test_setup_qr"
+
 # The index is a binary format read back off an SD card, so it is worth
 # proving it never reads outside the blob it was handed.
 # All fixed-size buffer writes and an index shuffle, so the sanitizers earn
@@ -48,5 +53,6 @@ CFLAGS=(-std=c11 -Wall -Wextra -Werror -I"$ROOT/source")
 "$TMP/test_http"
 "$TMP/test_lyrics"
 "$TMP/test_tracks_search"
+"$TMP/test_setup_qr"
 "$TMP/test_searchindex"
 "$TMP/test_searchhistory"

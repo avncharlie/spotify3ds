@@ -12,11 +12,14 @@
 #include "spotify/artcache.h"
 #include "spotify/auth.h"
 #include "spotify/player.h"
+#include "setup/setup_qr.h"
+#include "setup/setup_scanner.h"
 #include "testlog.h"
 #include "ui/screen_list.h"
 #include "ui/search_popover.h"
 #include "ui/screen_lyrics.h"
 #include "ui/screen_player.h"
+#include "ui/screen_setup.h"
 #include "ui/screen_tracks.h"
 #include "ui/screen_top.h"
 #include "ui/thumbs.h"
@@ -103,9 +106,12 @@ typedef enum {
 	VIEW_PLAYER = 0,
 	VIEW_LIST,
 	VIEW_TRACKS,
-	VIEW_LYRICS
+	VIEW_LYRICS,
+	VIEW_SETUP,
+	VIEW_SETUP_COMPLETE
 } bottom_view;
 static bottom_view g_view;
+static char        g_setup_message[192];
 static bottom_view          g_lyrics_return_view = VIEW_PLAYER;
 static worker_lyrics_status g_lyrics_status;
 static worker_lyrics_payload g_lyrics_payload;
@@ -978,15 +984,25 @@ int main(int argc, char **argv)
 		}
 	}
 
+	bool worker_started = false;
+	FILE *credential_file = fopen("sdmc:/spotify/creds.cfg", "r");
+	const bool credentials_present = credential_file != NULL;
+	if (credential_file)
+		fclose(credential_file);
 	if (!net_up) {
 		tl_step("net_init", 0, "%s", err);
 		worker_set_fatal("No network", "Check the console's WiFi connection");
+	} else if (!credentials_present) {
+		g_view = VIEW_SETUP;
+		worker_set_fatal("Setup required",
+						 "Run Spotify3DS Setup on your computer");
 	} else if (!worker_start(err, sizeof err)) {
 		tl_step("worker_start", 0, "%s", err);
 		/* Without this the UI would render a dead worker as the ordinary
 		 * "Nothing playing" state, which is what made this fail silently. */
 		worker_set_fatal("Internal error", err);
 	} else {
+		worker_started = true;
 		tl_step("worker_start", 1, "network thread started");
 	}
 
@@ -1082,6 +1098,13 @@ int main(int argc, char **argv)
 		if (g_shelf_fired >= 0 && osGetTime() >= g_shelf_fired_until)
 			g_shelf_fired = -1;
 		worker_get(&snap);
+		if (snap.fatal &&
+		    (strcmp(snap.status, "No credentials") == 0 ||
+		     strcmp(snap.status, "Authorization expired") == 0 ||
+		     strcmp(snap.status, "Spotify rejected the login") == 0 ||
+		     strcmp(snap.status, "Setup required") == 0)) {
+			g_view = VIEW_SETUP;
+		}
 		if (snap.have_state &&
 		    strcmp(g_seen_device, snap.state.device_id) != 0) {
 			snprintf(g_seen_device, sizeof g_seen_device, "%s",
@@ -1137,16 +1160,59 @@ int main(int argc, char **argv)
 		const long duration = snap.have_state ? snap.state.duration_ms : 0;
 		/* START replaces the old app-exit shortcut and opens lyrics from any
 		 * ordinary view. Capture the return view before changing input dispatch. */
-		if (g_view != VIEW_LYRICS && (keys_down & KEY_START)) {
+		if (g_view != VIEW_LYRICS && g_view != VIEW_SETUP &&
+		    g_view != VIEW_SETUP_COMPLETE &&
+		    (keys_down & KEY_START)) {
 			lyrics_open_current(&snap);
 		}
 		const bottom_view input_view = g_view;
+		if (input_view == VIEW_SETUP &&
+		    (touch.clicked == SETUP_BTN_SCAN || (keys_down & KEY_START))) {
+			setup_credentials credentials;
+			char setup_error[192] = "";
+			if (setup_scanner_run(&credentials, setup_error,
+			                      sizeof setup_error)) {
+				if (worker_started) {
+					worker_stop();
+					worker_started = false;
+				}
+				if (auth_install_credentials(credentials.client_id,
+				                             credentials.refresh_token,
+				                             setup_error, sizeof setup_error) &&
+				    worker_start(setup_error, sizeof setup_error)) {
+					worker_started = true;
+					g_view = VIEW_SETUP_COMPLETE;
+					g_setup_message[0] = '\0';
+				} else {
+					snprintf(g_setup_message, sizeof g_setup_message, "%s",
+					         setup_error[0] ? setup_error : "Credential setup failed");
+					FILE *restored = fopen("sdmc:/spotify/creds.cfg", "r");
+					if (restored) {
+						fclose(restored);
+						if (!worker_started && worker_start(err, sizeof err))
+							worker_started = true;
+					} else {
+						worker_set_fatal("Setup required",
+						                 "Run Spotify3DS Setup on your computer");
+					}
+				}
+				memset(&credentials, 0, sizeof credentials);
+			} else if (setup_error[0] &&
+			           strcmp(setup_error, "Setup scan cancelled") != 0) {
+				snprintf(g_setup_message, sizeof g_setup_message, "%s", setup_error);
+			}
+		}
+		if (input_view == VIEW_SETUP_COMPLETE &&
+		    (touch.clicked == SETUP_BTN_COMPLETE || (keys_down & KEY_A)))
+			g_view = VIEW_PLAYER;
 		const u32 dpad_down = keys_down & (KEY_DLEFT | KEY_DRIGHT);
 		const bool player_bar_drag = input_view == VIEW_PLAYER && touch.down &&
 		                             touch.press_id == BTN_SCRUB;
 		if (player_bar_drag)
 			hold_scrub_cancel(&g_dpad_scrub);
-		if (!player_bar_drag && !g_touch_button_scrub.direction &&
+		if (input_view != VIEW_SETUP && input_view != VIEW_SETUP_COMPLETE &&
+		    !player_bar_drag &&
+		    !g_touch_button_scrub.direction &&
 		    !g_dpad_scrub.direction &&
 		    dpad_down != (KEY_DLEFT | KEY_DRIGHT)) {
 			if (dpad_down & KEY_DRIGHT)
@@ -2869,7 +2935,18 @@ int main(int argc, char **argv)
 		C2D_TargetClear(bottom, CLR_BOT_BG);
 		C2D_SceneBegin(bottom);
 
-		if (g_view == VIEW_LYRICS) {
+		if (g_view == VIEW_SETUP) {
+			const screen_setup_args setup_args = {
+				.buf = textbuf,
+				.tb = &g_tb,
+				.message = g_setup_message,
+				.pressed_id = touch.down ? touch.press_id : -1,
+			};
+			screen_setup_draw(&setup_args);
+		} else if (g_view == VIEW_SETUP_COMPLETE) {
+			screen_setup_complete_draw(textbuf, &g_tb,
+			                           touch.down ? touch.press_id : -1);
+		} else if (g_view == VIEW_LYRICS) {
 			screen_lyrics_bottom_draw(&lyrics_args);
 		} else if (g_view == VIEW_LIST) {
 			recent_list *rl;

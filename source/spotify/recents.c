@@ -157,8 +157,8 @@ player_result recents_fetch(recent_list *out, char *err, int errlen)
 		/* Missing scope. Worth naming precisely: the symptom otherwise looks
 		 * identical to an empty listening history. */
 		snprintf(err, errlen,
-		         "403 - token lacks user-read-recently-played; re-run "
-		         "bootstrap_auth.py");
+		         "403 - token lacks user-read-recently-played; reauthorize with "
+		         "Spotify3DS Setup");
 		http_free(&r);
 		return PLAYER_FORBIDDEN;
 	}
@@ -304,8 +304,8 @@ player_result playlists_fetch(playlist_list *out, char *err, int errlen)
 			return out->count ? PLAYER_OK : PLAYER_ERROR;
 		if (r.status == 403) {
 			snprintf(err, errlen,
-			         "403 - token lacks playlist-read-private; re-run "
-			         "bootstrap_auth.py");
+			         "403 - token lacks playlist-read-private; reauthorize with "
+			         "Spotify3DS Setup");
 			http_free(&r);
 			return out->count ? PLAYER_OK : PLAYER_FORBIDDEN;
 		}
@@ -400,7 +400,8 @@ player_result albums_fetch(album_list *out, char *err, int errlen)
 			return out->count ? PLAYER_OK : PLAYER_ERROR;
 		if (r.status == 403) {
 			snprintf(err, errlen,
-			         "403 - token lacks user-library-read; re-run bootstrap_auth.py");
+			         "403 - token lacks user-library-read; reauthorize with "
+			         "Spotify3DS Setup");
 			http_free(&r);
 			return out->count ? PLAYER_OK : PLAYER_FORBIDDEN;
 		}

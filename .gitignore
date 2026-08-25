@@ -1,5 +1,6 @@
 # Secrets — NEVER commit
 creds.cfg
+creds.cfg.*
 *.token
 .env
 
@@ -10,6 +11,7 @@ build/
 *.smdh
 *.map
 *.cia
+/Spotify3DS-Setup*
 
 # Local test artifacts
 testresult.txt

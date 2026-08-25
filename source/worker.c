@@ -519,7 +519,7 @@ static void auth_fail_fatal(const char *err)
 	/* Revoked or rotated-away refresh token: no amount of retrying helps. */
 	if (strstr(err, "invalid_grant")) {
 		set_fatal_detail("Authorization expired",
-		                 "Run bootstrap_auth.py again and replace creds.cfg",
+		                 "Run Spotify3DS Setup on your computer",
 		                 err);
 		return;
 	}
@@ -570,7 +570,7 @@ static void auth_fail_fatal(const char *err)
 			                 err);
 		} else {
 			set_fatal_detail("Spotify rejected the login",
-			                 "Check client_id in creds.cfg, or rerun bootstrap_auth.py",
+			                 "Run Spotify3DS Setup on your computer",
 			                 err);
 		}
 		return;
@@ -786,6 +786,13 @@ bool worker_start(char *err, int errlen)
 	ensure_lock(); /* must precede any failure return: worker_set_fatal takes
 	                * this lock */
 	s_quit = false;
+	LightLock_Lock(&s_lock);
+	s_fatal = false;
+	s_status[0] = '\0';
+	s_status_hint[0] = '\0';
+	s_status_detail[0] = '\0';
+	s_have_state = false;
+	LightLock_Unlock(&s_lock);
 
 	/* Core 0, the application core.
 	 *
@@ -821,6 +828,12 @@ bool worker_start(char *err, int errlen)
 	tl_log("worker thread: core %d prio 0x%lX stack %d", WORKER_CORE,
 	       (unsigned long)worker_prio, WORKER_STACK);
 	return true;
+}
+
+bool worker_restart(char *err, int errlen)
+{
+	worker_stop();
+	return worker_start(err, errlen);
 }
 
 void worker_set_fatal(const char *what, const char *hint)

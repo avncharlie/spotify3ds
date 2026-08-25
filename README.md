@@ -26,8 +26,9 @@ https://github.com/user-attachments/assets/de96f312-1107-42eb-a012-5f5bdfdea7f2
 
 ## Installation
 
-You need Spotify Premium, a homebrew-enabled 3DS, Python 3 on your computer,
-and access to the console's SD card.
+You need Spotify Premium and a homebrew-enabled 3DS. The cross-platform
+Spotify3DS Setup app handles authorization and transfers credentials directly
+by QR code; Python and SD-card copying are only needed for advanced setup.
 
 Download `Spotify3DS.cia` from the project's
 [latest release](https://github.com/avncharlie/spotify3ds/releases/latest).
@@ -39,12 +40,29 @@ to install the latest CIA directly:
 To update an existing installation, re-scan the same QR code in FBI. It always
 points to the CIA from the latest release.
 
+### Recommended setup app
+
+1. Download `Spotify3DS-Setup` for your computer from the latest release.
+2. Follow its illustrated Spotify Developer Dashboard guide and paste your
+   public Client ID. The wizard preserves the complete scope set used by the
+   advanced bootstrap script.
+3. Authorize Spotify in the browser. After validating refresh and API access,
+   the wizard displays a credential QR code.
+4. Open Spotify3DS and choose **Scan Setup QR**. The app verifies the QR,
+   atomically installs `/spotify/creds.cfg`, validates it with Spotify, and
+   enters the Player without a relaunch.
+
+The credential QR contains a plaintext bearer credential. Do not photograph,
+share, stream, or save it.
+
+### Advanced manual setup
+
 1. Create an app in the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard).
    Select **Web API**, add `http://127.0.0.1:8888/callback` as a redirect URI,
    and copy the app's Client ID. No client secret is needed.
    
    If you're having difficulty with this, look at [this issue](https://github.com/avncharlie/spotify3ds/issues/3#issuecomment-5298331372) to see some screenshots of the process.
-3. From this project directory, generate your console credentials:
+2. From this project directory, generate your console credentials:
 
    ```sh
    python3 tools/bootstrap_auth.py --client-id <YOUR_CLIENT_ID>
@@ -52,9 +70,9 @@ points to the CIA from the latest release.
 
    Your browser will open Spotify's authorization page. After approval, the
    script writes `creds.cfg` in the project directory.
-4. Create a folder named `spotify` at the root of the 3DS SD card and copy the
+3. Create a folder named `spotify` at the root of the 3DS SD card and copy the
    generated file to it. The resulting path must be `/spotify/creds.cfg`.
-5. Copy `Spotify3DS.cia` to the SD card, put the card back in the console, and
+4. Copy `Spotify3DS.cia` to the SD card, put the card back in the console, and
    install the CIA with FBI or another homebrew CIA installer (Or install via
    QR code)
 
@@ -194,6 +212,7 @@ sudo dkp-pacman -S 3ds-zlib 3ds-mbedtls 3ds-libjpeg-turbo
 ./dev.sh --log    # also dump the guest debug log
 ./dev.sh --hw --ip 192.168.1.x  # build and netload to a 3DS
 ./tests/run_host_tests.sh  # deterministic cache, HTTP, JSON, and lyrics tests
+go test ./...              # setup wizard, scopes, and credential QR protocol
 ```
 
 For hardware, leave the console at the Homebrew Launcher before running the
@@ -244,8 +263,9 @@ throwaway local listener, and writes `creds.cfg`. Copy that to the SD card as
 `~/Library/Application Support/Azahar/sdmc/spotify/creds.cfg`).
 
 Spotify refresh tokens expire six months after authorization. When Spotify3DS
-shows **Authorization expired**, rerun the bootstrap command and replace the
-console's `creds.cfg` with the newly generated file.
+shows **Authorization expired**, authorize again in Spotify3DS Setup and scan
+the replacement QR, or use the advanced bootstrap command and replace
+`creds.cfg` manually.
 
 PKCE means **no `client_secret` exists**, so no secret ever reaches the console
 or the repo, and the script never sees your password. The 3DS thereafter only
@@ -254,6 +274,11 @@ performs `grant_type=refresh_token`.
 > **Note:** that refresh token is a plaintext bearer credential on the SD card.
 > Homebrew has no secure storage — any encryption key would have to sit beside
 > the ciphertext. Revoke anytime at <https://spotify.com/account/apps>.
+
+Spotify3DS vendors the ISC-licensed [quirc](https://github.com/dlbeer/quirc)
+decoder for setup QR scanning. The scanner follows the established FBI and
+Universal-Updater camera path: outer camera, 400x240 RGB565 preview, grayscale
+conversion, and mirrored-code retry.
 
 ## Development notes
 

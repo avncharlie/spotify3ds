@@ -18,9 +18,9 @@ include $(DEVKITARM)/3ds_rules
 #---------------------------------------------------------------------------------
 TARGET		:=	Spotify3DS
 BUILD		:=	build
-SOURCES		:=	source source/net source/spotify source/ui
+SOURCES		:=	source source/net source/spotify source/ui source/setup source/third_party/quirc
 DATA		:=	data
-INCLUDES	:=	include
+INCLUDES	:=	include source/third_party/quirc
 GRAPHICS	:=	gfx
 GFXBUILD	:=	$(BUILD)
 
@@ -45,6 +45,7 @@ CFLAGS	:=	-g -Wall -O2 -mword-relocations \
 			$(ARCH)
 
 CFLAGS	+=	$(INCLUDE) -D__3DS__
+CFLAGS	+=	-DQUIRC_FLOAT_TYPE=float
 
 CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++11
 

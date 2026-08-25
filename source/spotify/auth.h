@@ -12,3 +12,10 @@ const char *auth_token(char *err, int errlen);
 
 /* Force a refresh regardless of expiry. Used after a 401. */
 bool auth_refresh(char *err, int errlen);
+
+/* Clear all in-memory tokens before loading replacement credentials. */
+void auth_reset(void);
+
+/* Atomically install and verify credentials received through setup QR. */
+bool auth_install_credentials(const char *client_id, const char *refresh_token,
+                              char *err, int errlen);

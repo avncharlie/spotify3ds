@@ -4,6 +4,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "../net/http.h"
 #include "../testlog.h"
@@ -12,6 +15,8 @@
 #define CREDS_PATH "sdmc:/spotify/creds.cfg"
 #define ACCOUNTS_HOST "accounts.spotify.com"
 #define TOKEN_PATH "/api/token"
+#define CREDS_NEW_PATH "sdmc:/spotify/creds.cfg.new"
+#define CREDS_OLD_PATH "sdmc:/spotify/creds.cfg.old"
 
 /* Refresh this long before actual expiry so a poll never races the deadline. */
 #define EXPIRY_MARGIN_S 60
@@ -20,6 +25,14 @@ static char s_client_id[128];
 static char s_refresh[256];
 static char s_access[512];
 static u64  s_expires_at; /* osGetTime() ms; 0 = no token yet */
+
+void auth_reset(void)
+{
+	memset(s_client_id, 0, sizeof s_client_id);
+	memset(s_refresh, 0, sizeof s_refresh);
+	memset(s_access, 0, sizeof s_access);
+	s_expires_at = 0;
+}
 
 /* Strip trailing CR/LF/space so a CRLF-saved creds.cfg still works. */
 static void rstrip(char *s)
@@ -148,4 +161,65 @@ const char *auth_token(char *err, int errlen)
 		return NULL;
 
 	return s_access;
+}
+
+static bool write_credentials(const char *path, const char *client_id,
+	                          const char *refresh_token, char *err, int errlen)
+{
+	FILE *file = fopen(path, "w");
+	if (!file) {
+		snprintf(err, errlen, "cannot create setup credentials");
+		return false;
+	}
+	const int written = fprintf(file,
+	    "# spotify3ds credentials - DO NOT COMMIT\nclient_id=%s\nrefresh_token=%s\n",
+	    client_id, refresh_token);
+	bool ok = written > 0;
+	if (fflush(file) != 0)
+		ok = false;
+	if (fsync(fileno(file)) != 0)
+		ok = false;
+	if (fclose(file) != 0)
+		ok = false;
+	if (!ok) {
+		remove(path);
+		snprintf(err, errlen, "could not finish writing setup credentials");
+	}
+	return ok;
+}
+
+bool auth_install_credentials(const char *client_id, const char *refresh_token,
+	                          char *err, int errlen)
+{
+	if (!client_id || !refresh_token || !client_id[0] || !refresh_token[0] ||
+	    strlen(client_id) >= sizeof s_client_id ||
+	    strlen(refresh_token) >= sizeof s_refresh) {
+		snprintf(err, errlen, "Setup credentials are too long or empty");
+		return false;
+	}
+	if (mkdir("sdmc:/spotify", 0777) != 0 && errno != EEXIST) {
+		snprintf(err, errlen, "cannot create sdmc:/spotify");
+		return false;
+	}
+	remove(CREDS_NEW_PATH);
+	if (!write_credentials(CREDS_NEW_PATH, client_id, refresh_token, err, errlen))
+		return false;
+	remove(CREDS_OLD_PATH);
+	const bool had_old = rename(CREDS_PATH, CREDS_OLD_PATH) == 0;
+	if (rename(CREDS_NEW_PATH, CREDS_PATH) != 0) {
+		if (had_old)
+			rename(CREDS_OLD_PATH, CREDS_PATH);
+		snprintf(err, errlen, "cannot activate setup credentials");
+		return false;
+	}
+	auth_reset();
+	if (!auth_load(err, errlen) || !auth_refresh(err, errlen)) {
+		remove(CREDS_PATH);
+		if (had_old)
+			rename(CREDS_OLD_PATH, CREDS_PATH);
+		auth_reset();
+		return false;
+	}
+	remove(CREDS_OLD_PATH);
+	return true;
 }

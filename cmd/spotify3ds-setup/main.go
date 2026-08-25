@@ -118,10 +118,6 @@ func main() {
 	}
 	w.window.Resize(fyne.NewSize(384, 593))
 	w.window.SetFixedSize(true)
-	w.window.SetMainMenu(fyne.NewMainMenu(
-		fyne.NewMenu("Setup",
-			fyne.NewMenuItem("Show Spotify3DS install QR", w.showInstallQR)),
-	))
 	w.buildPersistentControls()
 	w.render()
 	w.window.ShowAndRun()
@@ -477,14 +473,6 @@ func (w *wizard) cancelAuthorization() {
 func (w *wizard) setStep(step int) {
 	w.step = step
 	w.render()
-}
-
-func (w *wizard) showInstallQR() {
-	qr := imageFromResource("cia-qr.png", setupassets.CIAQRCode, fyne.NewSize(260, 260))
-	dialog.NewCustom("Install Spotify3DS", "Back to setup", container.NewVBox(
-		wrapped("In FBI choose Remote Install → Scan QR Code."),
-		container.NewCenter(qr),
-	), w.window).Show()
 }
 
 func newPill(step int, label string, selected int, tapped func(int)) fyne.CanvasObject {

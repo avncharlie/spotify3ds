@@ -223,18 +223,26 @@ and ARM64, Linux x64 and ARM64, and a universal macOS app. Its default
 `draft` destination requires an existing tag and creates or updates an
 unpublished draft release.
 
+See [RELEASING.md](RELEASING.md) for the complete beginner-oriented process,
+command reference, package verification steps, and troubleshooting guide.
+
 ```sh
 # Dry run from main.
 gh workflow run setup-release.yml \
+  --ref main \
   -f ref=main -f destination=artifact
 
 # Build a tag and upload the packages to a draft release.
 gh workflow run setup-release.yml \
+  --ref main \
   -f ref=v1.0.0 -f destination=draft -f release_tag=v1.0.0
 ```
 
 The draft remains private until it is reviewed and published manually with
 `gh release edit v1.0.0 --draft=false --latest` or through GitHub's release UI.
+This workflow does not upload `Spotify3DS.cia`; attach the CIA separately before
+publishing the release as latest so the latest-release install link keeps
+working.
 
 For hardware, leave the console at the Homebrew Launcher before running the
 `--hw` command. You can also store its address in `.hwip` or export

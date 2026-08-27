@@ -2,7 +2,8 @@
 
 Spotify3DS lets you use your 3DS as a Spotify remote, with playback controls, library browsing, and synchronised lyrics.
 
-https://github.com/user-attachments/assets/de96f312-1107-42eb-a012-5f5bdfdea7f2
+https://github.com/user-attachments/assets/caf41073-3456-4d9f-a95f-36ef5e7e0b57
+<!--https://github.com/user-attachments/assets/de96f312-1107-42eb-a012-5f5bdfdea7f2-->
 
 - **Top screen:** album cover, artist, album/track name
 - **Bottom screen:**

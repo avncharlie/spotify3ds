@@ -17,17 +17,25 @@
 #include "net.h"
 
 /* DER roots embedded by bin2s from the data directory (see Makefile).
- *   DigiCert G2 (RSA) -> api.spotify.com, accounts.spotify.com
+ *   DigiCert G2 (RSA) -> api.spotify.com
  *   DigiCert G3 (ECC) -> i.scdn.co         (album art CDN)
  *   GlobalSign R3     -> mosaic.scdn.co    (generated playlist mosaics)
  *   GTS Root R4       -> lrclib.net         (lyrics provider)
+ *   Starfield G2      -> accounts.spotify.com (token exchange)
  *
- * All four are required, and the failure mode when one is missing is
+ * All five are required, and the failure mode when one is missing is
  * consistently confusing: the API works while some subset of images silently
  * never loads. Spotify serves different asset classes from different CDNs with
  * different issuers, so a host that has always worked is no guarantee about a
  * new one - mosaic.scdn.co was the first thing to need GlobalSign, and it took
  * a TLS verify error to notice.
+ *
+ * Roots also move under us: accounts.spotify.com left DigiCert for an
+ * intermediate under Starfield G2, which failed verification with
+ * BADCERT_NOT_TRUSTED (0x08) on a build that had worked the day before. The
+ * host list above is a snapshot of what issuers happen to serve today, not a
+ * guarantee, so a sudden 0x08 on one host is worth re-checking against the
+ * live chain before suspecting the console.
  *
  * We ship our own trust store because the console's sslc service caps at TLS
  * 1.1 and Spotify requires 1.2+, so mbedTLS runs in userspace with no system
@@ -40,6 +48,8 @@ extern const unsigned char globalsign_r3_der[];
 extern const unsigned char globalsign_r3_der_end[];
 extern const unsigned char gts_root_r4_der[];
 extern const unsigned char gts_root_r4_der_end[];
+extern const unsigned char starfield_g2_der[];
+extern const unsigned char starfield_g2_der_end[];
 
 struct tls_conn {
 	int                      fd;
@@ -156,6 +166,7 @@ tls_conn *tls_connect(const char *host, int port, char *err, int errlen)
 			{digicert_g3_der, digicert_g3_der_end},
 			{globalsign_r3_der, globalsign_r3_der_end},
 			{gts_root_r4_der, gts_root_r4_der_end},
+			{starfield_g2_der, starfield_g2_der_end},
 		};
 
 		for (unsigned i = 0; i < sizeof roots / sizeof roots[0]; i++) {

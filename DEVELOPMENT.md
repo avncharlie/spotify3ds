@@ -112,10 +112,11 @@ links mbedTLS and speaks TLS in userspace over raw BSD sockets, bypassing
 `sslc` entirely.
 
 The embedded roots cover Spotify's API and image hosts plus LRCLIB. DigiCert
-**G2 (RSA)** serves `api.spotify.com` and `accounts.spotify.com`, DigiCert
-**G3 (ECC)** serves `i.scdn.co`, GlobalSign R3 serves `mosaic.scdn.co`, and GTS
-Root R4 serves `lrclib.net`. Omitting one produces a confusing partial failure
-where the API works while one class of images or lyrics never loads.
+**G2 (RSA)** serves `api.spotify.com`, Starfield G2 serves
+`accounts.spotify.com`, DigiCert **G3 (ECC)** serves `i.scdn.co`, GlobalSign R3
+serves `mosaic.scdn.co`, and GTS Root R4 serves `lrclib.net`. Omitting one
+produces a confusing partial failure where the API works while one class of
+images or lyrics never loads.
 
 ### Entropy
 

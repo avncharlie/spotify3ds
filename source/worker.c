@@ -524,13 +524,30 @@ static void auth_fail_fatal(const char *err)
 		return;
 	}
 
-	/* tls.c reports certificate rejection as "verify flags=0x...". A wrong RTC
-	 * is by far the most common way to land here, because it makes a valid
-	 * certificate look not-yet-valid or expired. */
+	/* tls.c reports certificate rejection as "verify flags=0x...", where the
+	 * flags say which remedy applies. Blaming the clock for all of them sent
+	 * users to a correct clock while accounts.spotify.com had simply moved to
+	 * an issuer outside our embedded trust store.
+	 *
+	 * EXPIRED (0x01) and FUTURE (0x200) are the clock's doing: a wrong RTC
+	 * makes a valid certificate look out of its window. NOT_TRUSTED (0x08)
+	 * means the chain did not reach a root we ship, which no user action can
+	 * fix - it needs a new root in data/ and a rebuild. */
 	if (strstr(err, "verify flags=")) {
-		set_fatal_detail("Certificate rejected",
-		                 "Set the console's date, time and year, then relaunch",
-		                 err);
+		unsigned long flags = strtoul(strstr(err, "flags=") + 6, NULL, 16);
+
+		if (flags & (0x01UL | 0x200UL))
+			set_fatal_detail("Certificate rejected",
+			                 "Set the console's date, time and year, then relaunch",
+			                 err);
+		else if (flags & 0x08UL)
+			set_fatal_detail("Certificate not trusted",
+			                 "Spotify changed certificates - update Spotify3DS",
+			                 err);
+		else
+			set_fatal_detail("Certificate rejected",
+			                 "Check the console's date and network, then relaunch",
+			                 err);
 		return;
 	}
 

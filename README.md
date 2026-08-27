@@ -35,7 +35,7 @@ Scan the QR code below in FBI under **Remote Install → Scan QR Code** to insta
 
 Alternatively, you can manually install `Spotify3DS.cia` or `Spotify3DS.3dsx` from the project's [latest release](https://github.com/avncharlie/spotify3ds/releases/latest).
 
-Now, you'll have to do a one-time setup to link Spotify3DS with your Spotify account. You can do this automatically using the setup app or manually with a Python script that generates a credentials file you copy over to 3DS's SD card.
+Now, you'll have to do a one-time setup to link Spotify3DS with your Spotify account. You can do this automatically using the setup app or manually with a Python script that generates a credentials file you copy over to 3DS's SD card. Note that you need a Spotify Premium account to set up Spotify3DS.
 
 ### Automatic setup (recommended) - use the setup app
 

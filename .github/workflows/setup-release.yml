@@ -1,4 +1,4 @@
-name: Setup app release
+name: Spotify3DS release
 
 on:
   workflow_dispatch:
@@ -28,6 +28,10 @@ env:
   GO_VERSION: "1.25.x"
   FYNE_TOOLS_VERSION: "v1.7.0"
   APP_ID: com.avncharlie.spotify3ds.setup
+  BANNERTOOL_VERSION: "1.2.0"
+  BANNERTOOL_SHA256: 69768596f836acb3e3aeaa66e47c6ba560dde813c6dfcd33c8afc25fe29b7524
+  MAKEROM_VERSION: "0.18.4"
+  MAKEROM_SHA256: dd596854718c195c6e3229286be485b122921715555af8ae5cf8e9a465d9f970
 
 jobs:
   validate:
@@ -290,12 +294,63 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  console:
+    needs: validate
+    runs-on: ubuntu-22.04
+    container:
+      image: devkitpro/devkitarm@sha256:15b79ce75822c289538d8153da5fa7aafe5e6adc32ad8a575a197beca0f0761b
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.build_ref }}
+      - name: Install packaging tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          tools_dir="$RUNNER_TEMP/release-tools"
+          mkdir -p "$tools_dir"
+
+          bannertool_archive="$RUNNER_TEMP/bannertool.zip"
+          curl --fail --location --retry 3 \
+            --output "$bannertool_archive" \
+            "https://github.com/diasurgical/bannertool/releases/download/${BANNERTOOL_VERSION}/bannertool.zip"
+          printf '%s  %s\n' "$BANNERTOOL_SHA256" "$bannertool_archive" | sha256sum --check --strict
+          unzip -j "$bannertool_archive" linux-x86_64/bannertool -d "$tools_dir"
+          chmod 0755 "$tools_dir/bannertool"
+
+          makerom_archive="$RUNNER_TEMP/makerom.zip"
+          curl --fail --location --retry 3 \
+            --output "$makerom_archive" \
+            "https://github.com/3DSGuy/Project_CTR/releases/download/makerom-v${MAKEROM_VERSION}/makerom-v${MAKEROM_VERSION}-ubuntu_x86_64.zip"
+          printf '%s  %s\n' "$MAKEROM_SHA256" "$makerom_archive" | sha256sum --check --strict
+          unzip -j "$makerom_archive" makerom -d "$tools_dir"
+          chmod 0755 "$tools_dir/makerom"
+
+          printf '%s\n' "$tools_dir" >> "$GITHUB_PATH"
+      - name: Run host tests
+        run: ./tests/run_host_tests.sh
+      - name: Build console packages
+        run: make -j"$(nproc)"
+      - name: Verify console packages
+        run: |
+          test -s Spotify3DS.cia
+          test -s Spotify3DS.3dsx
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-console
+          path: |
+            Spotify3DS.cia
+            Spotify3DS.3dsx
+          if-no-files-found: error
+          retention-days: 7
+
   publish:
     needs:
       - validate
       - linux
       - windows
       - macos
+      - console
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -309,7 +364,7 @@ jobs:
         if: inputs.destination == 'artifact'
         uses: actions/upload-artifact@v4
         with:
-          name: Spotify3DS-Setup-release-test
+          name: Spotify3DS-release-test
           path: dist/*
           if-no-files-found: error
           retention-days: 7

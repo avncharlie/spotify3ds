@@ -75,13 +75,14 @@ Environment quirks worth knowing:
 Interactive emulator and hardware runs stay open until they are closed through
 HOME or the emulator controls. Only `dev.sh --test` enables automatic exit.
 
-## Setup app releases
+## Releases
 
 `.github/workflows/setup-release.yml` packages the setup app for Windows x64
-and ARM64, Linux x64 and ARM64, and a universal macOS app. Its default
-`artifact` destination is a seven-day dry run that creates no release. The
-`draft` destination requires an existing tag and creates or updates an
-unpublished draft release.
+and ARM64, Linux x64 and ARM64, and a universal macOS app. It also builds the
+3DS application as `Spotify3DS.cia` and `Spotify3DS.3dsx`. Its default `artifact`
+destination is a seven-day dry run that creates no release. The `draft`
+destination requires an existing tag and creates or updates an unpublished
+draft release.
 
 See [RELEASING.md](RELEASING.md) for the complete beginner-oriented process,
 command reference, asset review steps, and troubleshooting guide.
@@ -100,9 +101,8 @@ gh workflow run setup-release.yml \
 
 The draft remains private until it is reviewed and published manually with
 `gh release edit v1.0.0 --draft=false --latest` or through GitHub's release UI.
-This workflow does not upload `Spotify3DS.cia`; attach the CIA separately before
-publishing the release as latest so the latest-release install link keeps
-working.
+Confirm that both console packages and all five setup-app packages are attached
+before publishing the release as latest.
 
 ## Why mbedTLS is bundled
 

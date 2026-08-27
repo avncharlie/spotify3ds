@@ -1,14 +1,10 @@
-# Setup App Release Process
+# Release Process
 
 This guide explains how `.github/workflows/setup-release.yml` builds and
-packages the Spotify3DS desktop setup app. It covers temporary test builds and
-unpublished draft releases.
-
-The workflow does **not** build the 3DS application. In particular, it does not
-create or upload `Spotify3DS.cia`. A project release that will be published as
-the latest release must have the CIA attached separately before publication.
-The install links and QR code in `README.md` depend on the latest release
-containing a file named exactly `Spotify3DS.cia`.
+packages the Spotify3DS application and desktop setup app. It covers temporary
+test builds and unpublished draft releases. The install links and QR code in
+`README.md` depend on the latest release containing a file named exactly
+`Spotify3DS.cia`, which this workflow builds automatically.
 
 ## GitHub Actions Concepts
 
@@ -40,6 +36,8 @@ A successful run assembles these files:
 | `Spotify3DS-Setup-linux-x64.tar.gz` | Linux x64 executable. |
 | `Spotify3DS-Setup-linux-arm64.tar.gz` | Linux ARM64 executable. |
 | `Spotify3DS-Setup-macos-universal.zip` | Universal x64/ARM64 macOS app, ad-hoc signed. |
+| `Spotify3DS.cia` | Installable Nintendo 3DS application. |
+| `Spotify3DS.3dsx` | Nintendo 3DS homebrew application. |
 
 Windows packages are not Authenticode-signed. The macOS app has a free ad-hoc
 signature for bundle integrity, but it is not Developer ID signed or notarized.
@@ -55,9 +53,10 @@ validate
   |-- linux ARM64
   |-- windows x64
   |-- windows ARM64
-  `-- macOS x64 + ARM64 slices -> universal macOS app
-                                      |
-                                      `-> publish
+  |-- macOS x64 + ARM64 slices -> universal macOS app
+  `-- console -> CIA + 3DSX
+                         |
+                         `-> publish
 ```
 
 1. `validate` checks out the requested code, validates the inputs, installs Go
@@ -72,8 +71,10 @@ validate
 5. `macos-slices` builds separate x64 and ARM64 executables. `macos` combines
    them with `lipo`, creates the `.app`, ad-hoc signs it, verifies both
    architectures, and creates a ZIP with `ditto`.
-6. `publish` starts only after every required package job succeeds. It downloads
-   the five packages and sends them to the selected destination.
+6. `console` uses a digest-pinned devkitARM container, verifies pinned `makerom`
+   and `bannertool` downloads, runs the host tests, and builds the CIA and 3DSX.
+7. `publish` starts only after every required package job succeeds. It downloads
+   all seven packages and sends them to the selected destination.
 
 The strategy uses `fail-fast: false`, so one platform failure does not
 immediately cancel the other platform builds. The final `publish` job does not
@@ -149,12 +150,12 @@ After a successful artifact run, download and inspect its final bundle:
 
 ```sh
 gh run download RUN_ID \
-  --name Spotify3DS-Setup-release-test \
+  --name Spotify3DS-release-test \
   --dir /tmp/spotify3ds-release-test
 ```
 
 `gh run download` downloads the named artifact from that run. Confirm that it
-contains all five packages listed above.
+contains all seven packages listed above.
 
 Artifact mode creates no tag and no GitHub Release. The final artifact and the
 per-platform package artifacts are retained for seven days. The temporary
@@ -202,7 +203,7 @@ clear.
 The platform build is identical to artifact mode. The difference is the final
 step: `softprops/action-gh-release` uses the run's temporary `GITHUB_TOKEN` to
 create or update an unpublished release for the tag, generate release notes,
-and upload the five setup-app packages.
+and upload all seven packages.
 
 Follow the run and inspect the resulting draft:
 
@@ -213,7 +214,7 @@ gh release view v1.0.0 \
   --json tagName,name,isDraft,isPrerelease,url,assets
 ```
 
-Confirm that `isDraft` is `true` and that all five expected packages are listed.
+Confirm that `isDraft` is `true` and that all seven expected packages are listed.
 You can also open the repository's **Releases** page; collaborators can see the
 draft, but ordinary visitors cannot.
 
@@ -234,19 +235,17 @@ gh release view v1.0.0 --json assets \
   --jq '.assets[] | {name, size, digest}'
 ```
 
-If this will be the public project release, build and test the 3DS application
-using the normal development process, then attach the CIA to the same draft:
+Test the downloaded console packages in an emulator and on real hardware when
+practical. You can also reproduce the console checks locally:
 
 ```sh
-make -j8
 ./tests/run_host_tests.sh
 go test ./...
-gh release upload v1.0.0 Spotify3DS.cia --clobber
+make -j8
 ```
 
-`gh release upload` attaches the local CIA to the existing draft. `--clobber`
-replaces an asset with the same filename. Confirm that the draft contains
-`Spotify3DS.cia` before making it the latest release.
+Confirm that the draft contains both `Spotify3DS.cia` and `Spotify3DS.3dsx`
+before making it the latest release.
 
 ### 4. Publish only after review
 
@@ -310,7 +309,7 @@ required to start a workflow:
 
 1. Open the repository on GitHub.
 2. Select **Actions**.
-3. Select **Setup app release** in the workflow list.
+3. Select **Spotify3DS release** in the workflow list.
 4. Select **Run workflow**.
 5. Keep **Use workflow from** set to `main`.
 6. Enter the source ref, choose `artifact` or `draft`, and enter an existing tag
@@ -332,6 +331,8 @@ CLI commands.
 | Windows `Build executable with icon` | Fyne packaging or native cgo compilation failed. |
 | macOS `Create universal executable` | One architecture slice is missing or invalid. |
 | macOS `Ad-hoc sign and verify` | Bundle creation, signing, plist validation, or architecture verification failed. |
+| Console `Install packaging tools` | A pinned tool download, checksum, or archive layout is invalid. |
+| Console `Run host tests` or `Build console packages` | A host test failed or the 3DS source did not compile and package. |
 | `publish` | A package is missing, artifact upload failed, or GitHub rejected a draft-release operation. |
 
 Open the failed job, expand the red step, and read from the first concrete error
@@ -364,9 +365,6 @@ gh workflow run setup-release.yml --ref main \
 
 # Inspect the draft.
 gh release view v1.0.0 --json isDraft,url,assets
-
-# Attach the separately built 3DS application before publishing as latest.
-gh release upload v1.0.0 Spotify3DS.cia --clobber
 
 # Publish only after review.
 gh release edit v1.0.0 --draft=false --latest

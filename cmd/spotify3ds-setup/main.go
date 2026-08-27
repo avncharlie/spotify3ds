@@ -450,6 +450,7 @@ func (w *wizard) actionTapped() {
 				w.mode = modeWalkthrough
 				w.validation.Text = err.Error()
 				w.validation.Color = errorColor
+				w.validation.Show()
 				w.validation.Refresh()
 				w.render()
 				return

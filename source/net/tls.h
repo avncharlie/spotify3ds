@@ -6,7 +6,7 @@
 typedef struct tls_conn tls_conn;
 
 /* Connect to host:port and complete a TLS 1.2 handshake with full certificate
- * verification against the embedded DigiCert roots.
+ * verification against the embedded roots.
  * Returns NULL on failure and fills err with a diagnosable reason. */
 tls_conn *tls_connect(const char *host, int port, char *err, int errlen);
 

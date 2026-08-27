@@ -113,10 +113,27 @@ links mbedTLS and speaks TLS in userspace over raw BSD sockets, bypassing
 
 The embedded roots cover Spotify's API and image hosts plus LRCLIB. DigiCert
 **G2 (RSA)** serves `api.spotify.com`, Starfield G2 serves
-`accounts.spotify.com`, DigiCert **G3 (ECC)** serves `i.scdn.co`, GlobalSign R3
-serves `mosaic.scdn.co`, and GTS Root R4 serves `lrclib.net`. Omitting one
+`accounts.spotify.com`, DigiCert **G3 (ECC)** serves `i.scdn.co` and
+`image-cdn-ak.spotifycdn.com`, GlobalSign R3 serves `mosaic.scdn.co` and
+`image-cdn-fa.spotifycdn.com`, and GTS Root R4 serves `lrclib.net`. Omitting one
 produces a confusing partial failure where the API works while one class of
-images or lyrics never loads.
+images or lyrics never loads. Spotify can also return previously unknown image
+hosts at runtime; add newly observed hosts to the monitor when appropriate.
+
+### Live TLS monitoring
+
+`.github/workflows/live-tls.yml` runs every Monday and can also be started
+manually. `tools/tlscheck` reads the runtime root list from `source/net/tls.c`,
+loads only those DER files, and checks all seven known hosts without using the
+runner's system trust store. It requires TLS 1.2, verifies hostnames and chain
+anchors, and fails when a certificate has fewer than 14 valid days remaining.
+Transport failures are retried twice before the host is reported unreachable.
+
+Run the same live check locally with:
+
+```sh
+go run ./tools/tlscheck
+```
 
 ### Entropy
 

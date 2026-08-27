@@ -8,9 +8,9 @@
  * on every single request: three per track skip, plus one every poll. Holding
  * connections open across requests removes almost all of that.
  *
- * Small and fixed-size on purpose - the app only ever talks to three hosts
- * (api.spotify.com, accounts.spotify.com, i.scdn.co), and one live connection
- * each is enough because requests are issued serially from the worker thread.
+ * Small and fixed-size on purpose. Requests are issued serially from the worker
+ * thread, and the least recently used connection is evicted when API, auth,
+ * lyrics, and image traffic span more hosts than the pool can retain.
  */
 
 /* Take a connection to host:port, reusing a cached one when available.

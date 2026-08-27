@@ -6,8 +6,8 @@
 
 #include "../testlog.h"
 
-/* api.spotify.com, accounts.spotify.com, i.scdn.co - one slot each, plus
- * headroom. Requests are serial, so a single connection per host suffices. */
+/* Requests are serial, so a single connection per active host suffices. Four
+ * slots cover the common API/auth/art set; less-used hosts are evicted. */
 #define POOL_SLOTS 4
 
 /* Servers close idle keep-alive connections unilaterally. Reusing one that the

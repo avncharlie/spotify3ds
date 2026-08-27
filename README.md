@@ -14,15 +14,18 @@ https://github.com/user-attachments/assets/caf41073-3456-4d9f-a95f-36ef5e7e0b57
 You can use the L/R shoulder buttons from any screen to decrease or increase device volume in any screen.
 
 ## Screenshots
-
-<p align="center">
-  <img src="assets/screenshots/main-screen.png" alt="Spotify3DS Player screen" width="16%">
-  <img src="assets/screenshots/library-screen.png" alt="Spotify3DS Library screen" width="16%">
-  <img src="assets/screenshots/tracks-screen.png" alt="Spotify3DS Tracks screen" width="16%">
-  <img src="assets/screenshots/search-library.png" alt="Spotify3DS Library search" width="16%">
-  <img src="assets/screenshots/lyrics-screen.png" alt="Spotify3DS synchronized lyrics" width="16%">
-  <img src="assets/screenshots/volume-overlay.png" alt="Spotify3DS volume overlay" width="16%">
-</p>
+<details>
+  <summary>See screenshots (captured using Azahar)</summary>
+  <p align="center">
+    <img src="assets/screenshots/main-screen.png" alt="Spotify3DS Player screen" width="32%">
+    <img src="assets/screenshots/library-screen.png" alt="Spotify3DS Library screen" width="32%">
+    <img src="assets/screenshots/tracks-screen.png" alt="Spotify3DS Tracks screen" width="32%">
+  <p align="center">
+    <img src="assets/screenshots/search-library.png" alt="Spotify3DS Library search" width="32%">
+    <img src="assets/screenshots/lyrics-screen.png" alt="Spotify3DS synchronized lyrics" width="32%">
+    <img src="assets/screenshots/volume-overlay.png" alt="Spotify3DS volume overlay" width="32%">
+  </p>
+</details>
 
 ## Installation
 

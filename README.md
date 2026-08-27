@@ -16,10 +16,12 @@ You can use the L/R shoulder buttons from any screen to decrease or increase dev
 ## Screenshots
 
 <p align="center">
-  <img src="assets/main-screen.png" alt="Spotify3DS Player screen" width="23%">
-  <img src="assets/library-screen.png" alt="Spotify3DS Library screen" width="23%">
-  <img src="assets/tracks-screen.png" alt="Spotify3DS Tracks screen" width="23%">
-  <img src="assets/volume-overlay.png" alt="Spotify3DS volume overlay" width="23%">
+  <img src="assets/screenshots/main-screen.png" alt="Spotify3DS Player screen" width="16%">
+  <img src="assets/screenshots/library-screen.png" alt="Spotify3DS Library screen" width="16%">
+  <img src="assets/screenshots/tracks-screen.png" alt="Spotify3DS Tracks screen" width="16%">
+  <img src="assets/screenshots/search-library.png" alt="Spotify3DS Library search" width="16%">
+  <img src="assets/screenshots/lyrics-screen.png" alt="Spotify3DS synchronized lyrics" width="16%">
+  <img src="assets/screenshots/volume-overlay.png" alt="Spotify3DS volume overlay" width="16%">
 </p>
 
 ## Installation

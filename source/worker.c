@@ -9,6 +9,7 @@
 #include "spotify/artcache.h"
 #include "spotify/auth.h"
 #include "spotify/lyrics.h"
+#include "spotify/namecache.h"
 #include "spotify/recents.h"
 #include "spotify/searchcache.h"
 #include "spotify/searchindex.h"
@@ -1309,6 +1310,10 @@ static void do_playlists(void)
 			    &s_state, pin_current_locked(&s_state, true));
 	}
 	LightLock_Unlock(&s_lock);
+	/* The library is usable now; persist all names in one SD write rather than
+	 * rewriting the complete cache once per playlist. */
+	if (pr == PLAYER_OK)
+		namecache_flush();
 
 	free(fresh);
 

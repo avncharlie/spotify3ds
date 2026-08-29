@@ -45,6 +45,7 @@ typedef struct {
 static entry s_entries[MAX_ENTRIES];
 static int   s_count;
 static bool  s_loaded;
+static bool  s_dirty;
 
 static long now_seconds(void)
 {
@@ -111,19 +112,27 @@ static void load(void)
 	fclose(f);
 }
 
-static void save(void)
+static bool save(void)
 {
 	FILE *f = fopen(NAMECACHE_PATH, "w");
 	if (!f) {
 		tl_log("namecache: cannot write %s", NAMECACHE_PATH);
-		return;
+		return false;
 	}
 
-	for (int i = 0; i < s_count; i++)
-		fprintf(f, "%ld %s %s\t%s\t%s\n", s_entries[i].when, s_entries[i].uri,
-		        s_entries[i].name, s_entries[i].owner, s_entries[i].art);
+	bool ok = true;
+	for (int i = 0; i < s_count; i++) {
+		if (fprintf(f, "%ld %s %s\t%s\t%s\n", s_entries[i].when,
+		            s_entries[i].uri, s_entries[i].name, s_entries[i].owner,
+		            s_entries[i].art) < 0)
+			ok = false;
+	}
 
-	fclose(f);
+	if (fclose(f) != 0)
+		ok = false;
+	if (!ok)
+		tl_log("namecache: write failed for %s", NAMECACHE_PATH);
+	return ok;
 }
 
 bool namecache_get(const char *uri, char *name, int namelen, char *owner,
@@ -158,11 +167,11 @@ bool namecache_get(const char *uri, char *name, int namelen, char *owner,
 	return false;
 }
 
-void namecache_put(const char *uri, const char *name, const char *owner,
-                   const char *art)
+static bool put(const char *uri, const char *name, const char *owner,
+                const char *art)
 {
 	if (!uri || !uri[0] || !name || !name[0])
-		return;
+		return false;
 
 	if (!owner)
 		owner = "";
@@ -174,7 +183,7 @@ void namecache_put(const char *uri, const char *name, const char *owner,
 	 * extra request next launch. */
 	if (strpbrk(name, "\n\t") || strpbrk(owner, "\n\t") ||
 	    strpbrk(art, "\n\t") || strpbrk(uri, " \n\t"))
-		return;
+		return false;
 
 	load();
 
@@ -184,8 +193,8 @@ void namecache_put(const char *uri, const char *name, const char *owner,
 			snprintf(s_entries[i].owner, sizeof s_entries[i].owner, "%s", owner);
 			snprintf(s_entries[i].art, sizeof s_entries[i].art, "%s", art);
 			s_entries[i].when = now_seconds();
-			save();
-			return;
+			s_dirty = true;
+			return true;
 		}
 	}
 
@@ -207,5 +216,25 @@ void namecache_put(const char *uri, const char *name, const char *owner,
 	snprintf(e->name, sizeof e->name, "%s", name);
 	snprintf(e->owner, sizeof e->owner, "%s", owner);
 	snprintf(e->art, sizeof e->art, "%s", art);
-	save();
+	s_dirty = true;
+	return true;
+}
+
+void namecache_put(const char *uri, const char *name, const char *owner,
+                   const char *art)
+{
+	if (put(uri, name, owner, art))
+		namecache_flush();
+}
+
+void namecache_put_deferred(const char *uri, const char *name,
+                            const char *owner, const char *art)
+{
+	put(uri, name, owner, art);
+}
+
+void namecache_flush(void)
+{
+	if (s_dirty && save())
+		s_dirty = false;
 }

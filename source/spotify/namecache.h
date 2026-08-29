@@ -30,3 +30,9 @@ bool namecache_get(const char *uri, char *name, int namelen, char *owner,
  * refetches. */
 void namecache_put(const char *uri, const char *name, const char *owner,
                    const char *art);
+
+/* Update the in-memory cache without writing the SD file. Bulk callers must
+ * call namecache_flush() after publishing their results. */
+void namecache_put_deferred(const char *uri, const char *name,
+                            const char *owner, const char *art);
+void namecache_flush(void);

@@ -361,7 +361,7 @@ player_result playlists_fetch(playlist_list *out, char *err, int errlen)
 			snprintf(it->context_uri, sizeof it->context_uri, "%s", uri);
 			it->item_total = (int)item_total;
 			it->kind = COLLECTION_PLAYLIST;
-			namecache_put(uri, name, owner, art);
+			namecache_put_deferred(uri, name, owner, art);
 		}
 
 		tl_timing("playlists page offset=%d bytes=%u tokens=%d in %llums", offset,

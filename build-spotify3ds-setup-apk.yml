@@ -1,0 +1,79 @@
+name: Build Spotify3DS Setup APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout upstream Spotify3DS
+        uses: actions/checkout@v4
+        with:
+          repository: avncharlie/spotify3ds
+          ref: main
+          path: spotify3ds
+
+      - name: Set up Go 1.25
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: spotify3ds/go.sum
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK/NDK packages
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0" \
+            "ndk;27.2.12479018"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.2.12479018" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/27.2.12479018" >> "$GITHUB_ENV"
+
+      - name: Install Fyne CLI
+        shell: bash
+        run: |
+          go install fyne.io/tools/cmd/fyne@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Download Go dependencies
+        working-directory: spotify3ds
+        run: go mod download
+
+      - name: Check setup app in mobile mode
+        working-directory: spotify3ds/cmd/spotify3ds-setup
+        shell: bash
+        run: |
+          go build -tags mobile -o /tmp/spotify3ds-setup-mobile-check .
+
+      - name: Build APK
+        working-directory: spotify3ds/cmd/spotify3ds-setup
+        shell: bash
+        run: |
+          fyne package \
+            -os android \
+            -app-id com.avncharlie.spotify3ds.setup \
+            -name Spotify3DS-Setup \
+            -release
+          mkdir -p "$GITHUB_WORKSPACE/output"
+          find . -maxdepth 1 -type f -name '*.apk' -print -exec cp {} "$GITHUB_WORKSPACE/output/Spotify3DS-Setup.apk" \;
+          test -f "$GITHUB_WORKSPACE/output/Spotify3DS-Setup.apk"
+
+      - name: SHA-256
+        run: sha256sum output/Spotify3DS-Setup.apk
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Spotify3DS-Setup-Android
+          path: output/Spotify3DS-Setup.apk
+          if-no-files-found: error

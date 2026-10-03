@@ -2,6 +2,7 @@
 
 #include <3ds.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "../spotify/art.h"
@@ -11,6 +12,7 @@
 typedef struct {
 	album_art art;
 	u32       used; /* LRU stamp; 0 means the slot is free */
+	time_t    expires_at;
 } slot;
 
 static slot s_slots[THUMBS_SLOTS];
@@ -22,6 +24,34 @@ static u32  s_clock;
  * frame. */
 static char s_pending[THUMBS_SLOTS][256];
 static int  s_pending_n;
+
+typedef struct {
+	char url[256];
+	unsigned attempts;
+	u64 retry_at;
+} failed_thumb;
+static failed_thumb s_failed[THUMBS_SLOTS];
+static unsigned s_failed_next;
+
+static failed_thumb *failure_for(const char *url)
+{
+	for (int i = 0; i < THUMBS_SLOTS; i++)
+		if (strcmp(s_failed[i].url, url) == 0)
+			return &s_failed[i];
+	return NULL;
+}
+
+static void record_failure(const char *url)
+{
+	failed_thumb *failed = failure_for(url);
+	if (!failed) {
+		failed = &s_failed[s_failed_next++ % THUMBS_SLOTS];
+		memset(failed, 0, sizeof *failed);
+		snprintf(failed->url, sizeof failed->url, "%s", url);
+	}
+	failed->attempts++;
+	failed->retry_at = osGetTime() + (u64)failed->attempts * 30000;
+}
 
 static bool pending_has(const char *url)
 {
@@ -59,6 +89,8 @@ void thumbs_free_all(void)
 		}
 	}
 	s_pending_n = 0;
+	memset(s_failed, 0, sizeof s_failed);
+	s_failed_next = 0;
 }
 
 const C2D_Image *thumbs_get(const char *url)
@@ -76,9 +108,12 @@ const C2D_Image *thumbs_get(const char *url)
 		return &s_slots[i].art.image;
 	}
 
-	if (!pending_has(url)) {
-		pending_add(url);
-		worker_request_thumb(url);
+	failed_thumb *failed = failure_for(url);
+	if (failed && (failed->attempts >= 3 || osGetTime() < failed->retry_at))
+		return NULL;
+	if (!pending_has(url) && s_pending_n < THUMBS_SLOTS) {
+		if (worker_request_thumb(url))
+			pending_add(url);
 	}
 
 	return NULL;
@@ -86,11 +121,25 @@ const C2D_Image *thumbs_get(const char *url)
 
 void thumbs_pump(void)
 {
+	/* Called after the frame's GPU synchronization, before any image draws.
+	 * Getters during rendering are non-destructive, including duplicate rows
+	 * whose expiry deadline falls between their two lookups. */
+	time_t now = time(NULL);
+	for (int i = 0; i < THUMBS_SLOTS; i++)
+		if (s_slots[i].used && s_slots[i].expires_at && now >= s_slots[i].expires_at) {
+			art_free(&s_slots[i].art);
+			s_slots[i].used = 0;
+		}
 	art_payload p;
 	if (!worker_take_thumb(&p))
 		return;
 
 	pending_remove(p.url);
+	if (p.failed) {
+		record_failure(p.url);
+		art_payload_free(&p);
+		return;
+	}
 
 	/* Pick a slot: a free one, else the least recently drawn. Eviction is by
 	 * last *use* rather than last load, so the tiles currently on screen
@@ -114,15 +163,20 @@ void thumbs_pump(void)
 	        ? art_upload_tiled(&s_slots[victim].art, p.tiled, p.w, p.h,
 	                           p.tex_dim, p.accent_r, p.accent_g, p.accent_b,
 	                           p.url, err, sizeof err)
-	        : art_upload(&s_slots[victim].art, p.rgba, p.w, p.h, p.url, err,
+	                 : art_upload(&s_slots[victim].art, p.rgba, p.w, p.h, p.url, err,
 	                     sizeof err);
+	if (p.from_cache)
+		p.tiled = NULL; /* upload consumes the buffer on both success and failure */
 
 	if (ok) {
 		s_slots[victim].used = ++s_clock;
-		if (p.from_cache)
-			p.tiled = NULL; /* art_upload_tiled took ownership */
+		s_slots[victim].expires_at = p.expires_at;
+		failed_thumb *failed = failure_for(p.url);
+		if (failed)
+			memset(failed, 0, sizeof *failed);
 	} else {
 		s_slots[victim].used = 0;
+		record_failure(p.url);
 		tl_log("thumb upload failed: %s", err);
 	}
 

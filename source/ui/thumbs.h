@@ -26,6 +26,7 @@ void thumbs_free_all(void);
  * (measured: 2 of 49 playlists) gets. */
 const C2D_Image *thumbs_get(const char *url);
 
-/* Claim anything the worker has finished and upload it. Render thread, once a
- * frame, before drawing. */
+/* Expire textures and claim/upload completed thumbnails. Once per frame after
+ * C3D_FrameBegin(SYNCDRAW) has retired previous draws, before submitting any new
+ * image draws. thumbs_get never destroys textures during a draw. */
 void thumbs_pump(void);

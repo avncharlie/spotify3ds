@@ -44,10 +44,13 @@ func TestKnownHostInventory(t *testing.T) {
 	want := []string{
 		"api.spotify.com",
 		"accounts.spotify.com",
+		"open.spotify.com",
 		"i.scdn.co",
 		"mosaic.scdn.co",
 		"image-cdn-fa.spotifycdn.com",
 		"image-cdn-ak.spotifycdn.com",
+		"pickasso.spotifycdn.com",
+		"daylist.spotifycdn.com",
 		"lrclib.net",
 	}
 	if !reflect.DeepEqual(hosts, want) {

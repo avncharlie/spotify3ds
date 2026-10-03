@@ -3,6 +3,7 @@
 #include <stdbool.h>
 
 #include "player.h"
+#include "playlist_meta.h"
 
 /* Collections the user can jump back into: recently played, playlists, and
  * saved albums.
@@ -39,6 +40,9 @@ typedef struct {
 	char            context_uri[128]; /* what to play when tapped */
 	int             item_total;       /* tracks/items when supplied by Spotify */
 	collection_kind kind;
+	metadata_source name_source, art_source;
+	bool            name_stale, art_stale;
+	time_t          metadata_retry_at;
 } collection_item;
 
 typedef struct {
@@ -64,12 +68,12 @@ typedef collection_item recent_item;
 /* GET /v1/me/player/recently-played?limit=50. Blocking; worker thread only.
  *
  * Deduped by what tapping would play: the playlist context when there is one,
- * otherwise the album. Playlist names cost a second request each and are
- * resolved through the SD-backed name cache, so a repeat launch is free. */
+ * otherwise the album. Cached display metadata is applied immediately;
+ * unresolved fields are enriched later by the worker. */
 player_result recents_fetch(recent_list *out, char *err, int errlen);
 
-/* Resolve one playlist's display metadata through the name cache, fetching it
- * from Spotify only on a miss. Blocking; worker thread only.
+/* Read display metadata from the cache, or fetch fresh Web API metadata when
+ * snapshot is non-NULL. Display fallbacks never validate track snapshots.
  *
  * `snapshot` is Spotify's version identifier for the playlist and may be NULL
  * when the caller only wants the label. Asking for it forces the request:
@@ -83,7 +87,16 @@ player_result recents_fetch(recent_list *out, char *err, int errlen);
  * already dropped. Neither signal alone is sufficient. */
 bool playlist_metadata(const char *uri, char *name, int namelen, char *owner,
                        int ownerlen, char *art, int artlen, char *snapshot,
-                       int snaplen, int *item_total);
+                        int snaplen, int *item_total);
+
+/* In-place display enrichment; playback identity and ordering do not change. */
+bool collection_apply_metadata(collection_item *item, const playlist_meta *meta);
+void collection_filter_lists(const recent_list *recents,
+                             const playlist_list *playlists,
+                             const album_list *albums, const char *query,
+                             recent_list *out_recents,
+                             playlist_list *out_playlists,
+                             album_list *out_albums);
 
 /* GET /v1/me/playlists?limit=50. Blocking; worker thread only.
  *

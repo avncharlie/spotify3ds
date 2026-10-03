@@ -24,6 +24,7 @@
 #include "ui/screen_top.h"
 #include "ui/thumbs.h"
 #include "ui/touch.h"
+#include "ui/collection_touch.h"
 #include "ui/ui.h"
 #include "ui/volume_overlay.h"
 #include "spotify/searchcache.h"
@@ -56,6 +57,9 @@
 /* Hit rects are registered per frame by the drawing code (see touch.h). This
  * frame's set: */
 static touch_builder g_tb;
+static collection_hit g_collection_hits[TOUCH_MAX_RECTS];
+static int g_collection_hit_count;
+static collection_touch g_collection_touch;
 
 /* Scrubber geometry (drawn, not the hit rect) */
 /* Scrubber geometry comes from screen_player.h, so the bar the user drags is
@@ -454,32 +458,32 @@ static char          g_list_search[64];
 static char          g_filter_query[64];
 static int           g_filter_playlist_count = -1;
 static int           g_filter_album_count = -1;
+static unsigned      g_filter_revision;
 
-static bool contains_ci(const char *text, const char *needle)
-{
-	if (!needle[0])
-		return true;
-	for (const char *p = text; *p; p++) {
-		int i = 0;
-		while (needle[i] && p[i] &&
-		       tolower((unsigned char)p[i]) ==
-		           tolower((unsigned char)needle[i]))
-			i++;
-		if (!needle[i])
-			return true;
-	}
-	return false;
-}
+static const collection_item *list_selected_item(int id, const recent_list *rl,
+                                                  const playlist_list *pl,
+                                                  const album_list *al);
 
-static bool collection_matches(const collection_item *item)
+static int filtered_id_for_uri(const char *uri)
 {
-	return contains_ci(item->name, g_list_search) ||
-	       contains_ci(item->subtitle, g_list_search);
+	if (!uri[0])
+		return -1;
+	for (int i = 0; i < g_search_recents.count; i++)
+		if (strcmp(g_search_recents.items[i].context_uri, uri) == 0)
+			return LIST_RECENT0 + i;
+	for (int i = 0; i < g_search_playlists.count; i++)
+		if (strcmp(g_search_playlists.items[i].context_uri, uri) == 0)
+			return LIST_PLAYLIST0 + i;
+	for (int i = 0; i < g_search_albums.count; i++)
+		if (strcmp(g_search_albums.items[i].context_uri, uri) == 0)
+			return LIST_ALBUM0 + i;
+	return -1;
 }
 
 static void library_get_lists(recent_list **recents, playlist_list **playlists,
 	                          album_list **albums)
 {
+	const unsigned revision = worker_library_revision();
 	worker_get_recents(&g_recents_buf);
 	worker_get_playlists(&g_playlists_buf);
 	worker_get_albums(&g_albums_buf);
@@ -491,22 +495,25 @@ static void library_get_lists(recent_list **recents, playlist_list **playlists,
 	}
 
 	if (strcmp(g_filter_query, g_list_search) != 0 ||
+	    g_filter_revision != revision ||
 	    g_filter_playlist_count != g_playlists_buf.count ||
 	    g_filter_album_count != g_albums_buf.count) {
-		memset(&g_search_recents, 0, sizeof g_search_recents);
-		memset(&g_search_playlists, 0, sizeof g_search_playlists);
-		memset(&g_search_albums, 0, sizeof g_search_albums);
-		for (int i = 0; i < g_playlists_buf.count; i++)
-			if (collection_matches(&g_playlists_buf.items[i]))
-				g_search_playlists.items[g_search_playlists.count++] =
-				    g_playlists_buf.items[i];
-		for (int i = 0; i < g_albums_buf.count; i++)
-			if (collection_matches(&g_albums_buf.items[i]))
-				g_search_albums.items[g_search_albums.count++] =
-				    g_albums_buf.items[i];
-		g_search_playlists.total = g_search_playlists.count;
-		g_search_albums.total = g_search_albums.count;
+		char armed_uri[128] = "";
+		bool same_query = strcmp(g_filter_query, g_list_search) == 0;
+		if (same_query) {
+			const collection_item *selected = list_selected_item(
+			    g_list_armed, &g_search_recents, &g_search_playlists, &g_search_albums);
+			if (selected)
+				snprintf(armed_uri, sizeof armed_uri, "%s", selected->context_uri);
+		}
+		collection_filter_lists(&g_recents_buf, &g_playlists_buf, &g_albums_buf,
+		                        g_list_search, &g_search_recents,
+		                        &g_search_playlists, &g_search_albums);
+		if (same_query) {
+			g_list_armed = filtered_id_for_uri(armed_uri);
+		}
 		snprintf(g_filter_query, sizeof g_filter_query, "%s", g_list_search);
+		g_filter_revision = revision;
 		g_filter_playlist_count = g_playlists_buf.count;
 		g_filter_album_count = g_albums_buf.count;
 	}
@@ -597,6 +604,77 @@ static const collection_item *list_play_item(int id, const recent_list *rl,
 	if (id >= LIST_PLAY_ALBUM0 && id < LIST_PLAY_ALBUM0 + al->count)
 		return &al->items[id - LIST_PLAY_ALBUM0];
 	return NULL;
+}
+
+static void remember_collection_hit(int id, const collection_item *item,
+                                     collection_touch_action action,
+                                     collection_touch_section section)
+{
+	if (!item || !item->context_uri[0] || g_collection_hit_count >= TOUCH_MAX_RECTS)
+		return;
+	collection_hit *hit = &g_collection_hits[g_collection_hit_count++];
+	hit->id = id;
+	hit->action = action;
+	hit->section = section;
+	snprintf(hit->uri, sizeof hit->uri, "%s", item->context_uri);
+}
+
+static void remember_list_hits(const recent_list *rl, const playlist_list *pl,
+                                const album_list *al)
+{
+	for (int i = 0; i < g_tb.n; i++) {
+		int id = g_tb.rects[i].id;
+		const collection_item *item = list_play_item(id, rl, pl, al);
+		collection_touch_action action = COLLECTION_TOUCH_PLAY;
+		if (!item) {
+			item = list_chevron_item(id, rl, pl, al);
+			action = COLLECTION_TOUCH_OPEN;
+		}
+		if (!item) {
+			item = list_selected_item(id, rl, pl, al);
+			action = COLLECTION_TOUCH_ROW;
+		}
+		int recent_base = action == COLLECTION_TOUCH_PLAY ? LIST_PLAY_RECENT0
+		                     : action == COLLECTION_TOUCH_OPEN ? LIST_CHEVRON_RECENT0
+		                     : LIST_RECENT0;
+		int playlist_base = action == COLLECTION_TOUCH_PLAY ? LIST_PLAY_PLAYLIST0
+		                       : action == COLLECTION_TOUCH_OPEN ? LIST_CHEVRON_PLAYLIST0
+		                       : LIST_PLAYLIST0;
+		collection_touch_section section = id >= recent_base && id < recent_base + RECENTS_MAX
+		                                      ? COLLECTION_SECTION_RECENT
+		                                      : id >= playlist_base && id < playlist_base + PLAYLISTS_MAX
+		                                          ? COLLECTION_SECTION_PLAYLIST
+		                                          : COLLECTION_SECTION_ALBUM;
+		remember_collection_hit(id, item, action, section);
+	}
+}
+
+static int collection_action_id(const collection_touch *press,
+                                const recent_list *rl, const playlist_list *pl,
+                                const album_list *al)
+{
+	int rows[] = {LIST_RECENT0, LIST_PLAYLIST0, LIST_ALBUM0};
+	int plays[] = {LIST_PLAY_RECENT0, LIST_PLAY_PLAYLIST0, LIST_PLAY_ALBUM0};
+	int opens[] = {LIST_CHEVRON_RECENT0, LIST_CHEVRON_PLAYLIST0, LIST_CHEVRON_ALBUM0};
+	/* Duplicate URIs are intentional in the unfiltered Library. Preserve the
+	 * occurrence the user touched, falling across sections only if it vanished. */
+	int list, index;
+	if (collection_touch_find(press, rl, pl, al, &list, &index)) {
+		int base = press->action == COLLECTION_TOUCH_PLAY ? plays[list]
+		             : press->action == COLLECTION_TOUCH_OPEN ? opens[list] : rows[list];
+		return base + index;
+	}
+	return -1;
+}
+
+static int pressed_shelf_index(const recent_list *rl, int fallback)
+{
+	if (!g_collection_touch.active)
+		return fallback;
+	for (int i = 0; i < rl->count && i < SHELF_TILES; i++)
+		if (strcmp(rl->items[i].context_uri, g_collection_touch.uri) == 0)
+			return i;
+	return -1;
 }
 
 static void tracks_request_page(int offset, int select_on_load)
@@ -1092,7 +1170,20 @@ int main(int argc, char **argv)
 		/* Hit rects come from the previous frame's draw, which is what the
 		 * user was actually looking at when they touched. */
 		touch_update(&touch, g_tb.rects, g_tb.n);
+		if (touch.pressed)
+			collection_touch_begin(&g_collection_touch, g_collection_hits,
+			                       g_collection_hit_count, touch.press_id);
+		if (g_collection_touch.active) {
+			int event = touch.clicked >= 0 ? touch.clicked
+			                : touch.long_pressed >= 0 ? touch.long_pressed : touch.press_id;
+			if (event >= 0 && !collection_touch_matches(&g_collection_touch,
+			    g_collection_hits, g_collection_hit_count, event)) {
+				touch.clicked = touch.long_pressed = -1;
+				touch.tap_cancelled = true;
+			}
+		}
 		tb_reset(&g_tb);
+		g_collection_hit_count = 0;
 		/* Lapses on its own wherever the user is: tied to the player's draw
 		 * it would stay set for good the moment they left that screen. */
 		if (g_shelf_fired >= 0 && osGetTime() >= g_shelf_fired_until)
@@ -1602,6 +1693,11 @@ int main(int argc, char **argv)
 			playlist_list *pl;
 			album_list *al;
 			library_get_lists(&rl, &pl, &al);
+			/* The hit ID came from the preceding render, before this function
+			 * could incorporate new metadata. Retarget the latched URI, not its
+			 * former array index; disappearing rows cancel the action. */
+			if (touch.clicked >= 0 && g_collection_touch.active)
+				touch.clicked = collection_action_id(&g_collection_touch, rl, pl, al);
 			const int n = rl->count;
 			const int pn = pl->count;
 			const int an = al->count;
@@ -1981,8 +2077,8 @@ int main(int argc, char **argv)
 		    touch.clicked < BTN_SHELF0 + SHELF_TILES) {
 			recent_list *const rl  = &g_recents_buf;
 			const int          n   = worker_get_recents(rl);
-			const int          idx = touch.clicked - BTN_SHELF0;
-			if (idx < n) {
+			const int          idx = pressed_shelf_index(rl, touch.clicked - BTN_SHELF0);
+			if (idx >= 0 && idx < n) {
 				tl_log("shelf: open %s", rl->items[idx].context_uri);
 				tracks_open(&rl->items[idx]);
 			}
@@ -1992,8 +2088,8 @@ int main(int argc, char **argv)
 		    touch.long_pressed < BTN_SHELF0 + SHELF_TILES) {
 			recent_list *const rl = &g_recents_buf;
 			const int n = worker_get_recents(rl);
-			const int idx = touch.long_pressed - BTN_SHELF0;
-			if (idx < n) {
+			const int idx = pressed_shelf_index(rl, touch.long_pressed - BTN_SHELF0);
+			if (idx >= 0 && idx < n) {
 				tl_log("shelf: long-play %s", rl->items[idx].context_uri);
 				worker_play_context(rl->items[idx].context_uri);
 				opt_set(&g_opt_play, 1);
@@ -2056,7 +2152,6 @@ int main(int argc, char **argv)
 		}
 
 		/* Same for thumbnails, which have their own queue behind the hero. */
-		thumbs_pump();
 
 		/* Claim a finished download. Only the GPU upload happens here, which is
 		 * cheap enough to sit in the frame. */
@@ -2074,8 +2169,7 @@ int main(int argc, char **argv)
 					                      art.tex_dim, art.accent_r,
 					                      art.accent_g, art.accent_b, art.url,
 					                      aerr, sizeof aerr);
-					if (ok)
-						art.tiled = NULL; /* consumed */
+					art.tiled = NULL; /* consumed, including texture allocation failures */
 				} else {
 					ok = art_upload(&g_art, art.rgba, art.w, art.h, art.url,
 					                aerr, sizeof aerr);
@@ -2182,7 +2276,7 @@ int main(int argc, char **argv)
 			library_get_lists(&search_recents, &search_playlists, &search_albums);
 			if (g_albums_buf.count > 0 || frames > 650) {
 				tl_step("list_search",
-				        g_albums_buf.count > 0 && search_recents->count == 0 &&
+				        g_albums_buf.count > 0 && recent_contexts_unique(search_recents) &&
 				            search_albums->count > 0,
 				        "query=%s playlists=%d albums=%d", g_list_search,
 				        search_playlists->count, search_albums->count);
@@ -2905,6 +2999,9 @@ int main(int argc, char **argv)
 
 		/* --- top screen ------------------------------------------------ */
 		C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+		/* SYNCDRAW has retired the previous frame. Expire/replace thumbnail
+		 * textures here, before either screen can submit a draw referencing one. */
+		thumbs_pump();
 
 		C2D_TargetClear(top, C2D_Color32(0, 0, 0, 0xFF));
 		C2D_SceneBegin(top);
@@ -2973,7 +3070,7 @@ int main(int argc, char **argv)
 				                           ? current_collection_uri(&snap.state)
 				                           : "",
 				.search_query = g_list_search,
-				.search_matches = pl->count + al->count,
+				.search_matches = rl->count + pl->count + al->count,
 				.playing     = playing,
 				.animation_ms = (unsigned)osGetTime(),
 				.elapsed_ms = progress,
@@ -2985,10 +3082,22 @@ int main(int argc, char **argv)
 				.armed_id   = g_list_armed,
 			};
 			screen_list_draw(&la);
+			remember_list_hits(rl, pl, al);
 			if (pop_open)
 				search_popover_draw(&pop);
 		} else if (g_view == VIEW_TRACKS) {
 			worker_get_tracks(&g_tracks_buf);
+			collection_item display;
+			if (worker_get_collection(g_tracks_collection.context_uri, &display)) {
+				if (display.name_source != META_NONE) {
+					memcpy(g_tracks_collection.name, display.name, sizeof display.name);
+					memcpy(g_tracks_collection.subtitle, display.subtitle,
+					       sizeof display.subtitle);
+				}
+				if (display.art_source != META_NONE)
+					memcpy(g_tracks_collection.art_url, display.art_url,
+					       sizeof display.art_url);
+			}
 			const bool search_done =
 			    g_track_search_mode &&
 			    g_track_search_status.state == TRACK_SEARCH_READY &&
@@ -3100,6 +3209,9 @@ int main(int argc, char **argv)
 			}
 
 			screen_player_draw(&pa);
+			for (int i = 0; i < pa.shelf_count; i++)
+				remember_collection_hit(BTN_SHELF0 + i, &rl->items[i], COLLECTION_TOUCH_SHELF,
+				                        COLLECTION_SECTION_SHELF);
 		}
 
 		const u64 volume_now = osGetTime();

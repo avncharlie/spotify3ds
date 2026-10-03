@@ -38,14 +38,8 @@ static bool uri_id(const char *uri, char *out, int outlen)
 	return true;
 }
 
-/* GET /v1/playlists/{id}?fields=name,images,owner(display_name).
- *
- * recently-played gives a context uri but never the playlist's name or artwork,
- * so this is the only way to label one correctly. The art matters as much as
- * the name: the enclosing item's images are the *album cover of the track that
- * happened to be playing*, so using those showed a playlist under an unrelated
- * cover. Results go through namecache, so this runs once per playlist rather
- * than once per launch. */
+/* Cache-only display lookup, or fresh Web API metadata when a caller asks for
+ * a snapshot. The staged playlist_meta resolver handles display fallbacks. */
 bool playlist_metadata(const char *uri, char *name, int namelen, char *owner,
                        int ownerlen, char *art, int artlen, char *snapshot,
                        int snaplen, int *item_total)
@@ -57,29 +51,11 @@ bool playlist_metadata(const char *uri, char *name, int namelen, char *owner,
 		snapshot[0] = '\0';
 	if (item_total)
 		*item_total = -1;
-
-	/* A hit is only useful if it has the artwork too. Entries written before
-	 * the art column existed read back with an empty url, and returning them
-	 * as-is stuck those playlists on the wrong cover permanently: the cache
-	 * answered, so the request that would have filled it never ran. Treating
-	 * that as a miss lets an old cache heal itself on the next launch.
-	 *
-	 * A playlist genuinely without art re-requests once per launch as a
-	 * result. That is a handful of requests at most, and only for playlists
-	 * that have no image to find.
-	 *
-	 * A caller wanting the snapshot id skips the cache entirely: that field
-	 * exists to say whether the playlist has changed, and a cached copy would
-	 * keep confirming itself for as long as the entry lives. */
-	if (!snapshot &&
-	    namecache_get(uri, name, namelen, owner, ownerlen, art, artlen) &&
-	    art[0])
-		return true;
-
-	/* Fall through to the fetch, discarding the partial hit. */
-	name[0]  = '\0';
-	owner[0] = '\0';
-	art[0]   = '\0';
+	/* Display enrichment is scheduled by the worker, never by this history
+	 * walk. Snapshot callers still make a fresh Web API-only request below. */
+	if (!snapshot) {
+		return namecache_get(uri, name, namelen, owner, ownerlen, art, artlen);
+	}
 
 	char id[64];
 	if (!uri_id(uri, id, sizeof id))
@@ -111,14 +87,12 @@ bool playlist_metadata(const char *uri, char *name, int namelen, char *owner,
 		return false;
 	}
 
-	const bool ok = json_get_str(r.body, r.body_len, "name", name, (size_t)namelen);
-	json_get_str(r.body, r.body_len, "owner.display_name", owner,
-	             (size_t)ownerlen);
-
-	/* Mosaics come in 640/300/60; a plain uploaded cover may be a single entry.
-	 * Prefer the smallest, which at 60px is already larger than the 52px tile. */
-	if (!json_get_str(r.body, r.body_len, "images[2].url", art, (size_t)artlen))
-		json_get_str(r.body, r.body_len, "images[0].url", art, (size_t)artlen);
+	playlist_meta meta = {0};
+	playlist_meta_parse(&meta, r.body, (unsigned)r.body_len, 0);
+	snprintf(name, (size_t)namelen, "%s", meta.name);
+	snprintf(owner, (size_t)ownerlen, "%s", meta.owner);
+	snprintf(art, (size_t)artlen, "%s", meta.art);
+	const bool ok = meta.name_source == META_API;
 
 	if (snapshot && snaplen > 0)
 		json_get_str(r.body, r.body_len, "snapshot_id", snapshot,
@@ -236,35 +210,14 @@ player_result recents_fetch(recent_list *out, char *err, int errlen)
 			continue;
 
 		collection_item *it = &out->items[out->count++];
+		it->item_total = -1;
 
 		if (is_playlist) {
-			char pname[128] = "", powner[128] = "", part[256] = "";
-
-			if (playlist_metadata(play_uri, pname, sizeof pname, powner,
-			                      sizeof powner, part, sizeof part, NULL, 0, NULL)) {
-				snprintf(it->name, sizeof it->name, "%s", pname);
-				snprintf(it->subtitle, sizeof it->subtitle, "Playlist" SUB_SEP "%s",
-				         powner[0] ? powner : artist);
-
-				/* The playlist's own cover, not `art` - that is the album of
-				 * whichever track happened to be playing when the context was
-				 * recorded, which is a different picture entirely. */
-				if (part[0])
-					snprintf(art, sizeof art, "%s", part);
-			} else {
-				/* Naming failed (deleted, private, or offline). Label it by the
-				 * track it was reached through rather than claiming it is an
-				 * album, which would be plainly wrong about what tapping does.
-				 * The track's album art stays as a stand-in - a wrong-but-real
-				 * cover beats an empty tile when we know nothing else. */
-				snprintf(p, sizeof p, "items[%d].track.name", i);
-				char track[128] = "";
-				json_doc_str(d, p, track, sizeof track);
-				snprintf(it->name, sizeof it->name, "%s",
-				         track[0] ? track : album);
-				snprintf(it->subtitle, sizeof it->subtitle, "Playlist" SUB_SEP "%s",
-				         artist);
-			}
+			snprintf(p, sizeof p, "items[%d].track.name", i);
+			char track[128] = "";
+			json_doc_str(d, p, track, sizeof track);
+			snprintf(it->name, sizeof it->name, "%s", track[0] ? track : album);
+			snprintf(it->subtitle, sizeof it->subtitle, "Playlist");
 			it->kind = COLLECTION_PLAYLIST;
 		} else {
 			snprintf(it->name, sizeof it->name, "%s", album);
@@ -274,6 +227,12 @@ player_result recents_fetch(recent_list *out, char *err, int errlen)
 
 		snprintf(it->art_url, sizeof it->art_url, "%s", art);
 		snprintf(it->context_uri, sizeof it->context_uri, "%s", play_uri);
+		if (is_playlist) {
+			playlist_meta meta;
+			namecache_lookup(play_uri, &meta);
+			collection_apply_metadata(it, &meta);
+			it->metadata_retry_at = namecache_refresh_at(play_uri);
+		}
 	}
 
 	json_doc_free(d);
@@ -334,34 +293,32 @@ player_result playlists_fetch(playlist_list *out, char *err, int errlen)
 
 		for (int i = 0; i < page_count && out->count < PLAYLISTS_MAX; i++) {
 			char p[96];
-			char name[128] = "", uri[128] = "", owner[128] = "", art[256] = "";
-			snprintf(p, sizeof p, "items[%d].name", i);
-			if (!json_doc_str(d, p, name, sizeof name))
-				continue;
+			char uri[128] = "";
 			snprintf(p, sizeof p, "items[%d].uri", i);
-			if (!json_doc_str(d, p, uri, sizeof uri) || !uri[0])
+			if (!json_doc_is_nonempty_string(d, p) ||
+			    !json_doc_str(d, p, uri, sizeof uri))
 				continue;
-			snprintf(p, sizeof p, "items[%d].owner.display_name", i);
-			if (!json_doc_is_null(d, p))
-				json_doc_str(d, p, owner, sizeof owner);
-			long item_total = 0;
+			playlist_meta_job check;
+			if (!playlist_meta_begin(&check, uri, NULL))
+				continue;
+			playlist_meta parsed = {0};
+			snprintf(p, sizeof p, "items[%d]", i);
+			playlist_meta_parse_doc(&parsed, d, p, 0);
+			long item_total = -1;
 			snprintf(p, sizeof p, "items[%d].items.total", i);
 			json_doc_int(d, p, &item_total);
-			snprintf(p, sizeof p, "items[%d].images[2].url", i);
-			if (!json_doc_str(d, p, art, sizeof art)) {
-				snprintf(p, sizeof p, "items[%d].images[0].url", i);
-				json_doc_str(d, p, art, sizeof art);
-			}
-
 			collection_item *it = &out->items[out->count++];
-			snprintf(it->name, sizeof it->name, "%s", name);
-			snprintf(it->subtitle, sizeof it->subtitle,
-			         owner[0] ? "Playlist" SUB_SEP "%s" : "Playlist", owner);
-			snprintf(it->art_url, sizeof it->art_url, "%s", art);
+			snprintf(it->name, sizeof it->name, "Playlist");
+			snprintf(it->subtitle, sizeof it->subtitle, "Playlist");
 			snprintf(it->context_uri, sizeof it->context_uri, "%s", uri);
 			it->item_total = (int)item_total;
 			it->kind = COLLECTION_PLAYLIST;
-			namecache_put_deferred(uri, name, owner, art);
+			collection_apply_metadata(it, &parsed);
+			namecache_store(uri, &parsed);
+			playlist_meta cached;
+			namecache_lookup(uri, &cached);
+			collection_apply_metadata(it, &cached);
+			it->metadata_retry_at = namecache_refresh_at(uri);
 		}
 
 		tl_timing("playlists page offset=%d bytes=%u tokens=%d in %llums", offset,

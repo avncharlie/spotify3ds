@@ -2,12 +2,14 @@
 
 #include <3ds.h>
 #include <stdbool.h>
+#include <time.h>
+#include "artcache_path.h"
 
 /* On-SD cache of decoded album art.
  *
- * Spotify's art URLs are content-addressed - the final path segment is a hash
- * of the image - so a cached entry can never go stale and needs no TTL. The
- * same album always yields the same URL and the same bytes.
+ * Content-addressed album covers retain their existing keys and need no TTL.
+ * Generated Pickasso/daylist covers use full-URL hash keys and bounded TTLs
+ * because their final segment is a locale/file, not an immutable content ID.
  *
  * Entries hold *pre-tiled* texture data, so a hit skips the network fetch, the
  * JPEG decode, the Morton tiling and the accent extraction: what remains is one
@@ -33,20 +35,27 @@
  * shard discovery, orphan cleanup and FIFO eviction are all lazy on writes. */
 void artcache_init(void);
 
-/* Look up art for `url`.
+/* Look up art for `url` at the requested decode quality. A large entry can
+ * satisfy a thumbnail request, never the reverse. An insufficient-quality
+ * entry remains available to thumbnail callers while the large path upgrades.
  *
  * On a hit, *out_tiled is a linearAlloc'd, fully populated texture buffer ready
  * for C3D_TexLoadImage - the caller owns it and must linearFree it - and the
  * accent colour and source dimensions are restored. Returns false on a miss, a
  * corrupt entry (which is deleted), or any I/O error. */
-bool artcache_load(const char *url, u8 **out_tiled, int *out_w, int *out_h,
+bool artcache_load(const char *url, artcache_quality quality,
+                   u8 **out_tiled, int *out_w, int *out_h,
                    int *out_dim, u8 *accent_r, u8 *accent_g, u8 *accent_b,
-                   unsigned *read_ms);
+                    unsigned *read_ms, time_t *expires_at);
 
-/* Store decoded RGBA under `url`. Best-effort: failures are logged once and
+/* Store decoded RGBA under `url`, recording the decode path rather than just
+ * dimensions (a naturally small original can still be large-path quality).
+ * Fresh higher-quality entries are never replaced with lower-quality pixels.
+ * Best-effort: failures are logged once and
  * never propagate, so a full or read-only card degrades to today's behaviour.
  * Writes are slow (~140ms), so call this *after* publishing to the UI. */
-void artcache_store(const char *url, const u8 *rgba, int w, int h, u8 accent_r,
+void artcache_store(const char *url, artcache_quality quality,
+                    const u8 *rgba, int w, int h, u8 accent_r,
                     u8 accent_g, u8 accent_b);
 
 /* Phase 1 measurement probe. Emits TIMING lines; no-op unless timing is on. */

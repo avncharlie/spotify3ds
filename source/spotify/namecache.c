@@ -1,55 +1,57 @@
 #include "namecache.h"
 
-#include <3ds.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <errno.h>
 
 #include "../testlog.h"
 
+#ifndef NAMECACHE_PATH
 #define NAMECACHE_PATH "sdmc:/spotify/names.txt"
-
-/* One line per entry: "<unix-seconds> <uri> <name>\t<owner>\t<art-url>\n".
- *
- * Space-separated up to the name, which may itself contain spaces, so the
- * later fields are split off by tabs - a character Spotify does not allow in
- * any of them. Entries written before a field existed simply have fewer tabs
- * and read back empty, so an older cache upgrades in place rather than needing
- * to be discarded.
- *
- * A flat file rather than the sharded layout artcache uses: entries are tens of
- * bytes and there are dozens of them, so the whole thing is smaller than a
- * single art entry's header. Rewriting it wholesale on every put costs one
- * short write, which is far cheaper than the seek-heavy alternative and keeps
- * the format greppable when debugging over netload.
- */
-
+#endif
 #define MAX_ENTRIES 128
+#define LINE_MAX 1024
 
-/* Must exceed the widest possible line - uri + name + owner + art url plus
- * separators - or fgets would split one entry across two reads and the second
- * half would be discarded as malformed. Mosaic urls alone run to ~200 chars. */
-#define LINE_MAX 768
-
+/* Old four-column lines remain readable. New trailing columns record field
+ * sources and timestamps independently, so updating a cover cannot renew an
+ * old oEmbed title and incomplete API list entries cannot erase good artwork. */
 typedef struct {
-	long when;
+	long when, name_when, art_when;
 	char uri[128];
-	char name[128];
-	char owner[128];
-	char art[256];
+	playlist_meta meta;
 } entry;
 
-/* Loaded lazily and kept in memory: the worker reads this once per playlist it
- * cannot name, and re-reading the file for each would be pointless I/O. */
 static entry s_entries[MAX_ENTRIES];
-static int   s_count;
-static bool  s_loaded;
-static bool  s_dirty;
+static int s_count;
+static bool s_loaded, s_dirty;
 
-static long now_seconds(void)
+void namecache_reset(void)
 {
-	return (long)time(NULL);
+	s_count = 0;
+	s_loaded = s_dirty = false;
+}
+
+static long lifetime(metadata_source source, const char *art)
+{
+	if (art) {
+		const char *daylist = "https://daylist.spotifycdn.com/";
+		const char *pickasso = "https://pickasso.spotifycdn.com/";
+		if (strncmp(art, daylist, strlen(daylist)) == 0)
+			return 6 * 3600; /* the image URL changes with the time of day */
+		if (strncmp(art, pickasso, strlen(pickasso)) == 0)
+			return 86400; /* periodically discover refreshed personalized art */
+	}
+	return (source == META_OEMBED ? NAMECACHE_FALLBACK_TTL_DAYS
+	                             : NAMECACHE_TTL_DAYS) * 86400L;
+}
+
+static bool fresh(long when, metadata_source source, const char *art)
+{
+	long now = (long)time(NULL);
+	return source != META_NONE && when > 0 && when <= now &&
+	       now - when < lifetime(source, art);
 }
 
 static void load(void)
@@ -57,184 +59,245 @@ static void load(void)
 	if (s_loaded)
 		return;
 	s_loaded = true;
-
 	FILE *f = fopen(NAMECACHE_PATH, "r");
+	if (!f && errno == ENOENT) {
+		/* Recover a power loss between moving the old file aside and installing
+		 * the new one. 3DS SD rename cannot replace an existing destination. */
+		if (rename(NAMECACHE_PATH ".bak", NAMECACHE_PATH) == 0)
+			f = fopen(NAMECACHE_PATH, "r");
+		else
+			f = fopen(NAMECACHE_PATH ".bak", "r");
+	}
 	if (!f)
 		return;
-
 	char line[LINE_MAX];
 	while (s_count < MAX_ENTRIES && fgets(line, sizeof line, f)) {
 		char *nl = strchr(line, '\n');
+		if (!nl && !feof(f)) {
+			int c;
+			while ((c = fgetc(f)) != '\n' && c != EOF) {}
+			continue;
+		}
 		if (nl)
 			*nl = '\0';
-
-		/* "<when> <uri> <name>": the name may contain spaces, the first two
-		 * fields may not, so split on the first two separators only. */
 		char *sp1 = strchr(line, ' ');
-		if (!sp1)
-			continue;
-		*sp1 = '\0';
-		char *sp2 = strchr(sp1 + 1, ' ');
+		char *sp2 = sp1 ? strchr(sp1 + 1, ' ') : NULL;
 		if (!sp2)
 			continue;
-		*sp2 = '\0';
-
-		const char *when  = line;
-		const char *uri   = sp1 + 1;
-		char       *name  = sp2 + 1;
-		const char *owner = "";
-		const char *art   = "";
-
-		/* Both trailing fields are optional; older entries have fewer tabs. */
-		char *tab = strchr(name, '\t');
-		if (tab) {
-			*tab  = '\0';
-			owner = tab + 1;
-
-			char *tab2 = strchr(tab + 1, '\t');
-			if (tab2) {
-				*tab2 = '\0';
-				art   = tab2 + 1;
-			}
+		*sp1 = *sp2 = '\0';
+		char *fields[7] = {sp2 + 1, "", "", NULL, NULL, NULL, NULL};
+		for (int i = 1; i < 7; i++) {
+			char *tab = strchr(fields[i - 1], '\t');
+			if (!tab)
+				break;
+			*tab = '\0';
+			fields[i] = tab + 1;
 		}
-
-		if (!uri[0] || !name[0])
+		if (!sp1[1] || strlen(sp1 + 1) >= sizeof s_entries[0].uri ||
+		    strlen(fields[0]) >= sizeof s_entries[0].meta.name ||
+		    strlen(fields[1]) >= sizeof s_entries[0].meta.owner ||
+		    strlen(fields[2]) >= sizeof s_entries[0].meta.art)
 			continue;
-
-		entry *e = &s_entries[s_count++];
-		e->when  = strtol(when, NULL, 10);
-		snprintf(e->uri, sizeof e->uri, "%s", uri);
-		snprintf(e->name, sizeof e->name, "%s", name);
-		snprintf(e->owner, sizeof e->owner, "%s", owner);
-		snprintf(e->art, sizeof e->art, "%s", art);
+		entry e = {0};
+		e.when = strtol(line, NULL, 10);
+		e.name_when = fields[5] ? strtol(fields[5], NULL, 10) : e.when;
+		e.art_when = fields[6] ? strtol(fields[6], NULL, 10) : e.when;
+		snprintf(e.uri, sizeof e.uri, "%s", sp1 + 1);
+		snprintf(e.meta.name, sizeof e.meta.name, "%s", fields[0]);
+		snprintf(e.meta.owner, sizeof e.meta.owner, "%s", fields[1]);
+		snprintf(e.meta.art, sizeof e.meta.art, "%s", fields[2]);
+		e.meta.name_source = fields[3] ? (metadata_source)atoi(fields[3]) : META_API;
+		e.meta.art_source = fields[4] ? (metadata_source)atoi(fields[4]) : META_API;
+		if (e.meta.name_source < META_NONE || e.meta.name_source > META_API ||
+		    e.meta.art_source < META_NONE || e.meta.art_source > META_API)
+			continue;
+		if (!e.meta.name[0])
+			e.meta.name_source = META_NONE;
+		if (!e.meta.art[0])
+			e.meta.art_source = META_NONE;
+		if (e.meta.name[0] || e.meta.art[0])
+			s_entries[s_count++] = e;
 	}
-
 	fclose(f);
 }
 
-static bool save(void)
+bool namecache_lookup(const char *uri, playlist_meta *meta)
 {
-	FILE *f = fopen(NAMECACHE_PATH, "w");
-	if (!f) {
-		tl_log("namecache: cannot write %s", NAMECACHE_PATH);
+	memset(meta, 0, sizeof *meta);
+	if (!uri || !uri[0])
 		return false;
-	}
-
-	bool ok = true;
+	load();
 	for (int i = 0; i < s_count; i++) {
-		if (fprintf(f, "%ld %s %s\t%s\t%s\n", s_entries[i].when,
-		            s_entries[i].uri, s_entries[i].name, s_entries[i].owner,
-		            s_entries[i].art) < 0)
-			ok = false;
+		entry *e = &s_entries[i];
+		if (strcmp(e->uri, uri) != 0)
+			continue;
+		if (fresh(e->name_when, e->meta.name_source, NULL)) {
+			memcpy(meta->name, e->meta.name, sizeof meta->name);
+			memcpy(meta->owner, e->meta.owner, sizeof meta->owner);
+			meta->name_source = e->meta.name_source;
+		}
+		if (fresh(e->art_when, e->meta.art_source, e->meta.art)) {
+			memcpy(meta->art, e->meta.art, sizeof meta->art);
+			meta->art_source = e->meta.art_source;
+		}
+		return meta->name[0] || meta->art[0];
 	}
-
-	if (fclose(f) != 0)
-		ok = false;
-	if (!ok)
-		tl_log("namecache: write failed for %s", NAMECACHE_PATH);
-	return ok;
+	return false;
 }
 
 bool namecache_get(const char *uri, char *name, int namelen, char *owner,
                    int ownerlen, char *art, int artlen)
 {
-	if (!uri || !uri[0] || !name || namelen <= 0)
+	if (!name || namelen <= 0)
 		return false;
+	playlist_meta meta;
+	namecache_lookup(uri, &meta);
+	snprintf(name, (size_t)namelen, "%s", meta.name);
+	if (owner && ownerlen > 0)
+		snprintf(owner, (size_t)ownerlen, "%s", meta.owner);
+	if (art && artlen > 0)
+		snprintf(art, (size_t)artlen, "%s", meta.art);
+	return meta.name[0] != '\0';
+}
 
-	load();
-
-	const long cutoff = now_seconds() - (long)NAMECACHE_TTL_DAYS * 24 * 3600;
-
+time_t namecache_refresh_at(const char *uri)
+{
+	playlist_meta meta;
+	namecache_lookup(uri, &meta);
+	if (!playlist_meta_complete(&meta))
+		return 0;
 	for (int i = 0; i < s_count; i++) {
-		if (strcmp(s_entries[i].uri, uri) != 0)
+		entry *e = &s_entries[i];
+		if (strcmp(e->uri, uri) != 0)
 			continue;
-
-		/* A clock that reads earlier than the entry (the 3DS RTC can be reset,
-		 * and was wrong on this very console during bring-up) would make a
-		 * fresh entry look infinitely old. Treat only a plausible age as
-		 * expiry. */
-		if (s_entries[i].when < cutoff)
-			return false;
-
-		snprintf(name, namelen, "%s", s_entries[i].name);
-		if (owner && ownerlen > 0)
-			snprintf(owner, ownerlen, "%s", s_entries[i].owner);
-		if (art && artlen > 0)
-			snprintf(art, artlen, "%s", s_entries[i].art);
-		return true;
+		time_t a = e->name_when + lifetime(meta.name_source, NULL);
+		time_t b = e->art_when + lifetime(meta.art_source, meta.art);
+		return a < b ? a : b;
 	}
-
-	return false;
+	return 0;
 }
 
-static bool put(const char *uri, const char *name, const char *owner,
-                const char *art)
+void namecache_store(const char *uri, const playlist_meta *meta)
 {
-	if (!uri || !uri[0] || !name || !name[0])
-		return false;
-
-	if (!owner)
-		owner = "";
-	if (!art)
-		art = "";
-
-	/* A newline or tab would corrupt the line format, and a space in the uri
-	 * would break the field split. Reject rather than mangle: the cost is one
-	 * extra request next launch. */
-	if (strpbrk(name, "\n\t") || strpbrk(owner, "\n\t") ||
-	    strpbrk(art, "\n\t") || strpbrk(uri, " \n\t"))
-		return false;
-
+	if (!uri || !uri[0] || strlen(uri) >= sizeof s_entries[0].uri ||
+	    strpbrk(uri, " \r\n\t") || strpbrk(meta->name, "\r\n\t") ||
+	    strpbrk(meta->owner, "\r\n\t") || strpbrk(meta->art, "\r\n\t") ||
+	    (!meta->name[0] && !meta->art[0]))
+		return;
 	load();
-
-	for (int i = 0; i < s_count; i++) {
+	int idx = -1;
+	for (int i = 0; i < s_count; i++)
 		if (strcmp(s_entries[i].uri, uri) == 0) {
-			snprintf(s_entries[i].name, sizeof s_entries[i].name, "%s", name);
-			snprintf(s_entries[i].owner, sizeof s_entries[i].owner, "%s", owner);
-			snprintf(s_entries[i].art, sizeof s_entries[i].art, "%s", art);
-			s_entries[i].when = now_seconds();
-			s_dirty = true;
-			return true;
+			idx = i;
+			break;
 		}
+	if (idx < 0) {
+		if (s_count < MAX_ENTRIES)
+			idx = s_count++;
+		else {
+			idx = 0;
+			for (int i = 1; i < s_count; i++)
+				if (s_entries[i].when < s_entries[idx].when)
+					idx = i;
+		}
+		memset(&s_entries[idx], 0, sizeof s_entries[idx]);
+		snprintf(s_entries[idx].uri, sizeof s_entries[idx].uri, "%s", uri);
 	}
-
-	if (s_count >= MAX_ENTRIES) {
-		/* Drop the oldest to make room. At 128 entries this is rare enough not
-		 * to justify anything cleverer. */
-		int oldest = 0;
-		for (int i = 1; i < s_count; i++)
-			if (s_entries[i].when < s_entries[oldest].when)
-				oldest = i;
-		memmove(&s_entries[oldest], &s_entries[oldest + 1],
-		        (size_t)(s_count - oldest - 1) * sizeof s_entries[0]);
-		s_count--;
+	entry *e = &s_entries[idx];
+	long now = (long)time(NULL);
+	bool changed = false;
+	if (meta->name[0] && meta->name_source != META_NONE &&
+	    (!fresh(e->name_when, e->meta.name_source, NULL) ||
+	     meta->name_source >= e->meta.name_source)) {
+		if (meta->name_source == META_OEMBED &&
+		    !fresh(e->name_when, e->meta.name_source, NULL))
+			e->meta.owner[0] = '\0';
+		memcpy(e->meta.name, meta->name, sizeof e->meta.name);
+		e->meta.name_source = meta->name_source;
+		e->name_when = now;
+		changed = true;
 	}
-
-	entry *e = &s_entries[s_count++];
-	e->when  = now_seconds();
-	snprintf(e->uri, sizeof e->uri, "%s", uri);
-	snprintf(e->name, sizeof e->name, "%s", name);
-	snprintf(e->owner, sizeof e->owner, "%s", owner);
-	snprintf(e->art, sizeof e->art, "%s", art);
-	s_dirty = true;
-	return true;
-}
-
-void namecache_put(const char *uri, const char *name, const char *owner,
-                   const char *art)
-{
-	if (put(uri, name, owner, art))
-		namecache_flush();
+	if (meta->art[0] && meta->art_source != META_NONE &&
+	    (!fresh(e->art_when, e->meta.art_source, e->meta.art) ||
+	     meta->art_source >= e->meta.art_source)) {
+		memcpy(e->meta.art, meta->art, sizeof e->meta.art);
+		e->meta.art_source = meta->art_source;
+		e->art_when = now;
+		changed = true;
+	}
+	if (meta->owner[0])
+		memcpy(e->meta.owner, meta->owner, sizeof e->meta.owner);
+	if (changed) {
+		e->when = now;
+		s_dirty = true;
+	}
 }
 
 void namecache_put_deferred(const char *uri, const char *name,
                             const char *owner, const char *art)
 {
-	put(uri, name, owner, art);
+	playlist_meta meta = {0};
+	snprintf(meta.name, sizeof meta.name, "%s", name ? name : "");
+	snprintf(meta.owner, sizeof meta.owner, "%s", owner ? owner : "");
+	snprintf(meta.art, sizeof meta.art, "%s", art ? art : "");
+	meta.name_source = meta.name[0] ? META_API : META_NONE;
+	meta.art_source = meta.art[0] ? META_API : META_NONE;
+	namecache_store(uri, &meta);
+}
+
+void namecache_put(const char *uri, const char *name, const char *owner,
+                   const char *art)
+{
+	namecache_put_deferred(uri, name, owner, art);
+	namecache_flush();
 }
 
 void namecache_flush(void)
 {
-	if (s_dirty && save())
-		s_dirty = false;
+	if (!s_dirty)
+		return;
+	FILE *f = fopen(NAMECACHE_PATH ".tmp", "w");
+	if (!f) {
+		tl_log("namecache: cannot write %s", NAMECACHE_PATH);
+		return;
+	}
+	bool ok = true;
+	for (int i = 0; i < s_count; i++) {
+		entry *e = &s_entries[i];
+		if (fprintf(f, "%ld %s %s\t%s\t%s\t%d\t%d\t%ld\t%ld\n", e->when,
+		            e->uri, e->meta.name, e->meta.owner, e->meta.art,
+		            (int)e->meta.name_source, (int)e->meta.art_source,
+		            e->name_when, e->art_when) < 0)
+			ok = false;
+	}
+	if (fclose(f) != 0)
+		ok = false;
+	if (ok) {
+		if (rename(NAMECACHE_PATH ".tmp", NAMECACHE_PATH) == 0) {
+			s_dirty = false;
+			remove(NAMECACHE_PATH ".bak");
+			return;
+		}
+		/* Keep the previous valid cache until installation succeeds, rather
+		 * than unlinking the only copy to satisfy SD's no-replace rename. */
+		FILE *current = fopen(NAMECACHE_PATH, "r");
+		bool have_current = current != NULL;
+		if (current)
+			fclose(current);
+		if (have_current)
+			remove(NAMECACHE_PATH ".bak");
+		if (have_current && rename(NAMECACHE_PATH, NAMECACHE_PATH ".bak") == 0) {
+			if (rename(NAMECACHE_PATH ".tmp", NAMECACHE_PATH) == 0) {
+				s_dirty = false;
+				remove(NAMECACHE_PATH ".bak");
+				return;
+			}
+			/* Leave the backup recoverable even if this rollback also fails. */
+			rename(NAMECACHE_PATH ".bak", NAMECACHE_PATH);
+		}
+	}
+	if (s_dirty) {
+		remove(NAMECACHE_PATH ".tmp");
+		tl_log("namecache: write failed for %s", NAMECACHE_PATH);
+	}
 }

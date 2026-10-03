@@ -1,4 +1,5 @@
 #include "art.h"
+#include "art_scale.h"
 
 #include <3ds.h>
 #include <jpeglib.h>
@@ -194,7 +195,8 @@ bool art_fetch_decode(const char *url, int target, unsigned char **out_rgba,
 	/* --- decode ------------------------------------------------------- */
 	struct jpeg_decompress_struct cinfo;
 	struct jerr_mgr               jerr;
-	u8                           *linear = NULL;
+	u8                 *volatile linear = NULL;
+	u8                 *volatile scanline = NULL;
 
 	cinfo.err           = jpeg_std_error(&jerr.pub);
 	jerr.pub.error_exit = jerr_exit;
@@ -203,6 +205,7 @@ bool art_fetch_decode(const char *url, int target, unsigned char **out_rgba,
 	if (setjmp(jerr.escape)) {
 		jpeg_destroy_decompress(&cinfo);
 		free(linear);
+		free(scanline);
 		http_free(&r);
 		snprintf(err, errlen, "jpeg decode failed");
 		return false;
@@ -227,7 +230,7 @@ bool art_fetch_decode(const char *url, int target, unsigned char **out_rgba,
 	const unsigned cap_px = (unsigned)art_tex_dim_for(target);
 
 	cinfo.scale_num   = 1;
-	cinfo.scale_denom = 8; /* fallback: smallest, so something always fits */
+	cinfo.scale_denom = 8; /* smallest native scale; oversized output is fitted below */
 
 	/* Largest scale whose result still fits the texture. Ascending d means
 	 * descending size, so the first one that fits is the biggest that fits -
@@ -239,8 +242,8 @@ bool art_fetch_decode(const char *url, int target, unsigned char **out_rgba,
 	 * smallest, decoding a 60px image down to 8x8. Upscaling slightly at draw
 	 * time is invisible; throwing away 7/8 of the pixels is not. */
 	for (unsigned d = 1; d <= 8; d *= 2) {
-		if (cinfo.image_width / d <= cap_px &&
-		    cinfo.image_height / d <= cap_px) {
+		if ((cinfo.image_width + d - 1) / d <= cap_px &&
+		    (cinfo.image_height + d - 1) / d <= cap_px) {
 			cinfo.scale_denom = d;
 			break;
 		}
@@ -250,21 +253,23 @@ bool art_fetch_decode(const char *url, int target, unsigned char **out_rgba,
 
 	jpeg_start_decompress(&cinfo);
 
-	const int w = (int)cinfo.output_width;
-	const int h = (int)cinfo.output_height;
+	unsigned fitted_w, fitted_h;
 
 	/* Bound against the texture these pixels will be tiled into, which follows
 	 * `target`, not the hero texture - a thumb decode legitimately produces
 	 * something far smaller than ART_TEX_SIZE. */
 	const int cap = art_tex_dim_for(target);
 
-	if (w > cap || h > cap) {
+	if (!art_fit_dimensions(cinfo.output_width, cinfo.output_height,
+	                        (unsigned)cap, &fitted_w, &fitted_h)) {
 		jpeg_abort_decompress(&cinfo);
 		jpeg_destroy_decompress(&cinfo);
 		http_free(&r);
-		snprintf(err, errlen, "decoded %dx%d exceeds %d", w, h, cap);
+		snprintf(err, errlen, "invalid decoded image dimensions");
 		return false;
 	}
+	const int w = (int)fitted_w;
+	const int h = (int)fitted_h;
 
 	linear = malloc((size_t)w * h * 4);
 	if (!linear) {
@@ -275,10 +280,35 @@ bool art_fetch_decode(const char *url, int target, unsigned char **out_rgba,
 		return false;
 	}
 
-	while (cinfo.output_scanline < cinfo.output_height) {
-		u8 *row = linear + (size_t)cinfo.output_scanline * w * 4;
-		jpeg_read_scanlines(&cinfo, &row, 1);
+	/* Even a 640px fallback is 80px at JPEG's minimum 1/8 scale. Stream-fit
+	 * those rows instead of allocating a whole oversized image or rejecting it.
+	 * The normal 64px playlist-cover path remains a direct decode. */
+	const bool resize = fitted_w != cinfo.output_width || fitted_h != cinfo.output_height;
+	if (resize) {
+		scanline = malloc((size_t)cinfo.output_width * 4);
+		if (!scanline) {
+			jpeg_abort_decompress(&cinfo);
+			jpeg_destroy_decompress(&cinfo);
+			free(linear);
+			http_free(&r);
+			snprintf(err, errlen, "oom for image scanline");
+			return false;
+		}
 	}
+	unsigned target_y = 0;
+	while (cinfo.output_scanline < cinfo.output_height) {
+		unsigned source_y = cinfo.output_scanline;
+		u8 *row = resize ? scanline : linear + (size_t)source_y * w * 4;
+		jpeg_read_scanlines(&cinfo, &row, 1);
+		if (resize && target_y < fitted_h &&
+		    source_y == (uint64_t)target_y * cinfo.output_height / fitted_h) {
+			art_scale_row_rgba(scanline, cinfo.output_width,
+			                   linear + (size_t)target_y * w * 4, fitted_w);
+			target_y++;
+		}
+	}
+	free(scanline);
+	scanline = NULL;
 
 	jpeg_finish_decompress(&cinfo);
 	const bool damaged = jerr.pub.num_warnings != 0;

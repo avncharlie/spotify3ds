@@ -114,8 +114,10 @@ links mbedTLS and speaks TLS in userspace over raw BSD sockets, bypassing
 The embedded roots cover Spotify's API and image hosts plus LRCLIB. DigiCert
 **G2 (RSA)** serves `api.spotify.com`, Starfield G2 serves
 `accounts.spotify.com`, DigiCert **G3 (ECC)** serves `i.scdn.co` and
-`image-cdn-ak.spotifycdn.com`, GlobalSign R3 serves `mosaic.scdn.co` and
-`image-cdn-fa.spotifycdn.com`, and GTS Root R4 serves `lrclib.net`. Omitting one
+`image-cdn-ak.spotifycdn.com` plus `daylist.spotifycdn.com`, GlobalSign R3 serves
+`mosaic.scdn.co` and
+`image-cdn-fa.spotifycdn.com` plus `pickasso.spotifycdn.com`, Starfield G2 also
+serves `open.spotify.com`, and GTS Root R4 serves `lrclib.net`. Omitting one
 produces a confusing partial failure where the API works while one class of
 images or lyrics never loads. Spotify can also return previously unknown image
 hosts at runtime; add newly observed hosts to the monitor when appropriate.
@@ -124,7 +126,7 @@ hosts at runtime; add newly observed hosts to the monitor when appropriate.
 
 `.github/workflows/live-tls.yml` runs every Monday and can also be started
 manually. `tools/tlscheck` reads the runtime root list from `source/net/tls.c`,
-loads only those DER files, and checks all seven known hosts without using the
+loads only those DER files, and checks all ten known hosts without using the
 runner's system trust store. It requires TLS 1.2, verifies hostnames and chain
 anchors, and fails when a certificate has fewer than 14 valid days remaining.
 Transport failures are retried twice before the host is reported unreachable.
@@ -134,6 +136,46 @@ Run the same live check locally with:
 ```sh
 go run ./tools/tlscheck
 ```
+
+### Playlist display metadata
+
+Recent collections and Library rows prefer Web API names and artwork. Missing
+artwork is requested from `/v1/playlists/{id}/images`; remaining missing fields
+are filled from Spotify's public `open.spotify.com/oembed` JSON (`title` and
+`thumbnail_url`). The access token is never sent to oEmbed or image hosts.
+Algorithmic mixes can therefore display correctly even when playlist metadata
+returns 404. oEmbed does not expose track lists, snapshots, counts, or ownership;
+snapshot validation and track browsing continue using the Web API only.
+
+Enrichment runs one request per worker pass after playback work, selecting the
+oldest due row so failed lookups cannot starve later entries. Temporary song
+labels and album covers are not saved as playlist metadata. Expired real fields
+remain visible while they refresh. `names.txt` retains
+per-field sources and timestamps: ordinary API fields expire after 14 days and
+oEmbed fields after one day. Generated image URLs are rediscovered daily for
+Pickasso and every six hours for daylist. Old cache lines remain readable, and
+playlist-library cache updates remain bulk-written. Library search includes recent-only
+collections and removes duplicates by URI. Touch gestures latch the URI from
+the rendered hit areas, so asynchronous search/list changes cannot play a
+different row. SD metadata replacement uses a backup/recovery swap because the
+console filesystem cannot rename over an existing destination.
+
+Generated Pickasso/daylist artwork is JPEG, but its URL does not end in a content
+hash. It uses namespaced full-URL cache keys and image TTLs of five days for
+Pickasso and one day for daylist; ordinary content-addressed art retains its
+existing cache layout. RAM thumbnail expiry preserves the SD entry's original
+deadline, and download/decode/upload failures share bounded retries. Oversized
+JPEG thumbnails are streamed down to their
+texture dimensions without allocating a full decoded image.
+
+Artwork cache entries record thumbnail versus large-cover decode quality in the
+existing header flags. Large requests upgrade thumbnail entries; thumbnail
+writes preserve fresh large entries, even when both use the same image URL.
+The tier records the decode request, not a minimum pixel dimension, so a small
+original does not trigger repeated downloads. Legacy textures larger than 64px
+remain usable as large covers; ambiguous smaller entries upgrade once on demand.
+The cache layout/version is unchanged, and replacements at a full shard do not
+evict unrelated entries or inflate the shard count.
 
 ### Entropy
 

@@ -7,19 +7,23 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <time.h>
 
 #include "../testlog.h"
 
 #include "art.h"
 #include "artcache_path.h"
+#include "artcache_format.h"
 
+#ifndef CACHE_ROOT
 #define CACHE_ROOT "sdmc:/spotify/artcache"
-
-#define ARTCACHE_MAGIC 0x43334100u /* "\0A3C" */
+#endif
 
 /* Bound by the worst-case 160x160 payload. Thumbnails are smaller, so actual
  * payload usage is normally well below this conservative 5 GiB ceiling. */
+#ifndef ARTCACHE_MAX_BYTES
 #define ARTCACHE_MAX_BYTES (5ull * 1024 * 1024 * 1024)
+#endif
 
 /* A 160x160 image inside a 256x256 texture occupies 20x20 tiles of 8x8. The
  * tiles are laid out row-major across the *full* 32-tile-wide texture, so the
@@ -28,34 +32,23 @@
  * would take, for 20 memcpys on load. */
 #define TILE_BYTES     (64 * 4) /* 8x8 texels, 4 bytes each */
 
-/* Packed: this struct is written verbatim to disk, so the on-disk layout must
- * be exactly what is written here rather than whatever padding the compiler
- * chooses. Leaving it implicit already cost one debugging session - two bytes
- * inserted after the accent triple silently shifted every field after it. */
-typedef struct __attribute__((packed)) {
-	u32 magic;
-	u16 version;
-	u16 flags;
-	u16 tex_dim;   /* guards ART_TEX_SIZE changes even without a version bump */
-	u16 src_w;
-	u16 src_h;
-	u8  accent_r, accent_g, accent_b;
-	u32 payload_len;
-	u32 crc32;
-
-	/* Retained to keep the compact header layout stable. Global LRU required
-	 * opening every entry at startup, which is prohibitively slow on 3DS SD
-	 * storage; eviction is now FIFO within independently bounded hash shards. */
-	u32 use_seq;
-	u32 reserved;
-} artcache_hdr;
-
-/* The header is part of the on-disk format, so assert its size rather than
- * trusting a comment. Packed, the fields total exactly 33 bytes. */
-_Static_assert(sizeof(artcache_hdr) == 33, "artcache header layout changed - "
-                                           "bump ARTCACHE_VERSION");
-
 static bool s_writes_disabled;
+
+static bool header_usable(const artcache_hdr *h, const char *url, time_t now)
+{
+	unsigned rows = ((unsigned)h->src_h + 7) / 8;
+	unsigned cols = ((unsigned)h->src_w + 7) / 8;
+	unsigned dim = h->tex_dim;
+	return h->magic == ARTCACHE_MAGIC && h->version == ARTCACHE_VERSION &&
+	       !(h->flags & ~(ARTCACHE_MUTABLE_FLAG | ARTCACHE_QUALITY_KNOWN_FLAG | ARTCACHE_LARGE_FLAG)) &&
+	       (!(h->flags & ARTCACHE_LARGE_FLAG) || (h->flags & ARTCACHE_QUALITY_KNOWN_FLAG)) &&
+	       artcache_timestamp_fresh(h->flags, h->reserved, (u32)now) &&
+	       (!(h->flags & ARTCACHE_MUTABLE_FLAG) ||
+	        (u32)now - h->reserved < artcache_ttl_for_url(url)) &&
+	       dim != 0 && (dim & (dim - 1)) == 0 && dim <= ART_TEX_SIZE &&
+	       h->src_w != 0 && h->src_h != 0 && h->src_w <= dim && h->src_h <= dim &&
+	       h->payload_len == rows * cols * TILE_BYTES;
+}
 
 /* A cache entry is a header plus the populated tile rows of a 160x160
  * image inside a 256x256 texture: 20 rows of 20 tiles, 64 texels each, 4 bytes
@@ -96,26 +89,7 @@ static unsigned crc32_buf(const unsigned char *p, size_t n)
  * than sanitised - that also keeps a malformed URL from reaching fopen. */
 static bool artcache_key(const char *url, char *out, int outlen)
 {
-	if (!url || !url[0])
-		return false;
-
-	const char *slash = strrchr(url, '/');
-	const char *seg   = slash ? slash + 1 : url;
-
-	int n = 0;
-	while (seg[n]) {
-		const char c = seg[n];
-		if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
-			return false;
-		n++;
-	}
-
-	if (n < 20 || n > 64 || n >= outlen)
-		return false;
-
-	memcpy(out, seg, (size_t)n);
-	out[n] = '\0';
-	return true;
+	return outlen > 0 && artcache_key_for_url(url, out, (size_t)outlen, NULL);
 }
 
 /* sdmc:/spotify/artcache/<last two hex>/<key>.a3c
@@ -231,7 +205,7 @@ static void prepare_shard(const char *dir, int shard)
 	}
 
 	const int quota = shard_quota(shard);
-	while (count >= quota && evict_one(dir))
+	while (count > quota && evict_one(dir))
 		count--;
 	s_shard_count[shard] = (u16)count;
 	s_shard_known[shard] = true;
@@ -245,11 +219,14 @@ void artcache_init(void)
 	memset(s_shard_known, 0, sizeof s_shard_known);
 }
 
-bool artcache_load(const char *url, u8 **out_tiled, int *out_w, int *out_h,
+bool artcache_load(const char *url, artcache_quality quality,
+                   u8 **out_tiled, int *out_w, int *out_h,
                    int *out_dim, u8 *accent_r, u8 *accent_g, u8 *accent_b,
-                   unsigned *read_ms)
+                    unsigned *read_ms, time_t *expires_at)
 {
 	*out_tiled = NULL;
+	if (quality != ARTCACHE_THUMBNAIL && quality != ARTCACHE_LARGE)
+		return false;
 
 	char key[80];
 	if (!artcache_key(url, key, sizeof key))
@@ -279,14 +256,15 @@ bool artcache_load(const char *url, u8 **out_tiled, int *out_w, int *out_h,
 	 * validate against that rather than against the hero constant. */
 	const u32 dim = h.tex_dim;
 
-	if (h.magic != ARTCACHE_MAGIC || h.version != ARTCACHE_VERSION ||
-	    dim == 0 || (dim & (dim - 1)) != 0 || dim > ART_TEX_SIZE ||
-	    h.payload_len != want_len || h.src_w > dim || h.src_h > dim ||
-	    want_len == 0) {
+	if (!header_usable(&h, url, time(NULL))) {
 		/* Stale format or nonsense: drop it and refetch. */
 		fclose(f);
 		discard_entry(key, file);
 		return false;
+	}
+	if (artcache_entry_quality(h.flags, dim) < quality) {
+		fclose(f);
+		return false; /* usable thumbnail, not a large-cover hit */
 	}
 
 	u8 *rowbuf = malloc(want_len);
@@ -332,15 +310,21 @@ bool artcache_load(const char *url, u8 **out_tiled, int *out_w, int *out_h,
 	*accent_b  = h.accent_b;
 	if (read_ms)
 		*read_ms = (unsigned)(osGetTime() - t0);
+	if (expires_at)
+		*expires_at = (h.flags & ARTCACHE_MUTABLE_FLAG)
+		                  ? (time_t)h.reserved + artcache_ttl_for_url(url) : 0;
 
 	return true;
 }
 
-void artcache_store(const char *url, const u8 *rgba, int w, int h, u8 accent_r,
+void artcache_store(const char *url, artcache_quality quality,
+                    const u8 *rgba, int w, int h, u8 accent_r,
                     u8 accent_g, u8 accent_b)
 {
 	if (s_writes_disabled || !rgba || w <= 0 || h <= 0 ||
-	    w > ART_TEX_SIZE || h > ART_TEX_SIZE)
+	    w > ART_TEX_SIZE || h > ART_TEX_SIZE ||
+	    (quality != ARTCACHE_THUMBNAIL && quality != ARTCACHE_LARGE) ||
+	    (quality == ARTCACHE_THUMBNAIL && (w > ART_THUMB_PX || h > ART_THUMB_PX)))
 		return;
 
 	char key[80];
@@ -353,13 +337,31 @@ void artcache_store(const char *url, const u8 *rgba, int w, int h, u8 accent_r,
 	if (shard < 0)
 		return;
 
+	/* A small request must not downgrade a fresh large decode. Header-only
+	 * inspection adds I/O only on writes, never a startup-wide cache scan. */
+	FILE *old_file = fopen(file, "rb");
+	if (old_file) {
+		artcache_hdr old;
+		bool valid = fread(&old, 1, sizeof old, old_file) == sizeof old &&
+		             header_usable(&old, url, time(NULL));
+		fclose(old_file);
+		if (valid) {
+			artcache_quality held = artcache_entry_quality(old.flags, old.tex_dim);
+			if (held > quality ||
+			    (held == quality && old.src_w >= w && old.src_h >= h))
+				return;
+		}
+	}
+
 	/* No cache path is touched during startup. Create and account for only the
 	 * shard receiving this new entry, then reserve one slot before doing the
 	 * tiling/allocation work below. */
 	mkdir(CACHE_ROOT, 0777);
 	mkdir(dir, 0777);
 	prepare_shard(dir, shard);
-	if (s_shard_count[shard] >= shard_quota(shard)) {
+	struct stat existing;
+	bool replacing = stat(file, &existing) == 0 && S_ISREG(existing.st_mode);
+	if (!replacing && s_shard_count[shard] >= shard_quota(shard)) {
 		if (!evict_one(dir)) {
 			tl_log("artcache: full shard %.2s could not evict", key);
 			return;
@@ -402,6 +404,7 @@ void artcache_store(const char *url, const u8 *rgba, int w, int h, u8 accent_r,
 	memset(&hdr, 0, sizeof hdr);
 	hdr.magic       = ARTCACHE_MAGIC;
 	hdr.version     = ARTCACHE_VERSION;
+	hdr.flags       = artcache_quality_flags(quality);
 	hdr.tex_dim     = (u16)dim;
 	hdr.src_w       = (u16)w;
 	hdr.src_h       = (u16)h;
@@ -411,6 +414,12 @@ void artcache_store(const char *url, const u8 *rgba, int w, int h, u8 accent_r,
 	hdr.payload_len = len;
 	hdr.crc32       = crc32_buf(rowbuf, len);
 	hdr.use_seq     = 0; /* legacy field; FIFO eviction uses directory order */
+	bool mutable_image = false;
+	artcache_key_for_url(url, key, sizeof key, &mutable_image);
+	if (mutable_image) {
+		hdr.flags |= ARTCACHE_MUTABLE_FLAG;
+		hdr.reserved = (u32)time(NULL);
+	}
 	memcpy(hdr_and_rows, &hdr, sizeof hdr);
 
 	/* Write to .tmp and rename, so a power loss can never leave a half-written
@@ -429,9 +438,11 @@ void artcache_store(const char *url, const u8 *rgba, int w, int h, u8 accent_r,
 	 * payload misaligned to the SD block size, and the 3DS FS layer turned
 	 * that into a read-modify-write per block: 1716ms against 60ms for the
 	 * same bytes written in a single aligned call. */
-	const bool ok = fwrite(hdr_and_rows, 1, total, f) == total;
-	fflush(f);
-	fclose(f);
+	bool ok = fwrite(hdr_and_rows, 1, total, f) == total;
+	if (fflush(f) != 0)
+		ok = false;
+	if (fclose(f) != 0)
+		ok = false;
 	free(hdr_and_rows);
 
 	if (!ok) {
@@ -441,10 +452,20 @@ void artcache_store(const char *url, const u8 *rgba, int w, int h, u8 accent_r,
 		return;
 	}
 
-	if (rename(tmp, file) != 0) {
+	int installed = rename(tmp, file);
+	if (installed != 0 && replacing && unlink(file) == 0) {
+		/* The complete new payload is already closed. SD rename cannot replace
+		 * a destination; discard only now, then install. Cache files are
+		 * disposable, so a failed installation safely becomes a cache miss. */
+		if (s_shard_count[shard] > 0)
+			s_shard_count[shard]--;
+		replacing = false;
+		installed = rename(tmp, file);
+	}
+	if (installed != 0) {
 		unlink(tmp);
 		tl_log("artcache: rename failed for %s", key);
-	} else {
+	} else if (!replacing) {
 		s_shard_count[shard]++;
 	}
 }

@@ -483,7 +483,7 @@ void screen_list_draw(const screen_list_args *a)
 			y += row_h(id, a->armed_id);
 		}
 	}
-	if (filtering && playlist_count + album_count == 0) {
+	if (filtering && recent_count + playlist_count + album_count == 0) {
 		ui_text(a->buf, "No matches", PAD_X, ui_baseline(y + 34, TY_ROW_NAME),
 		        TY_ROW_NAME, BOT_W - 2 * PAD_X, CLR_SUB);
 	}

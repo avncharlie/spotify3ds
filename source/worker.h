@@ -80,6 +80,8 @@ void worker_request_poll(void);
 
 /* Copy the current list out under lock. Returns the item count. */
 int worker_get_recents(recent_list *out);
+unsigned worker_library_revision(void);
+bool worker_get_collection(const char *uri, collection_item *out);
 
 /* Ask for a refresh on the next worker tick. */
 void worker_request_recents(void);
@@ -253,6 +255,8 @@ typedef struct {
 	unsigned decode_ms;
 	unsigned cache_ms;
 	bool     from_cache;
+	bool     failed; /* thumbnail completion without pixels; releases UI pending */
+	time_t   expires_at; /* original decoded-image expiry, including SD cache hits */
 	unsigned char accent_r, accent_g, accent_b;
 	char     url[256];
 } art_payload;
@@ -275,7 +279,7 @@ bool worker_take_art(art_payload *out);
 
 /* Queue a thumbnail fetch. Ignored when already queued; safe to call every
  * frame for every missing tile, which is how the UI uses it. */
-void worker_request_thumb(const char *url);
+bool worker_request_thumb(const char *url);
 
 /* Claim one finished thumbnail. Same ownership rules as worker_take_art. */
 bool worker_take_thumb(art_payload *out);

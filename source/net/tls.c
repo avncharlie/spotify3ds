@@ -18,10 +18,12 @@
 
 /* DER roots embedded by bin2s from the data directory (see Makefile).
  *   DigiCert G2 (RSA) -> api.spotify.com
- *   DigiCert G3 (ECC) -> i.scdn.co, image-cdn-ak.spotifycdn.com
- *   GlobalSign R3     -> mosaic.scdn.co, image-cdn-fa.spotifycdn.com
+ *   DigiCert G3 (ECC) -> i.scdn.co, image-cdn-ak.spotifycdn.com,
+ *                       daylist.spotifycdn.com
+ *   GlobalSign R3     -> mosaic.scdn.co, image-cdn-fa.spotifycdn.com,
+ *                       pickasso.spotifycdn.com (generated playlist covers)
  *   GTS Root R4       -> lrclib.net (lyrics provider)
- *   Starfield G2      -> accounts.spotify.com (token exchange)
+ *   Starfield G2      -> accounts.spotify.com (token exchange), open.spotify.com
  *
  * All five are required, and the failure mode when one is missing is
  * consistently confusing: the API works while some subset of images silently

@@ -80,7 +80,7 @@ bool art_upload(album_art *a, const unsigned char *rgba, int w, int h,
 /* Publish an already-tiled buffer (from the SD cache), skipping both the
  * Morton tiling and the accent extraction - the accent is supplied because it
  * cannot be recovered from tiled data. Takes ownership of `tiled` and
- * linearFrees it. Render thread only. */
+ * linearFrees it on both success and failure. Render thread only. */
 bool art_upload_tiled(album_art *a, u8 *tiled, int w, int h, int dim,
                       u8 accent_r, u8 accent_g, u8 accent_b, const char *url,
                       char *err, int errlen);

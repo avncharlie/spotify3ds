@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include "playlist_meta.h"
 
 /* SD-backed uri -> display name cache.
  *
@@ -9,14 +10,22 @@
  * GET /v1/playlists/{id}. That is the difference between one request and half a
  * dozen on a cold start, which is worth caching.
  *
- * Unlike album art - whose URLs are content-addressed and so can never go
- * stale - a playlist can be renamed under a stable uri, so entries carry a
- * timestamp and expire. The window is deliberately long: a rename is rare and
- * the cost of being wrong is a stale label until the next refresh.
+ * Fields retain their source and timestamp independently. Web API fields live
+ * for a fortnight; public oEmbed fallbacks live for one day. Generated images
+ * have a separate expiry in the artwork cache.
  */
 
 /* Entries older than this are ignored and refetched. */
 #define NAMECACHE_TTL_DAYS 14
+#define NAMECACHE_FALLBACK_TTL_DAYS 1
+
+/* Partial, source-aware lookup. Only fresh fields are returned. */
+bool namecache_lookup(const char *uri, playlist_meta *meta);
+/* Merge fields independently; fresh Web API values outrank oEmbed. Deferred
+ * write so callers can publish first and flush once after a batch. */
+void namecache_store(const char *uri, const playlist_meta *meta);
+time_t namecache_refresh_at(const char *uri);
+void namecache_reset(void);
 
 /* Look up `uri`. Returns false on a miss or an expired entry.
  *

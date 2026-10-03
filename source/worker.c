@@ -7,6 +7,7 @@
 
 #include "spotify/art.h"
 #include "spotify/artcache.h"
+#include "spotify/artcache_path.h"
 #include "spotify/auth.h"
 #include "spotify/lyrics.h"
 #include "spotify/namecache.h"
@@ -162,14 +163,42 @@ static recent_list s_recents;
 static bool        s_recents_wanted = true; /* fetch once at startup */
 static u64         s_recents_at;            /* last successful fetch */
 static u64         s_recents_attempt_at;    /* retry backoff after failures */
-static bool        s_current_meta_pending;
-static char        s_current_meta_attempted[128];
-static bool        s_current_fallback;
+static playlist_meta_job s_meta_job;
+static bool        s_meta_active;
+static unsigned    s_library_revision;
+
+unsigned worker_library_revision(void)
+{
+	ensure_lock();
+	LightLock_Lock(&s_lock);
+	unsigned revision = s_library_revision;
+	LightLock_Unlock(&s_lock);
+	return revision;
+}
 
 static playlist_list s_playlists;
 static bool          s_playlists_wanted = true; /* fetch once at startup */
 static album_list    s_albums;
 static bool          s_albums_wanted = true; /* fetch once at startup */
+
+bool worker_get_collection(const char *uri, collection_item *out)
+{
+	ensure_lock();
+	bool found = false;
+	LightLock_Lock(&s_lock);
+	for (int list = 0; list < 2 && !found; list++) {
+		const collection_item *items = list == 0 ? s_playlists.items : s_recents.items;
+		int count = list == 0 ? s_playlists.count : s_recents.count;
+		for (int i = 0; i < count; i++)
+			if (strcmp(items[i].context_uri, uri) == 0) {
+				*out = items[i];
+				found = true;
+				break;
+			}
+	}
+	LightLock_Unlock(&s_lock);
+	return found;
+}
 #define RECENTS_MIN_INTERVAL_MS 30000
 #define RECENTS_REFRESH_MS      (5 * 60 * 1000)
 
@@ -274,6 +303,9 @@ static const char *playback_collection_uri(const player_state *st,
 
 static void pin_recent_locked(const collection_item *item)
 {
+	if (s_recents.count && memcmp(&s_recents.items[0], item, sizeof *item) == 0)
+		return;
+	s_library_revision++;
 	int kept = 0;
 	for (int i = 0; i < s_recents.count; i++) {
 		if (strcmp(s_recents.items[i].context_uri, item->context_uri) != 0)
@@ -299,6 +331,7 @@ static bool pin_current_locked(const player_state *st, bool use_recent_meta)
 
 	collection_item item;
 	memset(&item, 0, sizeof item);
+	item.item_total = -1;
 	bool resolved = false;
 	if (is_playlist) {
 		for (int i = 0; i < s_playlists.count; i++) {
@@ -310,8 +343,7 @@ static bool pin_current_locked(const player_state *st, bool use_recent_meta)
 		}
 		if (!resolved && use_recent_meta) {
 			for (int i = 0; i < s_recents.count; i++) {
-				if (strcmp(s_recents.items[i].context_uri, uri) == 0 &&
-				    !(s_current_fallback && i == 0)) {
+				if (strcmp(s_recents.items[i].context_uri, uri) == 0) {
 					item = s_recents.items[i];
 					resolved = true;
 					break;
@@ -328,6 +360,15 @@ static bool pin_current_locked(const player_state *st, bool use_recent_meta)
 			snprintf(item.context_uri, sizeof item.context_uri, "%s", uri);
 			item.kind = COLLECTION_PLAYLIST;
 		}
+		/* A temporary row remains eligible for enrichment, even when it came
+		 * from history. Never turn a song label into authoritative metadata. */
+		if (item.name_source == META_NONE) {
+			snprintf(item.name, sizeof item.name, "%.127s",
+			         st->track[0] ? st->track : "Current playlist");
+			snprintf(item.subtitle, sizeof item.subtitle, "Playlist");
+		}
+		if (item.art_source == META_NONE)
+			snprintf(item.art_url, sizeof item.art_url, "%s", st->art_url);
 	} else {
 		for (int i = 0; i < s_albums.count; i++) {
 			if (strcmp(s_albums.items[i].context_uri, uri) == 0) {
@@ -349,17 +390,7 @@ static bool pin_current_locked(const player_state *st, bool use_recent_meta)
 	}
 
 	pin_recent_locked(&item);
-	s_current_fallback = is_playlist && !resolved;
 	return resolved;
-}
-
-static void update_current_meta_pending_locked(const player_state *st,
-	                                           bool resolved)
-{
-	bool is_playlist = false;
-	const char *uri = playback_collection_uri(st, &is_playlist);
-	s_current_meta_pending = !resolved && is_playlist && uri &&
-	                         strcmp(uri, s_current_meta_attempted) != 0;
 }
 
 static bool pop_cmd(queued_cmd *out)
@@ -391,7 +422,7 @@ static void do_poll(void)
 		s_have_state = true;
 		s_track_change_pending = false;
 		s_status[0]  = '\0';
-		update_current_meta_pending_locked(&st, pin_current_locked(&st, true));
+		pin_current_locked(&st, true);
 	} else {
 		if (pr == PLAYER_NOTHING_PLAYING)
 			s_have_state = false;
@@ -784,7 +815,8 @@ static void worker_main(void *arg)
 		do_playlists();
 		do_albums();
 		do_recents();
-		do_current_metadata();
+		if (!did_work && !did_tracks)
+			do_current_metadata();
 
 		/* Thumbnails last of all: they are decoration, and a shelf full of
 		 * cache misses must never stand between a track change and the cover
@@ -804,6 +836,8 @@ bool worker_start(char *err, int errlen)
 	ensure_lock(); /* must precede any failure return: worker_set_fatal takes
 	                * this lock */
 	s_quit = false;
+	s_meta_active = false;
+	playlist_meta_reset_backoff();
 	LightLock_Lock(&s_lock);
 	s_fatal = false;
 	s_status[0] = '\0';
@@ -1010,10 +1044,10 @@ bool worker_take_art(art_payload *out)
 	return have;
 }
 
-void worker_request_thumb(const char *url)
+bool worker_request_thumb(const char *url)
 {
 	if (!url || !url[0])
-		return;
+		return false;
 
 	ensure_lock();
 	LightLock_Lock(&s_lock);
@@ -1029,10 +1063,13 @@ void worker_request_thumb(const char *url)
 		}
 	}
 
-	if (!known && s_thumb_n < THUMB_QUEUE)
+	if (!known && s_thumb_n < THUMB_QUEUE) {
 		snprintf(s_thumb_q[s_thumb_n++], sizeof s_thumb_q[0], "%s", url);
+		known = true;
+	}
 
 	LightLock_Unlock(&s_lock);
+	return known;
 }
 
 bool worker_take_thumb(art_payload *out)
@@ -1083,7 +1120,8 @@ static void do_thumbs(void)
 	u8       ar = 0, ag = 0, ab = 0;
 	unsigned read_ms = 0;
 
-	if (artcache_load(want, &tiled, &cw, &ch, &cdim, &ar, &ag, &ab, &read_ms)) {
+	if (artcache_load(want, ARTCACHE_THUMBNAIL, &tiled, &cw, &ch, &cdim, &ar, &ag, &ab, &read_ms,
+	                  &p.expires_at)) {
 		p.tiled      = tiled;
 		p.w          = cw;
 		p.h          = ch;
@@ -1103,6 +1141,11 @@ static void do_thumbs(void)
 		if (!art_fetch_decode(want, ART_THUMB_PX, &rgba, &w, &h, &fetch_ms,
 		                      &decode_ms, err, sizeof err)) {
 			tl_log("thumb failed: %s", err);
+			p.failed = true;
+			LightLock_Lock(&s_lock);
+			s_thumb_ready = p;
+			s_thumb_have = true;
+			LightLock_Unlock(&s_lock);
 			return;
 		}
 
@@ -1114,6 +1157,10 @@ static void do_thumbs(void)
 		p.h         = h;
 		p.fetch_ms  = fetch_ms;
 		p.decode_ms = decode_ms;
+		char key[80];
+		bool mutable_image = false;
+		if (artcache_key_for_url(want, key, sizeof key, &mutable_image) && mutable_image)
+			p.expires_at = time(NULL) + artcache_ttl_for_url(want);
 
 		/* Store before publishing, unlike the hero: nothing is waiting on a
 		 * thumb appearing this instant, and doing it here keeps the pixels
@@ -1121,7 +1168,7 @@ static void do_thumbs(void)
 		album_art tmp;
 		memset(&tmp, 0, sizeof tmp);
 		art_accent_of(rgba, w, h, &tmp);
-		artcache_store(want, rgba, w, h, tmp.accent_r, tmp.accent_g,
+		artcache_store(want, ARTCACHE_THUMBNAIL, rgba, w, h, tmp.accent_r, tmp.accent_g,
 		               tmp.accent_b);
 	}
 
@@ -1161,7 +1208,7 @@ static void do_art(void)
 	unsigned read_ms = 0;
 
 	int cdim = 0;
-	if (artcache_load(want, &tiled, &cw, &ch, &cdim, &ar, &ag, &ab, &read_ms)) {
+	if (artcache_load(want, ARTCACHE_LARGE, &tiled, &cw, &ch, &cdim, &ar, &ag, &ab, &read_ms, NULL)) {
 		p.tiled      = tiled;
 		p.w          = cw;
 		p.h          = ch;
@@ -1229,7 +1276,7 @@ static void do_art(void)
 		art_accent_of(to_store, store_w, store_h, &tmp);
 
 		const u64 ts = osGetTime();
-		artcache_store(want, to_store, store_w, store_h, tmp.accent_r,
+		artcache_store(want, ARTCACHE_LARGE, to_store, store_w, store_h, tmp.accent_r,
 		               tmp.accent_g, tmp.accent_b);
 		tl_timing("art cache store=%lldms", (long long)(osGetTime() - ts));
 		free(to_store);
@@ -1305,9 +1352,9 @@ static void do_playlists(void)
 	s_playlists_wanted = false;
 	if (pr == PLAYER_OK) {
 		s_playlists = *fresh;
+		s_library_revision++;
 		if (s_have_state)
-			update_current_meta_pending_locked(
-			    &s_state, pin_current_locked(&s_state, true));
+			pin_current_locked(&s_state, true);
 	}
 	LightLock_Unlock(&s_lock);
 	/* The library is usable now; persist all names in one SD write rather than
@@ -1361,9 +1408,9 @@ static void do_albums(void)
 	s_albums_wanted = false;
 	if (pr == PLAYER_OK) {
 		s_albums = *fresh;
+		s_library_revision++;
 		if (s_have_state)
-			update_current_meta_pending_locked(
-			    &s_state, pin_current_locked(&s_state, true));
+			pin_current_locked(&s_state, true);
 	}
 	LightLock_Unlock(&s_lock);
 
@@ -2443,11 +2490,49 @@ static void do_recents(void)
 	s_recents_wanted    = false;
 	s_recents_attempt_at = osGetTime();
 	if (pr == PLAYER_OK) {
+		/* A history refresh must not undo asynchronous enrichment or its retry
+		 * backoff. Fresh cache/API fields already in the new row win. */
+		collection_item previous_current = {0};
+		if (s_have_state) {
+			bool is_playlist;
+			const char *current = playback_collection_uri(&s_state, &is_playlist);
+			for (int i = 0; current && i < s_recents.count; i++)
+				if (strcmp(s_recents.items[i].context_uri, current) == 0)
+					previous_current = s_recents.items[i];
+		}
+		for (int i = 0; i < fresh->count; i++) {
+			collection_item *item = &fresh->items[i];
+			for (int k = 0; k < s_recents.count; k++) {
+				const collection_item *old = &s_recents.items[k];
+				if (strcmp(item->context_uri, old->context_uri) != 0)
+					continue;
+				if (item->name_source == META_NONE && old->name_source != META_NONE) {
+					memcpy(item->name, old->name, sizeof item->name);
+					memcpy(item->subtitle, old->subtitle, sizeof item->subtitle);
+					item->name_source = old->name_source;
+					item->name_stale = old->name_stale;
+				}
+				if (item->art_source == META_NONE && old->art_source != META_NONE) {
+					memcpy(item->art_url, old->art_url, sizeof item->art_url);
+					item->art_source = old->art_source;
+					item->art_stale = old->art_stale;
+				}
+				if (old->metadata_retry_at > item->metadata_retry_at)
+					item->metadata_retry_at = old->metadata_retry_at;
+			}
+		}
 		s_recents = *fresh;
-		s_current_fallback = false;
+		s_library_revision++;
+		if (previous_current.context_uri[0]) {
+			bool in_history = false;
+			for (int i = 0; i < s_recents.count; i++)
+				if (strcmp(s_recents.items[i].context_uri, previous_current.context_uri) == 0)
+					in_history = true;
+			if (!in_history)
+				pin_recent_locked(&previous_current);
+		}
 		if (s_have_state)
-			update_current_meta_pending_locked(
-			    &s_state, pin_current_locked(&s_state, true));
+			pin_current_locked(&s_state, true);
 		s_recents_at = s_recents_attempt_at;
 	}
 	LightLock_Unlock(&s_lock);
@@ -2460,50 +2545,93 @@ static void do_recents(void)
 
 static void do_current_metadata(void)
 {
-	player_state st;
-	LightLock_Lock(&s_lock);
-	const bool pending = s_current_meta_pending && s_have_state;
-	if (pending)
-		st = s_state;
-	LightLock_Unlock(&s_lock);
-	if (!pending)
-		return;
-
-	bool is_playlist = false;
-	const char *uri = playback_collection_uri(&st, &is_playlist);
-	if (!uri || !is_playlist) {
+	/* Lists are small: scanning them replaces a second queue and automatically
+	 * drops work for rows no longer present. The pinned current row comes first. */
+	const time_t now = time(NULL);
+	if (!s_meta_active) {
+		char uri[128] = "";
+		collection_item *oldest = NULL;
 		LightLock_Lock(&s_lock);
-		s_current_meta_pending = false;
+		for (int list = 0; list < 2; list++) {
+			collection_item *items = list == 0 ? s_recents.items : s_playlists.items;
+			int count = list == 0 ? s_recents.count : s_playlists.count;
+			for (int i = 0; i < count; i++) {
+				if (items[i].kind == COLLECTION_PLAYLIST &&
+				    items[i].metadata_retry_at <= now &&
+				    (!oldest || items[i].metadata_retry_at < oldest->metadata_retry_at))
+					oldest = &items[i];
+			}
+		}
+		if (oldest) {
+			snprintf(uri, sizeof uri, "%s", oldest->context_uri);
+			oldest->metadata_retry_at = now + 300;
+		}
 		LightLock_Unlock(&s_lock);
-		return;
+		if (!uri[0])
+			return;
+		playlist_meta seed;
+		namecache_lookup(uri, &seed);
+		if (!playlist_meta_begin(&s_meta_job, uri, &seed))
+			return;
+		s_meta_active = true;
+		/* Expired fields retain their text until replacement, but no longer
+		 * outrank a fresh fallback merely because they used to come from API. */
+		LightLock_Lock(&s_lock);
+		for (int list = 0; list < 2; list++) {
+			collection_item *items = list == 0 ? s_recents.items : s_playlists.items;
+			int count = list == 0 ? s_recents.count : s_playlists.count;
+			for (int i = 0; i < count; i++)
+				if (strcmp(items[i].context_uri, uri) == 0) {
+					items[i].name_stale = items[i].name_source != META_NONE &&
+					                      seed.name_source == META_NONE;
+					items[i].art_stale = items[i].art_source != META_NONE &&
+					                     seed.art_source == META_NONE;
+				}
+		}
+		LightLock_Unlock(&s_lock);
 	}
 
-	collection_item item;
-	memset(&item, 0, sizeof item);
-	char owner[128] = "";
-	const bool ok = playlist_metadata(uri, item.name, sizeof item.name, owner,
-	                                  sizeof owner, item.art_url,
-	                                  sizeof item.art_url, NULL, 0, NULL);
-	if (ok) {
-		snprintf(item.subtitle, sizeof item.subtitle,
-		         "Playlist" SUB_SEP "%.115s",
-		         owner[0] ? owner : st.artist);
-		snprintf(item.context_uri, sizeof item.context_uri, "%s", uri);
-		item.kind = COLLECTION_PLAYLIST;
+	bool done = playlist_meta_complete(&s_meta_job.meta) && s_meta_job.phase == 0;
+	if (!done)
+		done = playlist_meta_step(&s_meta_job); /* at most one HTTP request */
+	time_t retry = 0;
+	if (done) {
+		playlist_meta fetched = s_meta_job.meta;
+		if (!s_meta_job.fetched_name) {
+			fetched.name[0] = '\0';
+			fetched.owner[0] = '\0';
+		}
+		if (!s_meta_job.fetched_art)
+			fetched.art[0] = '\0';
+		namecache_store(s_meta_job.uri, &fetched);
+		retry = namecache_refresh_at(s_meta_job.uri);
+		if (retry <= now)
+			retry = now + 300;
+		if (s_meta_job.retry_at > retry)
+			retry = s_meta_job.retry_at;
 	}
 
 	LightLock_Lock(&s_lock);
-	bool still_playlist = false;
-	const char *current =
-	    s_have_state ? playback_collection_uri(&s_state, &still_playlist) : NULL;
-	if (current && still_playlist && strcmp(current, uri) == 0 && ok) {
-		pin_recent_locked(&item);
-		s_current_fallback = false;
+	for (int list = 0; list < 2; list++) {
+		collection_item *items = list == 0 ? s_recents.items : s_playlists.items;
+		int count = list == 0 ? s_recents.count : s_playlists.count;
+		for (int i = 0; i < count; i++) {
+			if (strcmp(items[i].context_uri, s_meta_job.uri) != 0)
+				continue;
+			if (collection_apply_metadata(&items[i], &s_meta_job.meta))
+				s_library_revision++;
+			if (done)
+				items[i].metadata_retry_at = retry;
+		}
 	}
-	snprintf(s_current_meta_attempted, sizeof s_current_meta_attempted, "%s",
-	         uri);
-	s_current_meta_pending = false;
 	LightLock_Unlock(&s_lock);
+	if (done) {
+		tl_log("playlist display %s: %s (name-source=%d art-source=%d)",
+		       s_meta_job.id, s_meta_job.meta.name[0] ? s_meta_job.meta.name : "unresolved",
+		       (int)s_meta_job.meta.name_source, (int)s_meta_job.meta.art_source);
+		namecache_flush();
+		s_meta_active = false;
+	}
 }
 
 void worker_request_poll(void)

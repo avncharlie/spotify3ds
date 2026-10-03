@@ -221,7 +221,8 @@ player_result recents_fetch(recent_list *out, char *err, int errlen)
 			it->kind = COLLECTION_PLAYLIST;
 		} else {
 			snprintf(it->name, sizeof it->name, "%s", album);
-			snprintf(it->subtitle, sizeof it->subtitle, "Album" SUB_SEP "%s", artist);
+			/* 9 prefix bytes + at most 118 artist bytes + terminating NUL. */
+			snprintf(it->subtitle, sizeof it->subtitle, "Album" SUB_SEP "%.118s", artist);
 			it->kind = COLLECTION_ALBUM;
 		}
 
@@ -406,7 +407,7 @@ player_result albums_fetch(album_list *out, char *err, int errlen)
 			collection_item *it = &out->items[out->count++];
 			snprintf(it->name, sizeof it->name, "%s", name);
 			snprintf(it->subtitle, sizeof it->subtitle,
-			         artist[0] ? "Album" SUB_SEP "%s" : "Album", artist);
+			         artist[0] ? "Album" SUB_SEP "%.118s" : "Album", artist);
 			snprintf(it->art_url, sizeof it->art_url, "%s", art);
 			snprintf(it->context_uri, sizeof it->context_uri, "%s", uri);
 			it->item_total = (int)item_total;

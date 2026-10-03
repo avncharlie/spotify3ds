@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stdint.h>
 
 typedef enum {
 	PLAYER_OK = 0,
@@ -49,7 +50,29 @@ player_result player_poll(player_state *out, char *err, int errlen);
 player_result player_play(char *err, int errlen);
 player_result player_pause(char *err, int errlen);
 player_result player_next(char *err, int errlen);
-player_result player_prev(char *err, int errlen);
+/* Spotify-style Back: <3000ms skips back; >=3000ms seeks to zero. Negative
+ * progress means unknown, preserving the ordinary previous-track command.
+ * restarted is true only after a successful restart request. */
+#define PLAYER_PREVIOUS_RESTART_MS 3000
+player_result player_prev(long progress_ms, bool *restarted, char *err, int errlen);
+/* Estimate between polls without advancing paused playback or overflowing. */
+long player_estimated_progress(const player_state *state, uint64_t sampled_at,
+                               uint64_t now);
+
+typedef struct {
+	bool pending;
+	player_state state;
+	uint64_t accepted_at;
+	uint64_t sampled_at;
+} player_seek_prediction;
+
+/* Accepted seeks are not authoritative playback polls. Preserve their local
+ * prediction across stale responses until confirmation, track change or 5s. */
+void player_seek_predict(player_seek_prediction *prediction,
+                         const player_state *state, long target, uint64_t now);
+void player_seek_reconcile(player_seek_prediction *prediction,
+                           player_state *polled, uint64_t now);
+bool player_progress_near(long reported, long expected);
 player_result player_queue_item(const char *item_uri, char *err, int errlen);
 player_result player_seek(long position_ms, char *err, int errlen);
 player_result player_shuffle(bool on, char *err, int errlen);

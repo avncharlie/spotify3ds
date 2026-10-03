@@ -73,7 +73,9 @@ under **Apps**.
 
 - On any screen:
   - `L/R` decrease/increase volume
-  - Tap D-pad left/right to skip
+  - Tap D-pad right to skip forward. Tap left to go to the previous song during
+    the first 3 seconds, or restart the current song afterward. The Player's
+    Previous button follows the same rule.
   - Hold D-pad left/right to seek forwards or backwards
   - `START` opens lyrics for the current track
   - `B` goes to the previous screen

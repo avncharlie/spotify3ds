@@ -392,12 +392,26 @@ static bool hold_scrub_finish(hold_scrub_state *hold)
 	return scrubbed;
 }
 
-static void post_skip(int direction)
+static void post_skip(int direction, const worker_snapshot *snap)
 {
 	g_cmd_sent = osGetTime();
 	tl_timing("button %s at %llu", direction > 0 ? "NEXT" : "PREV",
 	          (unsigned long long)g_cmd_sent);
-	worker_post(direction > 0 ? CMD_NEXT : CMD_PREV, 0);
+	if (direction > 0) {
+		worker_post(CMD_NEXT, 0);
+		return;
+	}
+	long progress = snap->have_state ? effective_progress(snap) : -1;
+	if (worker_previous(progress, snap->have_state ? snap->state.track_uri : NULL) &&
+	    progress >= PLAYER_PREVIOUS_RESTART_MS) {
+		/* Same optimistic overlay as a scrub: start at the tap, not when the
+		 * seek's HTTP request completes. A second quick Back then skips back. */
+		g_scrub_ms = 0;
+		g_scrub = SCRUB_COMMITTING;
+		g_scrub_until = g_cmd_sent + SCRUB_COMMIT_MS;
+		g_base_progress = 0;
+		g_base_time = g_cmd_sent;
+	}
 }
 
 
@@ -1224,8 +1238,22 @@ int main(int argc, char **argv)
 			last_seen_progress = snap.state.progress_ms;
 			snprintf(last_seen_track_uri, sizeof last_seen_track_uri, "%s",
 			         snap.state.track_uri);
-			g_base_progress    = snap.state.progress_ms;
-			g_base_time        = osGetTime();
+			bool accept_progress = true;
+			if (g_scrub == SCRUB_COMMITTING && !track_changed) {
+				player_state predicted = snap.state;
+				predicted.progress_ms = g_scrub_ms;
+				long expected = player_estimated_progress(&predicted, g_base_time, osGetTime());
+				accept_progress = !snap.position_pending &&
+				                  player_progress_near(snap.state.progress_ms, expected);
+				if (accept_progress)
+					g_scrub = SCRUB_IDLE;
+			}
+			/* A stale poll must not reset the optimistic seek's clock, nor may
+			 * an accepted request masquerade as Spotify confirming the position. */
+			if (accept_progress) {
+				g_base_progress = snap.state.progress_ms;
+				g_base_time = osGetTime();
+			}
 			if (track_changed)
 				g_scrub = SCRUB_IDLE;
 			if (repeated && g_view == VIEW_LYRICS && g_lyrics_follow) {
@@ -1233,12 +1261,6 @@ int main(int argc, char **argv)
 				g_lyrics_velocity = 0.0f;
 			}
 
-			/* A poll confirming our seek ends the commit hold. */
-			if (g_scrub == SCRUB_COMMITTING) {
-				const long d = snap.state.progress_ms - g_scrub_ms;
-				if (d > -3000 && d < 6000)
-					g_scrub = SCRUB_IDLE;
-			}
 		}
 		/* ...and time out regardless, so a missed confirmation cannot wedge
 		 * the scrubber. */
@@ -1247,7 +1269,7 @@ int main(int argc, char **argv)
 
 		const bool playing  = effective_playing(&snap);
 		const bool shuffled = effective_shuffle(&snap);
-		const long progress = effective_progress(&snap);
+		long progress = effective_progress(&snap);
 		const long duration = snap.have_state ? snap.state.duration_ms : 0;
 		/* START replaces the old app-exit shortcut and opens lyrics from any
 		 * ordinary view. Capture the return view before changing input dispatch. */
@@ -1319,7 +1341,7 @@ int main(int argc, char **argv)
 			} else if ((keys_up & held_key) || !(keys_held & held_key)) {
 				const int direction = g_dpad_scrub.direction;
 				if (!hold_scrub_finish(&g_dpad_scrub))
-					post_skip(direction);
+					post_skip(direction, &snap);
 			}
 		}
 
@@ -1338,7 +1360,7 @@ int main(int argc, char **argv)
 				const int direction = g_touch_button_scrub.direction;
 				if (!hold_scrub_finish(&g_touch_button_scrub) &&
 				    touch.clicked < 0)
-					post_skip(direction);
+					post_skip(direction, &snap);
 			}
 		}
 
@@ -2112,10 +2134,7 @@ int main(int argc, char **argv)
 					worker_post(CMD_NEXT, 0);
 					break;
 				case BTN_PREV:
-					g_cmd_sent = osGetTime();
-					tl_timing("cmd PREV at %llu",
-					       (unsigned long long)g_cmd_sent);
-					worker_post(CMD_PREV, 0);
+					post_skip(-1, &snap);
 					break;
 				case BTN_SHUFFLE:
 					opt_set(&g_opt_shuf, !shuffled);
@@ -2998,6 +3017,9 @@ int main(int argc, char **argv)
 		};
 
 		/* --- top screen ------------------------------------------------ */
+		/* Input may have just restarted/searched/scrubbed the track. Present
+		 * the new local position in this frame, rather than the pre-input one. */
+		progress = effective_progress(&snap);
 		C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
 		/* SYNCDRAW has retired the previous frame. Expire/replace thumbnail
 		 * textures here, before either screen can submit a draw referencing one. */

@@ -21,7 +21,7 @@ typedef enum {
 	CMD_PLAY,
 	CMD_PAUSE,
 	CMD_NEXT,
-	CMD_PREV,
+	CMD_PREV, /* previous below 3s; otherwise restart, for every input path */
 	CMD_SEEK,
 	CMD_SHUFFLE,
 	CMD_REPEAT,
@@ -39,7 +39,8 @@ typedef struct {
 	char          status_detail[128]; /* raw underlying error, for bug reports */
 	bool          fatal;            /* setup problem, not a transient state */
 	bool          busy;             /* a command or poll is in flight */
-	unsigned      poll_seq;         /* increments after each completed poll */
+	unsigned      poll_seq;         /* increments only after playback polls */
+	bool          position_pending; /* accepted seek awaiting playback confirmation */
 } worker_snapshot;
 
 bool worker_start(char *err, int errlen);
@@ -58,6 +59,10 @@ void worker_set_fatal(const char *what, const char *hint);
  * and a repeat_mode for CMD_REPEAT. Volume uses worker_set_volume so rapid
  * shoulder presses can be coalesced. */
 void worker_post(worker_cmd cmd, long arg);
+
+/* Capture Back's decision at input time. Returns queue acceptance so the UI
+ * can start restart interpolation immediately, before the HTTP round trip. */
+bool worker_previous(long progress_ms, const char *track_uri);
 
 /* Queue a seek only for the named current track. Unlike worker_post(CMD_SEEK),
  * this reports a full command queue and is rejected if a track-changing

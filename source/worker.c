@@ -140,6 +140,9 @@ static char          s_status_detail[128];
 static bool          s_fatal;
 static bool          s_busy;
 static unsigned      s_poll_seq;
+static u64           s_state_at;
+static bool          s_position_dirty;
+static player_seek_prediction s_seek_prediction;
 
 /* Command ring, guarded by s_lock. */
 typedef struct {
@@ -150,6 +153,7 @@ typedef struct {
 	char       device_id[128];
 	char       expected_track_uri[128];
 	int        position;
+	bool       previous_at_input;
 } queued_cmd;
 
 static queued_cmd s_queue[CMD_QUEUE];
@@ -418,7 +422,10 @@ static void do_poll(void)
 	s_poll_seq++;
 	s_last_result = pr;
 	if (pr == PLAYER_OK) {
+		player_seek_reconcile(&s_seek_prediction, &st, osGetTime());
 		s_state      = st;
+		s_state_at   = osGetTime();
+		s_position_dirty = false;
 		s_have_state = true;
 		s_track_change_pending = false;
 		s_status[0]  = '\0';
@@ -426,6 +433,8 @@ static void do_poll(void)
 	} else {
 		if (pr == PLAYER_NOTHING_PLAYING)
 			s_have_state = false;
+		if (pr == PLAYER_NOTHING_PLAYING)
+			s_seek_prediction.pending = false;
 		snprintf(s_status, sizeof s_status, "%s", player_result_str(pr));
 	}
 	LightLock_Unlock(&s_lock);
@@ -469,10 +478,13 @@ static void do_poll(void)
 	}
 }
 
-static void do_cmd(const queued_cmd *q)
+/* Returns whether a successful command could change the track, rather than
+ * spending settle polls waiting for a restart to change a track it keeps. */
+static bool do_cmd(const queued_cmd *q)
 {
 	char          err[256];
 	player_result pr = PLAYER_OK;
+	bool previous_restarted = false;
 
 	const u64 t0 = osGetTime();
 
@@ -480,7 +492,42 @@ static void do_cmd(const queued_cmd *q)
 		case CMD_PLAY:    pr = player_play(err, sizeof err); break;
 		case CMD_PAUSE:   pr = player_pause(err, sizeof err); break;
 		case CMD_NEXT:    pr = player_next(err, sizeof err); break;
-		case CMD_PREV:    pr = player_prev(err, sizeof err); break;
+		case CMD_PREV: {
+			if (q->previous_at_input) {
+				/* Match the UI's instantaneous choice, even if network work made
+				 * this command wait or another restart is still in flight. */
+				if (q->arg >= PLAYER_PREVIOUS_RESTART_MS && q->expected_track_uri[0]) {
+					LightLock_Lock(&s_lock);
+					bool current = s_have_state && !s_track_change_pending &&
+					               strcmp(q->expected_track_uri, s_state.track_uri) == 0;
+					LightLock_Unlock(&s_lock);
+					if (!current)
+						return false;
+				}
+				pr = player_prev(q->arg, &previous_restarted, err, sizeof err);
+				break;
+			}
+			/* A queued skip/context change or pause/play can invalidate the
+			 * preceding position. Reconcile before choosing skip versus restart.
+			 * Also reconcile at a predicted natural end, where the next song may
+			 * already have started since the last poll. */
+			LightLock_Lock(&s_lock);
+			bool refresh = s_track_change_pending || s_position_dirty ||
+			               (s_have_state && s_state.is_playing && s_state.duration_ms > 0 &&
+			                player_estimated_progress(&s_state, s_state_at, osGetTime()) >= s_state.duration_ms);
+			LightLock_Unlock(&s_lock);
+			if (refresh)
+				do_poll();
+			LightLock_Lock(&s_lock);
+			long progress = s_have_state && !s_track_change_pending && !s_position_dirty
+			                    ? player_estimated_progress(&s_state, s_state_at, osGetTime()) : -1;
+			LightLock_Unlock(&s_lock);
+			pr = player_prev(progress, &previous_restarted, err, sizeof err);
+			tl_log("previous: %s at %ldms (%s)",
+			       progress >= PLAYER_PREVIOUS_RESTART_MS ? "restart" : "skip",
+			       progress, player_result_str(pr));
+			break;
+		}
 		case CMD_QUEUE_ITEM:
 			pr = player_queue_item(q->item_uri, err, sizeof err);
 			break;
@@ -494,7 +541,7 @@ static void do_cmd(const queued_cmd *q)
 				if (!current) {
 					tl_log("seek dropped: track changed (wanted=%s)",
 					       q->expected_track_uri);
-					return;
+					return false;
 				}
 			}
 			pr = player_seek(q->arg, err, sizeof err);
@@ -512,13 +559,31 @@ static void do_cmd(const queued_cmd *q)
 				pr = player_play_context_at(q->context_uri, q->position, err,
 				                            sizeof err);
 			break;
-		default: return;
+		default: return false;
 	}
-	if (pr == PLAYER_OK &&
-	    (q->cmd == CMD_NEXT || q->cmd == CMD_PREV ||
-	     q->cmd == CMD_PLAY_CONTEXT)) {
+	bool track_change = pr == PLAYER_OK &&
+	                    (q->cmd == CMD_NEXT || q->cmd == CMD_PLAY_CONTEXT ||
+	                     (q->cmd == CMD_PREV && !previous_restarted));
+	if (pr == PLAYER_OK) {
 		LightLock_Lock(&s_lock);
-		s_track_change_pending = true;
+		if (track_change) {
+			s_track_change_pending = true;
+			s_seek_prediction.pending = false;
+		}
+		if (q->cmd == CMD_PLAY || q->cmd == CMD_PAUSE)
+			s_position_dirty = true;
+		if (s_have_state && !s_track_change_pending &&
+		    (previous_restarted || q->cmd == CMD_SEEK)) {
+			/* Rebase immediately on successful seeks. Subsequent queued Back
+			 * presses see the start, not the old song position while awaiting the
+			 * next poll. Failed seeks leave the estimate untouched. */
+			s_state.progress_ms = previous_restarted ? 0 : q->arg;
+			if (s_state.progress_ms < 0)
+				s_state.progress_ms = 0;
+			s_state_at = osGetTime();
+			player_seek_predict(&s_seek_prediction, &s_state,
+			                    s_state.progress_ms, s_state_at);
+		}
 		LightLock_Unlock(&s_lock);
 	}
 
@@ -531,6 +596,7 @@ static void do_cmd(const queued_cmd *q)
 		tl_log("cmd %d: %s (%s)", (int)q->cmd, player_result_str(pr), err);
 		set_status(player_result_str(pr));
 	}
+	return track_change;
 }
 
 /* Turn an auth_token error into the right remedy.
@@ -732,9 +798,10 @@ static void worker_main(void *arg)
 			s_busy = true;
 			LightLock_Unlock(&s_lock);
 
-			settle_track = settle_track || cmd.cmd == CMD_NEXT ||
-			               cmd.cmd == CMD_PREV || cmd.cmd == CMD_PLAY_CONTEXT;
-			do_cmd(&cmd);
+			/* Always execute the command, even when an earlier one already
+			 * requested track settling (do not short-circuit this call). */
+			bool changed_track = do_cmd(&cmd);
+			settle_track = settle_track || changed_track;
 			did_work = true;
 		}
 
@@ -844,6 +911,10 @@ bool worker_start(char *err, int errlen)
 	s_status_hint[0] = '\0';
 	s_status_detail[0] = '\0';
 	s_have_state = false;
+	s_track_change_pending = false;
+	s_position_dirty = false;
+	s_state_at = 0;
+	s_seek_prediction.pending = false;
 	LightLock_Unlock(&s_lock);
 
 	/* Core 0, the application core.
@@ -936,6 +1007,19 @@ void worker_post(worker_cmd cmd, long arg)
 	q.arg = arg;
 	q.position = -1;
 	enqueue(&q);
+}
+
+bool worker_previous(long progress_ms, const char *track_uri)
+{
+	ensure_lock();
+	queued_cmd q = {0};
+	q.cmd = CMD_PREV;
+	q.arg = progress_ms;
+	q.position = -1;
+	q.previous_at_input = true;
+	if (track_uri)
+		snprintf(q.expected_track_uri, sizeof q.expected_track_uri, "%s", track_uri);
+	return enqueue(&q);
 }
 
 bool worker_seek_track(long position_ms, const char *track_uri)
@@ -2651,6 +2735,7 @@ void worker_get(worker_snapshot *out)
 	out->busy        = s_busy;
 	out->fatal       = s_fatal;
 	out->poll_seq    = s_poll_seq;
+	out->position_pending = s_seek_prediction.pending;
 	snprintf(out->status, sizeof out->status, "%s", s_status);
 	snprintf(out->status_hint, sizeof out->status_hint, "%s", s_status_hint);
 	snprintf(out->status_detail, sizeof out->status_detail, "%s",

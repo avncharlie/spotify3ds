@@ -2,6 +2,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <limits.h>
 
 #include "../net/http.h"
 #include "../testlog.h"
@@ -166,9 +167,68 @@ player_result player_next(char *err, int errlen)
 	return simple_cmd("POST", "/v1/me/player/next", err, errlen);
 }
 
-player_result player_prev(char *err, int errlen)
+long player_estimated_progress(const player_state *state, uint64_t sampled_at,
+                               uint64_t now)
 {
-	return simple_cmd("POST", "/v1/me/player/previous", err, errlen);
+	long limit = state->duration_ms > 0 ? state->duration_ms : LONG_MAX;
+	long progress = state->progress_ms < 0 ? 0 : state->progress_ms;
+	if (progress > limit)
+		progress = limit;
+	uint64_t elapsed = state->is_playing && now >= sampled_at ? now - sampled_at : 0;
+	if (elapsed >= (uint64_t)(limit - progress))
+		return limit;
+	return progress + (long)elapsed;
+}
+
+player_result player_prev(long progress_ms, bool *restarted, char *err, int errlen)
+{
+	bool restart = progress_ms >= PLAYER_PREVIOUS_RESTART_MS;
+	player_result result = restart
+	                           ? player_seek(0, err, errlen)
+	                           : simple_cmd("POST", "/v1/me/player/previous", err, errlen);
+	if (restarted)
+		*restarted = restart && result == PLAYER_OK;
+	return result;
+}
+
+bool player_progress_near(long reported, long expected)
+{
+	if (reported < 0 || expected < 0)
+		return false;
+	unsigned long distance = reported >= expected ? (unsigned long)reported - (unsigned long)expected
+	                                              : (unsigned long)expected - (unsigned long)reported;
+	return distance <= 1000;
+}
+
+void player_seek_predict(player_seek_prediction *prediction,
+                         const player_state *state, long target, uint64_t now)
+{
+	prediction->pending = true;
+	prediction->state = *state;
+	prediction->state.progress_ms = target < 0 ? 0 : target;
+	prediction->accepted_at = now;
+	prediction->sampled_at = now;
+}
+
+void player_seek_reconcile(player_seek_prediction *prediction,
+                           player_state *polled, uint64_t now)
+{
+	if (!prediction->pending)
+		return;
+	long expected = player_estimated_progress(&prediction->state,
+	                                         prediction->sampled_at, now);
+	if (strcmp(prediction->state.track_uri, polled->track_uri) != 0 ||
+	    now < prediction->accepted_at || now - prediction->accepted_at >= 5000 ||
+	    player_progress_near(polled->progress_ms, expected)) {
+		prediction->pending = false;
+		return;
+	}
+	polled->progress_ms = expected;
+	/* Follow authoritative play/pause changes without renewing the overall
+	 * confirmation deadline or continuing to advance a paused prediction. */
+	prediction->state.progress_ms = expected;
+	prediction->state.is_playing = polled->is_playing;
+	prediction->sampled_at = now;
 }
 
 player_result player_queue_item(const char *item_uri, char *err, int errlen)

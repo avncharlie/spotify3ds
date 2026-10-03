@@ -28,6 +28,12 @@ CFLAGS=(-std=c11 -Wall -Wextra -Werror -I"$ROOT/source")
 	"$ROOT/source/net/http.c" \
 	-o "$TMP/test_http"
 
+"$CC" "${CFLAGS[@]}" -fsanitize=address,undefined \
+	"$ROOT/tests/test_player_previous.c" \
+	"$ROOT/source/spotify/player.c" \
+	"$ROOT/source/spotify/json.c" \
+	-o "$TMP/test_player_previous"
+
 "$CC" "${CFLAGS[@]}" \
 	"$ROOT/tests/test_lyrics.c" \
 	"$ROOT/source/spotify/lyrics.c" \
@@ -79,6 +85,7 @@ CFLAGS=(-std=c11 -Wall -Wextra -Werror -I"$ROOT/source")
 "$TMP/test_artcache_shard"
 "$TMP/test_artcache_quality"
 "$TMP/test_http"
+"$TMP/test_player_previous"
 "$TMP/test_lyrics"
 "$TMP/test_tracks_search"
 "$TMP/test_setup_qr"
